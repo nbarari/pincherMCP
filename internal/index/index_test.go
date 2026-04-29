@@ -241,6 +241,80 @@ func TestIndex_AlreadyIndexing(t *testing.T) {
 	idx.mu.Unlock()
 }
 
+func TestIndex_CrossFileGoCALLS_SamePackage(t *testing.T) {
+	idx, _ := newTestIndexer(t)
+	dir := t.TempDir()
+
+	// Two files in the same package; Bar in caller.go calls Foo defined in
+	// callee.go. Per-file resolution can't see Foo when caller.go is being
+	// processed, so the CALLS edge must come from the deferred resolveCalls
+	// pass.
+	writeFile(t, dir, "callee.go", "package mypkg\n\nfunc Foo() {}\n")
+	writeFile(t, dir, "caller.go", "package mypkg\n\nfunc Bar() {\n\tFoo()\n}\n")
+
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+
+	projectID := db.ProjectIDFromPath(dir)
+	hops, err := idx.Trace(context.Background(), projectID, "Bar", "outbound", 3, false)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+
+	found := false
+	for _, h := range hops {
+		if h.Symbol.Name == "Foo" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected cross-file CALLS edge from Bar to Foo, got %d hops", len(hops))
+		for _, h := range hops {
+			t.Logf("  hop: %s (%s)", h.Symbol.Name, h.Symbol.QualifiedName)
+		}
+	}
+}
+
+func TestIndex_CrossFileGoCALLS_CrossPackage(t *testing.T) {
+	idx, store := newTestIndexer(t)
+	dir := t.TempDir()
+
+	// callerpkg.RunIt calls subpkg.Helper() — the dotted ToName "subpkg.Helper"
+	// must resolve to the Helper symbol's qualified name in the deferred pass.
+	// Using a unique caller name (not "main") avoids ambiguity with package
+	// Module symbols when locating the caller.
+	writeFile(t, dir, "go.mod", "module example.com/proj\n\ngo 1.21\n")
+	writeFile(t, dir, "subpkg/helper.go", "package subpkg\n\nfunc Helper() {}\n")
+	writeFile(t, dir, "caller.go", "package callerpkg\n\nimport \"example.com/proj/subpkg\"\n\nfunc RunIt() {\n\tsubpkg.Helper()\n}\n")
+
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+
+	projectID := db.ProjectIDFromPath(dir)
+	hops, err := idx.Trace(context.Background(), projectID, "RunIt", "outbound", 3, false)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+
+	found := false
+	for _, h := range hops {
+		if h.Symbol.Name == "Helper" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected cross-package CALLS edge from RunIt to subpkg.Helper, got %d hops", len(hops))
+		for _, h := range hops {
+			t.Logf("  hop: %s (%s)", h.Symbol.Name, h.Symbol.QualifiedName)
+		}
+	}
+	_ = store
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Trace
 // ─────────────────────────────────────────────────────────────────────────────

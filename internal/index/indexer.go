@@ -140,7 +140,8 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		wg            sync.WaitGroup
 		symBuf        []db.Symbol
 		edgeBuf       []db.Edge
-		pendingImport []ast.ExtractedEdge // deferred: resolved globally after full pass
+		pendingImport []ast.ExtractedEdge // deferred IMPORTS: resolved globally after full pass
+		pendingCalls  []ast.ExtractedEdge // deferred Go CALLS: resolved globally after full pass
 		bufMu         sync.Mutex
 	)
 
@@ -234,9 +235,14 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 
 			// Convert extracted edges to DB edges. IMPORTS edges cross file
 			// boundaries so local nameToID can't resolve them — defer to the
-			// global post-pass below. Everything else resolves per-file.
+			// global post-pass below. Go CALLS that fail per-file resolution
+			// are also deferred so cross-file calls (e.g. db.Open from a
+			// test file) get resolved against the full project symbol table.
+			// Non-Go regex extractors emit noisy CALLS targets — leave the
+			// per-file drop in place to avoid creating false-positive edges.
 			edges := make([]db.Edge, 0, len(result.Edges))
 			deferredImports := make([]ast.ExtractedEdge, 0)
+			deferredCalls := make([]ast.ExtractedEdge, 0)
 			for _, e := range result.Edges {
 				if e.Kind == "IMPORTS" {
 					deferredImports = append(deferredImports, e)
@@ -252,7 +258,10 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				}
 				toID := nameToID[e.ToName]
 				if fromID == "" || toID == "" {
-					continue // unresolved — skip (will be re-resolved on full index)
+					if e.Kind == "CALLS" && lang == "Go" {
+						deferredCalls = append(deferredCalls, e)
+					}
+					continue
 				}
 				edges = append(edges, db.Edge{
 					ProjectID:  projectID,
@@ -267,6 +276,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			symBuf = append(symBuf, syms...)
 			edgeBuf = append(edgeBuf, edges...)
 			pendingImport = append(pendingImport, deferredImports...)
+			pendingCalls = append(pendingCalls, deferredCalls...)
 			// Flush when buffer is large enough
 			if len(symBuf) >= 500 {
 				totalSymbols += len(symBuf)
@@ -298,6 +308,15 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// name not indexed as a Module) simply don't resolve and are dropped,
 	// matching today's behaviour for unresolved edges.
 	if n := idx.resolveImports(projectID, pendingImport); n > 0 {
+		totalEdges += n
+	}
+
+	// Resolve deferred Go CALLS edges against the full symbol table. Without
+	// this pass, cross-file Go calls (e.g. test files calling db.Open) would
+	// be silently dropped because the per-file nameToID only sees one file's
+	// symbols. See LATENT_ISSUES #4 in pincher-followups for the original
+	// observation.
+	if n := idx.resolveCalls(projectID, pendingCalls); n > 0 {
 		totalEdges += n
 	}
 
@@ -655,6 +674,95 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 	}
 	if err := idx.store.BulkUpsertEdges(edges); err != nil {
 		slog.Warn("pincher.imports.upsert.err", "err", err)
+		return 0
+	}
+	return len(edges)
+}
+
+// resolveCalls converts deferred Go CALLS edges into concrete db.Edge rows
+// by matching FromQN and ToName against the project's symbol table. ToName
+// values like "db.Open" resolve via exact qualified-name match; bare
+// identifiers like "Foo" (same-package calls where the extractor emits the
+// short name) fall back to a name-only lookup. Self-edges and duplicates
+// are dropped. Returns the number of edges actually persisted.
+//
+// Only Go CALLS reach this path; non-Go regex extractors emit noisy ToName
+// values that would create false-positive cross-package edges.
+func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) int {
+	if len(pending) == 0 {
+		return 0
+	}
+
+	qnCache := make(map[string]string)
+	lookupQN := func(qn string) string {
+		if qn == "" {
+			return ""
+		}
+		if id, ok := qnCache[qn]; ok {
+			return id
+		}
+		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
+		if err != nil || len(syms) == 0 {
+			qnCache[qn] = ""
+			return ""
+		}
+		qnCache[qn] = syms[0].ID
+		return syms[0].ID
+	}
+
+	nameCache := make(map[string]string)
+	lookupName := func(name string) string {
+		if name == "" {
+			return ""
+		}
+		if id, ok := nameCache[name]; ok {
+			return id
+		}
+		syms, err := idx.store.GetSymbolsByName(projectID, name, 1)
+		if err != nil || len(syms) == 0 {
+			nameCache[name] = ""
+			return ""
+		}
+		nameCache[name] = syms[0].ID
+		return syms[0].ID
+	}
+
+	seen := make(map[string]bool)
+	edges := make([]db.Edge, 0, len(pending))
+	for _, e := range pending {
+		fromID := lookupQN(e.FromQN)
+		if fromID == "" && !strings.Contains(e.FromQN, ".") {
+			fromID = lookupName(e.FromQN)
+		}
+		if fromID == "" {
+			continue
+		}
+		toID := lookupQN(e.ToName)
+		if toID == "" && !strings.Contains(e.ToName, ".") {
+			toID = lookupName(e.ToName)
+		}
+		if toID == "" || fromID == toID {
+			continue
+		}
+		key := fromID + "\x00" + toID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		edges = append(edges, db.Edge{
+			ProjectID:  projectID,
+			FromID:     fromID,
+			ToID:       toID,
+			Kind:       "CALLS",
+			Confidence: e.Confidence,
+		})
+	}
+
+	if len(edges) == 0 {
+		return 0
+	}
+	if err := idx.store.BulkUpsertEdges(edges); err != nil {
+		slog.Warn("pincher.calls.upsert.err", "err", err)
 		return 0
 	}
 	return len(edges)
