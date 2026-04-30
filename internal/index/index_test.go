@@ -467,6 +467,36 @@ func TestWatch_CancelImmediately(t *testing.T) {
 	}
 }
 
+func TestAnyActive(t *testing.T) {
+	idx, _ := newTestIndexer(t)
+
+	if idx.anyActive() {
+		t.Error("anyActive() = true on fresh indexer; want false")
+	}
+
+	idx.mu.Lock()
+	idx.active["proj-a"] = true
+	idx.mu.Unlock()
+	if !idx.anyActive() {
+		t.Error("anyActive() = false with one project active; want true")
+	}
+
+	idx.mu.Lock()
+	idx.active["proj-b"] = true
+	idx.mu.Unlock()
+	if !idx.anyActive() {
+		t.Error("anyActive() = false with two projects active; want true")
+	}
+
+	idx.mu.Lock()
+	delete(idx.active, "proj-a")
+	delete(idx.active, "proj-b")
+	idx.mu.Unlock()
+	if idx.anyActive() {
+		t.Error("anyActive() = true after clearing; want false")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ReadSymbolSource edge cases
 // ─────────────────────────────────────────────────────────────────────────────
