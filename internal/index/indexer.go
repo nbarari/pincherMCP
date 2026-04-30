@@ -333,6 +333,13 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// where most files were skipped via content-hash.
 	_ = idx.store.Optimize()
 
+	// Force the WAL back toward zero before queries resume. Index() is the
+	// natural quiet point — no readers should be waiting on the pre-index
+	// snapshot — so a TRUNCATE checkpoint here keeps the WAL bounded even
+	// under multi-writer storms (multiple Claude Code sessions, MCP server
+	// + manual CLI, etc.).
+	_ = idx.store.CheckpointTruncate()
+
 	return &IndexResult{
 		ProjectID:  projectID,
 		Project:    projectName,

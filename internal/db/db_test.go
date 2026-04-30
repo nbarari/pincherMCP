@@ -2093,6 +2093,40 @@ func TestMigrate_AnalyzeOnFreshDB(t *testing.T) {
 	}
 }
 
+func TestOpen_WALGuardrailsApplied(t *testing.T) {
+	s := newTestStore(t)
+
+	// Both PRAGMAs are session-local in SQLite. With pool=1, this
+	// connection's settings are what subsequent queries observe.
+	var checkpoint int
+	if err := s.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&checkpoint); err != nil {
+		t.Fatalf("read wal_autocheckpoint: %v", err)
+	}
+	if checkpoint != 100 {
+		t.Errorf("wal_autocheckpoint = %d, want 100", checkpoint)
+	}
+
+	var sizeLimit int64
+	if err := s.db.QueryRow("PRAGMA journal_size_limit").Scan(&sizeLimit); err != nil {
+		t.Fatalf("read journal_size_limit: %v", err)
+	}
+	if sizeLimit != 268435456 {
+		t.Errorf("journal_size_limit = %d, want 268435456", sizeLimit)
+	}
+}
+
+func TestCheckpointTruncate_DoesNotError(t *testing.T) {
+	s := newTestStore(t)
+
+	// CheckpointTruncate must succeed on an empty DB. It may also succeed
+	// when WAL is not engaged (running an older binary against a delete-
+	// mode DB) — in that case PRAGMA wal_checkpoint(TRUNCATE) is a quiet
+	// no-op and we still want no error.
+	if err := s.CheckpointTruncate(); err != nil {
+		t.Errorf("CheckpointTruncate on empty DB: %v", err)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DataDir — idempotency
 // ─────────────────────────────────────────────────────────────────────────────

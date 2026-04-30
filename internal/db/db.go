@@ -107,6 +107,22 @@ func Open(dir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// WAL guardrails. Both PRAGMAs are silent no-ops when journal_mode is
+	// not WAL (e.g. an older binary missing the DSN fix), so they're safe
+	// to apply unconditionally on every Open. Once WAL is engaged they
+	// bound the worst case: pincher has been observed accumulating a 70 GB
+	// WAL when 4+ concurrent processes wrote to the same DB without any
+	// process going idle long enough to trigger an auto-checkpoint.
+	//
+	//   wal_autocheckpoint = 100   ← checkpoint at 400 KB instead of the
+	//                                4 MB default; more frequent rollups,
+	//                                bounded WAL under sustained writes.
+	//   journal_size_limit (256MB) ← physically truncate the WAL when it
+	//                                exceeds this limit after a checkpoint.
+	_, _ = db.Exec("PRAGMA wal_autocheckpoint = 100")
+	_, _ = db.Exec("PRAGMA journal_size_limit = 268435456")
+
 	return s, nil
 }
 
@@ -123,6 +139,20 @@ func (s *Store) Close() error { return s.db.Close() }
 // planning as the symbol table grows.
 func (s *Store) Optimize() error {
 	_, err := s.db.Exec("PRAGMA optimize")
+	return err
+}
+
+// CheckpointTruncate runs PRAGMA wal_checkpoint(TRUNCATE), folding the WAL
+// back into the main DB and physically truncating the WAL file. Cheap when
+// the WAL is already small. Call at the tail of a large Index() to force
+// the WAL back toward zero before queries resume — the natural quiet point
+// for a checkpoint with no readers waiting on the older snapshot.
+//
+// Returns an error only if the SQL itself fails; a checkpoint that can't
+// truncate (e.g. a reader is still on the old snapshot) succeeds quietly
+// and the caller can ignore that case.
+func (s *Store) CheckpointTruncate() error {
+	_, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return err
 }
 
