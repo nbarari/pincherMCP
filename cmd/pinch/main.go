@@ -163,6 +163,19 @@ func runIndexCLI(args []string) {
 		}
 	}
 
+	// Refuse known bloat traps: indexing $HOME directly produces millions
+	// of low-signal cache symbols, and SessionStart hook fires from a
+	// non-project directory have no useful index to build. Hook mode
+	// exits 0 silently so the SessionStart hook doesn't fail loudly;
+	// manual mode exits 1 with a clear message.
+	if trap, reason := isBloatTrap(path, *hookMode); trap {
+		fmt.Fprintf(os.Stderr, "pincher: refusing to index %q (%s)\n", path, reason)
+		if *hookMode {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+
 	dir := *dataDir
 	if dir == "" {
 		var err error
