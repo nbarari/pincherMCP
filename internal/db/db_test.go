@@ -92,6 +92,41 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+// TestOpen_DSNPragmasApplied is the regression test for the DSN-syntax bug
+// where modernc/sqlite-style `_pragma=name(value)` was written as the
+// mattn-style `_name=value` and silently ignored. If WAL ever falls back
+// to journal_mode=delete or busy_timeout to 0, queries serialize at the
+// file level and contention cascades — this test fails loud.
+func TestOpen_DSNPragmasApplied(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	checks := []struct {
+		pragma string
+		want   string
+	}{
+		{"journal_mode", "wal"},
+		{"synchronous", "1"},   // NORMAL = 1
+		{"foreign_keys", "1"},  // ON
+		{"busy_timeout", "5000"},
+		{"cache_size", "-65536"},
+	}
+	for _, c := range checks {
+		var got string
+		if err := s.db.QueryRow("PRAGMA " + c.pragma).Scan(&got); err != nil {
+			t.Errorf("PRAGMA %s: %v", c.pragma, err)
+			continue
+		}
+		if !strings.EqualFold(got, c.want) {
+			t.Errorf("PRAGMA %s = %q, want %q", c.pragma, got, c.want)
+		}
+	}
+}
+
 func TestOpen_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	s1, err := Open(dir)
@@ -150,6 +185,14 @@ func TestMigrate_UpgradeFromV1(t *testing.T) {
 	want := 1 + len(schemaMigrations)
 	if version != want {
 		t.Errorf("version = %d, want %d", version, want)
+	}
+
+	// Seed a project so the symbol/symbol_moves inserts below satisfy FK
+	// constraints. Pre-fix, foreign_keys=ON was silently ignored by the
+	// (mis-formed) DSN so these inserts succeeded against an empty projects
+	// table; now that the DSN is correct, FK is properly enforced.
+	if _, err := s.db.Exec(`INSERT INTO projects(id,path,name,indexed_at) VALUES('p','/tmp/p','p',0)`); err != nil {
+		t.Fatalf("seed project: %v", err)
 	}
 
 	// Spot-check: extraction_confidence column must exist (migration 0).

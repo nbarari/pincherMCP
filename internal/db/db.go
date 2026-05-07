@@ -66,6 +66,12 @@ func DataDir() (string, error) {
 }
 
 // Open opens (or creates) the pincher database at dir/pincher.db.
+//
+// modernc.org/sqlite parses query parameters in `_pragma=name(value)` form,
+// not the mattn/go-sqlite3 convention of `_name=value`. The previous DSN
+// used the mattn form, so every PRAGMA was silently ignored — including
+// journal_mode=WAL — leaving every database in default `delete` (rollback
+// journal) mode. The post-Open assertion below catches any future regression.
 func Open(dir string) (*Store, error) {
 	path := filepath.Join(dir, "pincher.db")
 	// WAL mode + normal sync = best throughput/durability tradeoff.
@@ -73,7 +79,7 @@ func Open(dir string) (*Store, error) {
 	// busy_timeout=5000ms prevents immediate failure when a write lock is held
 	// (e.g. watcher auto-index overlapping a manual index call).
 	dsn := fmt.Sprintf(
-		"file:%s?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON&_cache_size=-65536&_busy_timeout=5000",
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=cache_size(-65536)&_pragma=busy_timeout(5000)",
 		path,
 	)
 	db, err := sql.Open("sqlite", dsn)
@@ -82,6 +88,19 @@ func Open(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1) // SQLite is single-writer
 	db.SetMaxIdleConns(1)
+
+	// Defensive: assert WAL actually engaged. A misconfigured DSN would
+	// silently leave the DB in `delete` mode, where readers and writers
+	// serialize at the file level — degrading every query.
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("verify journal_mode: %w", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		db.Close()
+		return nil, fmt.Errorf("journal_mode is %q, expected WAL — DSN parameters may not be applying", mode)
+	}
 
 	s := &Store{db: db, Path: path}
 	if err := s.migrate(); err != nil {
