@@ -5,8 +5,14 @@
 
 # Claude Code — local AI assistant config (machine-specific)
 .claude/
-CLAUDE.md
 .mcp.json
+# CLAUDE.md is intentionally NOT listed here — see #77. The file is
+# committed, reviewed in PRs, and carries real architectural docs
+# (schema invariants, per-corpus FTS5 routing, package layout, etc.).
+# Treating it as docs lets `pincher search` answer questions like
+# "where's the schema migration pattern documented?". The Markdown
+# extractor (post-#32) routes its Section symbols into the docs
+# corpus, so prose tokens don't dilute code search.
 
 # Coverage reports
 cover*.out
