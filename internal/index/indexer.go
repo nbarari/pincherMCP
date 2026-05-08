@@ -86,7 +86,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	projectID := db.ProjectIDFromPath(absPath)
 	projectName := db.ProjectNameFromPath(absPath)
 
-	// Serialise per-project
+	// Serialise per-project (in-process).
 	idx.mu.Lock()
 	if idx.active[projectID] {
 		idx.mu.Unlock()
@@ -102,6 +102,15 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		idx.mu.Unlock()
 		idx.progress.Delete(projectID)
 	}()
+
+	// Serialise per-project (cross-process). Prevents two pincher processes
+	// (e.g. MCP server + manual CLI, or two Claude Code sessions on the
+	// same project) from running heavy index transactions in parallel.
+	releaseLock, err := acquireProjectLock(filepath.Dir(idx.store.Path), projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLock()
 
 	start := time.Now()
 
