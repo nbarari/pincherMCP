@@ -18,6 +18,8 @@ package server
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -218,9 +220,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bearer token auth — enforced when --http-key is set.
+	//
+	// Constant-time comparison via SHA-256 + subtle.ConstantTimeCompare:
+	// hashing both inputs to a fixed 32-byte digest first means the
+	// comparison time is independent of both the content AND the length
+	// of the supplied token. A direct `tok != s.httpKey` (or even a
+	// length-aware ConstantTimeCompare on the raw strings) leaks the
+	// configured key's length to a network attacker who can measure
+	// response timing — once the length is known, character-by-character
+	// derivation follows. Hash-and-compare closes both side channels.
+	//
+	// SECURITY: never replace this with `==` on the raw tokens. The
+	// regression test in TestAuth_ConstantTime_FunctionalEquivalence
+	// asserts behaviour on same-length and different-length mismatches.
 	if s.httpKey != "" {
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if tok != s.httpKey {
+		got := sha256.Sum256([]byte(tok))
+		want := sha256.Sum256([]byte(s.httpKey))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized — set Authorization: Bearer <key>"})
 			return

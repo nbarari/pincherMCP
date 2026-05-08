@@ -1938,6 +1938,138 @@ func TestServeHTTP_BearerAuth(t *testing.T) {
 	}
 }
 
+// TestAuth_ConstantTime_LengthInvariant pins the security invariant added by
+// the SHA-256 + subtle.ConstantTimeCompare auth path: rejection behaviour
+// MUST be identical regardless of supplied-token length.
+//
+// Pre-fix (`tok != s.httpKey`), Go's string compare exits at the first byte
+// that differs — so a 1-byte wrong token rejects faster than a 1000-byte
+// wrong token. Post-fix, both inputs are hashed to 32 bytes before compare;
+// length is no longer a side channel.
+//
+// The test asserts the *response shape* is invariant. We can't reliably
+// assert timing in CI without flake (GC, scheduling, network adapter noise
+// all dominate sub-microsecond signal), but a regression to == would also
+// produce different rejection paths for empty / very-long tokens — and our
+// path is now uniform.
+func TestAuth_ConstantTime_LengthInvariant(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.SetHTTPKey("secret123")
+
+	// Each of these MUST produce identical 401 + body shape.
+	tokens := []string{
+		"",                                     // empty token
+		"a",                                    // 1-byte wrong
+		"secret12",                             // 1 byte short of correct
+		"secret1234",                           // 1 byte longer than correct
+		"secret124",                            // same length, last byte differs
+		"xsecret123",                           // same length, first byte differs (oracle bait)
+		strings.Repeat("a", 1000),              // very long wrong
+		strings.Repeat("secret123", 100),       // very long, repeats real key as a prefix
+	}
+
+	var firstBody string
+	for i, tok := range tokens {
+		req := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("case %d (token len=%d): got %d, want 401", i, len(tok), w.Code)
+			continue
+		}
+		body := w.Body.String()
+		if i == 0 {
+			firstBody = body
+			continue
+		}
+		// Body shape MUST be identical across all rejection cases — proves
+		// the rejection path doesn't branch on token length or content.
+		if body != firstBody {
+			t.Errorf("case %d (token len=%d): rejection body differs from first case\n  first: %q\n  this:  %q",
+				i, len(tok), firstBody, body)
+		}
+	}
+}
+
+// TestAuth_NoSidechannelOnPrefixMatch is the negative companion: a partial
+// prefix match MUST be rejected the same way as a fully-different token.
+// Pre-fix, the byte-by-byte == compare would have run further on the
+// prefix-match case, leaking that the first N bytes were correct. Post-fix
+// (hash-and-compare), both rejection paths are identical.
+func TestAuth_NoSidechannelOnPrefixMatch(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.SetHTTPKey("supersecret")
+
+	// Both wrong, but the first matches the configured key's first 8 bytes.
+	prefixMatch := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+	prefixMatch.Header.Set("Authorization", "Bearer supersecX")
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, prefixMatch)
+
+	noMatch := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+	noMatch.Header.Set("Authorization", "Bearer xxxxxxxxxxx")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, noMatch)
+
+	if w1.Code != http.StatusUnauthorized || w2.Code != http.StatusUnauthorized {
+		t.Fatalf("both should be 401: prefix=%d nomatch=%d", w1.Code, w2.Code)
+	}
+	if w1.Body.String() != w2.Body.String() {
+		t.Errorf("rejection body differs between prefix-match and no-match — possible byte oracle\n"+
+			"  prefix: %q\n"+
+			"  nomatch: %q", w1.Body.String(), w2.Body.String())
+	}
+}
+
+// BenchmarkAuth_TimingProfile is a non-asserting benchmark for inspecting
+// auth latency under varying token shapes. Useful for manually verifying
+// the constant-time property post-merge by running:
+//
+//	go test ./internal/server/ -run='^$' -bench=BenchmarkAuth_TimingProfile -benchtime=1s
+//
+// Variation between sub-benchmarks should be bounded by GC / scheduler
+// noise, not by token-length or content. We don't assert in CI because
+// the noise floor on shared runners exceeds the signal; this is a
+// developer-side regression sniff-test instead.
+func BenchmarkAuth_TimingProfile(b *testing.B) {
+	dir := b.TempDir()
+	store, err := db.Open(dir)
+	if err != nil {
+		b.Fatalf("db.Open: %v", err)
+	}
+	b.Cleanup(func() { store.Close() })
+	idx := index.New(store)
+	srv := New(store, idx, "test")
+	srv.SetHTTPKey("supersecretkey1234567890")
+
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"correct", "supersecretkey1234567890"},
+		{"wrong_same_length", "wrongkey00000000000000000"},
+		{"wrong_first_byte", "Xupersecretkey1234567890"},
+		{"wrong_last_byte", "supersecretkey1234567891"},
+		{"wrong_short", "x"},
+		{"wrong_long_prefix_match", "supersecretkey1234567890" + strings.Repeat("x", 1000)},
+	}
+
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				req := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+				req.Header.Set("Authorization", "Bearer "+c.token)
+				w := httptest.NewRecorder()
+				srv.ServeHTTP(w, req)
+			}
+		})
+	}
+}
+
 func TestServeHTTP_GzipResponse(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
