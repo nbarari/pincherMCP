@@ -591,6 +591,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Step 4.5: idempotent schema-parity repairs. These run on every Open()
+	// and self-skip when the target state is already in place. They exist
+	// for DBs that took divergent migration paths and ended up at the
+	// current schema_version with structural deviations. See #83.
+	if err := s.ensureSymbolIDColumn(); err != nil {
+		return fmt.Errorf("symbol_id column repair: %w", err)
+	}
+
 	// Step 5: on a brand-new DB, seed sqlite_stat1 with one ANALYZE pass.
 	// PRAGMA optimize (Store.Optimize, run after each Index) is a no-op when
 	// sqlite_stat1 doesn't exist, so without this seed the planner has no
@@ -599,6 +607,58 @@ func (s *Store) migrate() error {
 	// will eventually populate stats once enough writes accumulate.
 	if freshDB {
 		_, _ = s.db.Exec(`ANALYZE`)
+	}
+	return nil
+}
+
+// ensureSymbolIDColumn adds the generated `symbol_id` column to the
+// `symbols` table if it's missing — addressing #83.
+//
+// Background: the v6 migration (PR #21, closing #19) added a
+// `symbol_id TEXT GENERATED ALWAYS AS (id) VIRTUAL` column on `symbols`
+// to satisfy FTS5's content-table column-name lookup for the legacy
+// `symbols_fts` vtab (declared with `symbol_id UNINDEXED` first). The
+// per-corpus vtabs added in v9 (#75) inherit the same FTS5 first-column
+// shape and rely on the same column.
+//
+// On most DBs the v6 migration ran cleanly and the column exists. But
+// some long-running daily DBs took the now-defunct "Option A" path
+// (the deleted `fix/db-fts5-column-rename` branch) for the v5→v6 hop,
+// which renamed the FTS5 vtab's first column instead of adding the
+// generated column on `symbols`. Those DBs reach v9+ with no
+// `symbols.symbol_id` column, so any non-MATCH select against the new
+// per-corpus vtabs (e.g. `JOIN ON f.symbol_id=s.id`) fails with
+// `no such column: T.symbol_id`.
+//
+// The repair is idempotent: check `pragma_table_xinfo` for the column,
+// add it if missing, no-op if present. SQLite doesn't support
+// `ADD COLUMN IF NOT EXISTS` natively, so the pragma check is the
+// canonical pattern.
+//
+// We use `pragma_table_xinfo` rather than `pragma_table_info` because
+// the former includes hidden / generated columns. Generated VIRTUAL
+// columns are filtered from the regular `table_info` output, which
+// would cause this repair to "miss" the column on DBs that already
+// have it and try to ALTER again — duplicating the column-name
+// error this helper exists to avoid.
+//
+// Generated columns are virtual (computed on read); adding one is a
+// metadata-only operation that doesn't rewrite existing rows.
+func (s *Store) ensureSymbolIDColumn() error {
+	var present int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_xinfo('symbols') WHERE name = 'symbol_id'`,
+	).Scan(&present)
+	if err != nil {
+		return fmt.Errorf("query pragma_table_xinfo: %w", err)
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := s.db.Exec(
+		`ALTER TABLE symbols ADD COLUMN symbol_id TEXT GENERATED ALWAYS AS (id) VIRTUAL`,
+	); err != nil {
+		return fmt.Errorf("add symbol_id column: %w", err)
 	}
 	return nil
 }

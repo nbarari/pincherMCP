@@ -1,7 +1,10 @@
 package db
 
 import (
+	"database/sql"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 // TestClassifyCorpus_FixedRoutingTable pins every documented routing rule
@@ -397,7 +400,152 @@ func contains(s, sub string) bool {
 	return false
 }
 
-// TestRebuildFTS_RebuildsAllFourVtabs extends the existing rebuild-fts
+// TestEnsureSymbolIDColumn_PresentOnFreshV9 confirms the baseline:
+// a fresh v9 DB has the symbol_id generated column. (Without this
+// guard, a future schema refactor could regress the v6 column-add and
+// we'd never know.)
+func TestEnsureSymbolIDColumn_PresentOnFreshV9(t *testing.T) {
+	s := newTestStore(t)
+	var present int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_xinfo('symbols') WHERE name = 'symbol_id'`,
+	).Scan(&present); err != nil {
+		t.Fatalf("xinfo: %v", err)
+	}
+	if present != 1 {
+		t.Errorf("fresh v9 DB missing symbol_id column (xinfo count=%d)", present)
+	}
+}
+
+// TestEnsureSymbolIDColumn_OptionAReplica is the closer reproducer:
+// build a database that LOOKS like an Option-A-lineage DB by creating
+// the symbols table without the generated column, then verify Open()'s
+// repair pass adds it.
+func TestEnsureSymbolIDColumn_OptionAReplica(t *testing.T) {
+	dir := t.TempDir()
+	dsn := "file:" + dir + "/pincher.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+
+	// Open raw, before pincher's migrate() runs.
+	rawDB, err := openRaw(dsn)
+	if err != nil {
+		t.Fatalf("openRaw: %v", err)
+	}
+	// Build the schema EXCLUDING the symbol_id column on `symbols`.
+	for _, stmt := range []string{
+		`CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT, name TEXT, indexed_at INTEGER, file_count INTEGER, sym_count INTEGER, edge_count INTEGER)`,
+		// symbols table WITHOUT the symbol_id column — this is the
+		// Option-A-lineage shape.
+		`CREATE TABLE symbols (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id),
+			file_path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			qualified_name TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			language TEXT NOT NULL,
+			start_byte INTEGER NOT NULL,
+			end_byte INTEGER NOT NULL,
+			start_line INTEGER NOT NULL,
+			end_line INTEGER NOT NULL,
+			signature TEXT,
+			return_type TEXT,
+			docstring TEXT,
+			parent TEXT,
+			complexity INTEGER,
+			is_exported INTEGER,
+			is_test INTEGER,
+			is_entry_point INTEGER,
+			file_hash TEXT,
+			extraction_confidence REAL DEFAULT 1.0
+		)`,
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		// Mark the DB as already at the current schema_version so
+		// pincher's migrate() doesn't try to apply numbered migrations
+		// (they assume the column already exists from v6). We want to
+		// exercise JUST the repair pass that runs after migrations.
+		// The version must be exactly len(schemaMigrations)+1 (the
+		// current version) — anything higher trips the "newer than
+		// binary" guard before the repair runs.
+		`INSERT INTO schema_version (version) VALUES (9)`,
+	} {
+		if _, err := rawDB.Exec(stmt); err != nil {
+			t.Fatalf("setup stmt %q: %v", stmt, err)
+		}
+	}
+	rawDB.Close()
+
+	// Now Open() through pincher — migrate() should detect the missing
+	// column via pragma_table_xinfo and repair it.
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	// Schema version 999 (newer than this binary's len(schemaMigrations)+1)
+	// would normally trigger the "newer than this binary" guard, but that
+	// guard fires before migrate() runs. So this test path actually does
+	// trigger the guard — let's verify by reading the version. If the
+	// guard fired, Open() would have returned an error already. So either
+	// the guard is permissive enough, or we need to set version to current.
+	// Either way, the repair pass runs after migrations, so even if the
+	// version guard doesn't fire, the repair runs and adds the column.
+
+	var present int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_xinfo('symbols') WHERE name = 'symbol_id'`,
+	).Scan(&present); err != nil {
+		t.Fatalf("post-repair xinfo: %v", err)
+	}
+	if present != 1 {
+		t.Errorf("repair pass did NOT add symbol_id column (present=%d)", present)
+	}
+
+	// User-visible failure mode from #83: JOIN against the per-corpus
+	// FTS5 vtab using `f.symbol_id = s.id`. Pre-repair this errors with
+	// `no such column: T.symbol_id`. Post-repair it succeeds.
+	//
+	// Need to seed a symbol so the FTS5 trigger has something to fire
+	// against, and the per-corpus vtabs need to exist. The latter is
+	// created by the v9 migration body (we marked schema_version=9 in
+	// setup, so v9 DDL never ran in this test). Create them manually
+	// as a one-off so the JOIN has something to query against.
+	if _, err := s.DB().Exec(ftsCorpusSplitDDL); err != nil {
+		t.Fatalf("create per-corpus vtabs: %v", err)
+	}
+	if err := s.UpsertProject(testProject("p1")); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	if err := s.BulkUpsertSymbols([]Symbol{{
+		ID: "s1", ProjectID: "p1", FilePath: "x.go", Name: "ZZRepairFoo",
+		QualifiedName: "pkg.Foo", Kind: "Function", Language: "Go",
+	}}); err != nil {
+		t.Fatalf("BulkUpsertSymbols: %v", err)
+	}
+
+	// The actual #83 reproducer query.
+	rows, err := s.DB().Query(
+		`SELECT s.kind FROM symbols s JOIN symbols_code_fts f ON f.symbol_id=s.id ` +
+			`WHERE symbols_code_fts MATCH 'ZZRepairFoo'`)
+	if err != nil {
+		t.Fatalf("symbol_id JOIN query: %v (this is the #83 user-visible failure)", err)
+	}
+	defer rows.Close()
+	gotRows := 0
+	for rows.Next() {
+		gotRows++
+	}
+	if gotRows == 0 {
+		t.Errorf("symbol_id JOIN returned 0 rows — repair landed but query path still broken")
+	}
+}
+
+// openRaw opens the same SQLite file pincher uses, without running
+// pincher's migrate() — needed by the Option-A-replica test to set up
+// a non-canonical starting state.
+func openRaw(dsn string) (*sql.DB, error) {
+	return sql.Open("sqlite", dsn)
+}
 // coverage: after a rebuild, every vtab (legacy + 3 per-corpus) must
 // contain the right slice of `symbols` again.
 func TestRebuildFTS_RebuildsAllFourVtabs(t *testing.T) {
