@@ -15,7 +15,7 @@
 
 GO ?= go
 PINCHER_BIN ?= ./pincher
-CORPORA := go-project
+CORPORA := go-project k8s-ops node-monorepo
 SNAPSHOT_DIR := testdata/corpus
 SNAPSHOT_DATA := $(SNAPSHOT_DIR)/.snapshot-data
 

@@ -13,25 +13,45 @@ import (
 	"github.com/pincherMCP/pincher/internal/index"
 )
 
-// TestCorpusSnapshot_GoProject pins the snapshot round-trip end-to-end
-// without relying on Make / jq (#33 substrate).
+// corpora lists every pinned corpus the snapshot test should drive.
+// Adding a new corpus = add a directory under testdata/corpus/ + commit
+// a <name>.snapshot.json + add the name here. The Makefile's CORPORA
+// list mirrors this — keep in sync.
+var corpora = []string{
+	"go-project",
+	"k8s-ops",
+	"node-monorepo",
+}
+
+// TestCorpusSnapshot pins the snapshot round-trip end-to-end without
+// relying on Make / jq (#33 substrate).
 //
-// Indexes testdata/corpus/go-project, builds the snapshot via the same code
-// path that --json-summary uses, and asserts byte-identical equality to the
-// committed testdata/corpus/go-project.snapshot.json (modulo the noisy
-// fields stripped by the Makefile pipeline).
+// For each pinned corpus it indexes testdata/corpus/<name>, builds the
+// snapshot via the same code path that --json-summary uses, and asserts
+// byte-identical equality to the committed <name>.snapshot.json (modulo
+// the noisy fields stripped by the Makefile pipeline).
 //
 // Why this test exists alongside `make corpus-test`:
 //   - CI on platforms without jq still gets coverage (Windows particularly).
 //   - Run as part of `go test ./...` — no separate make target needed.
 //   - Regression debug surface: the test failure shows the structural diff
 //     directly, not a "diff -u" on serialized JSON which can be hard to read.
-func TestCorpusSnapshot_GoProject(t *testing.T) {
-	corpusPath, err := filepath.Abs("../../testdata/corpus/go-project")
+func TestCorpusSnapshot(t *testing.T) {
+	for _, name := range corpora {
+		t.Run(name, func(t *testing.T) {
+			runCorpusSnapshot(t, name)
+		})
+	}
+}
+
+func runCorpusSnapshot(t *testing.T, name string) {
+	t.Helper()
+
+	corpusPath, err := filepath.Abs("../../testdata/corpus/" + name)
 	if err != nil {
 		t.Fatalf("abs corpus path: %v", err)
 	}
-	snapshotPath, err := filepath.Abs("../../testdata/corpus/go-project.snapshot.json")
+	snapshotPath, err := filepath.Abs("../../testdata/corpus/" + name + ".snapshot.json")
 	if err != nil {
 		t.Fatalf("abs snapshot path: %v", err)
 	}
@@ -51,10 +71,8 @@ func TestCorpusSnapshot_GoProject(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
-	// Capture the same JSON output emitDsnapshotJSON would emit by
-	// re-implementing it through stdout. Cleanest path is to invoke
-	// emitSnapshotJSON directly — which writes to os.Stdout. We
-	// redirect stdout for the duration of the call.
+	// Capture the same JSON output emitSnapshotJSON would emit by
+	// redirecting stdout for the duration of the call.
 	stdoutOrig := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
@@ -90,11 +108,11 @@ func TestCorpusSnapshot_GoProject(t *testing.T) {
 	actualJSON := canonicalJSON(t, actual)
 	wantJSON := canonicalJSON(t, want)
 	if string(actualJSON) != string(wantJSON) {
-		t.Errorf("snapshot mismatch.\n"+
+		t.Errorf("snapshot mismatch for %q.\n"+
 			"If this change is intentional, run `make corpus-snapshot-update`\n"+
 			"and review the diff in your PR.\n\n"+
 			"--- want\n%s\n\n+++ got\n%s",
-			wantJSON, actualJSON)
+			name, wantJSON, actualJSON)
 	}
 }
 

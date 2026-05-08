@@ -1,0 +1,17 @@
+{
+  "avg_confidence_by_kind": {
+    "Class": 0.85,
+    "Function": 0.85,
+    "Setting": 1
+  },
+  "edge_count_by_kind": {},
+  "files_blocked": 3,
+  "files_indexed": 3,
+  "files_seen": 6,
+  "schema_version": 6,
+  "symbol_count_by_kind": {
+    "Class": 1,
+    "Function": 1,
+    "Setting": 11
+  }
+}

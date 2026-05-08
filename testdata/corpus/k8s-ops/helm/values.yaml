@@ -1,0 +1,10 @@
+image:
+  repository: example/app
+  tag: v1.2.3
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+replicaCount: 3
