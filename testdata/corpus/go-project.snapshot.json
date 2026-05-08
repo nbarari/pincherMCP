@@ -1,0 +1,22 @@
+{
+  "avg_confidence_by_kind": {
+    "Class": 1,
+    "Function": 1,
+    "Method": 1,
+    "Module": 1
+  },
+  "edge_count_by_kind": {
+    "CALLS": 3,
+    "IMPORTS": 1
+  },
+  "files_blocked": 0,
+  "files_indexed": 2,
+  "files_seen": 2,
+  "schema_version": 6,
+  "symbol_count_by_kind": {
+    "Class": 1,
+    "Function": 4,
+    "Method": 1,
+    "Module": 2
+  }
+}

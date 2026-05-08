@@ -1113,6 +1113,29 @@ func (s *Store) GraphStats(projectID string) (symCount, edgeCount int, kindCount
 	return
 }
 
+// AvgConfidenceByKind returns the average extraction_confidence per symbol
+// kind for a project. Used by the corpus-snapshot tooling (#33) to track
+// signal-quality drift over time. Empty map on a project with no symbols.
+func (s *Store) AvgConfidenceByKind(projectID string) (map[string]float64, error) {
+	out := map[string]float64{}
+	rows, err := s.db.Query(
+		`SELECT kind, AVG(extraction_confidence) FROM symbols
+		 WHERE project_id=? GROUP BY kind`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var avg float64
+		if err := rows.Scan(&k, &avg); err != nil {
+			return nil, err
+		}
+		out[k] = avg
+	}
+	return out, rows.Err()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // File hash operations (incremental reindex)
 // ─────────────────────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -146,8 +147,9 @@ func runIndexCLI(args []string) {
 	dataDir := fs.String("data-dir", "", "Override data directory")
 	force := fs.Bool("force", false, "Re-parse all files regardless of content hash")
 	hookMode := fs.Bool("hook", false, "Output Claude Code SessionStart hook JSON instead of plain text")
+	jsonSummary := fs.Bool("json-summary", false, "Emit a structured snapshot JSON to stdout (used by corpus-snapshot tooling, #33)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: pincher index [--force] [--hook] [--data-dir DIR] [PATH]")
+		fmt.Fprintln(os.Stderr, "usage: pincher index [--force] [--hook] [--json-summary] [--data-dir DIR] [PATH]")
 		fmt.Fprintln(os.Stderr, "  Indexes PATH (default: current directory) into the pincher knowledge graph.")
 		fs.PrintDefaults()
 	}
@@ -210,6 +212,11 @@ func runIndexCLI(args []string) {
 	// Count uncommitted changed files via git (best-effort; ignored on error).
 	changedFiles := gitChangedCount(path)
 
+	if *jsonSummary {
+		emitSnapshotJSON(store, result, dir)
+		return
+	}
+
 	if *hookMode {
 		var parts []string
 		parts = append(parts, fmt.Sprintf("project '%s' — %d symbols, %d edges across %d files (%dms, %d unchanged)",
@@ -244,6 +251,53 @@ func runIndexCLI(args []string) {
 			fmt.Printf("  %d file(s) with uncommitted changes\n", changedFiles)
 		}
 	}
+}
+
+// emitSnapshotJSON writes the corpus-snapshot shape (#33) to stdout. Counts
+// come from the canonical sources: GraphStats for symbol/edge totals and
+// per-kind groupings, AvgConfidenceByKind for signal-quality drift, and
+// os.Stat on the DB file for storage cost. Stable JSON ordering via
+// json.Marshal's alphabetical map iteration.
+func emitSnapshotJSON(store *db.Store, result *index.IndexResult, dataDir string) {
+	_, _, kindCounts, edgeKindCounts, _ := store.GraphStats(result.ProjectID)
+	avgConf, _ := store.AvgConfidenceByKind(result.ProjectID)
+
+	// Round confidence to 4 decimals so floating-point noise across runs
+	// (e.g. yaml.v3 producing slightly different mappings on different
+	// platforms) doesn't churn the snapshot diff. Human-readable too.
+	roundedConf := make(map[string]float64, len(avgConf))
+	for k, v := range avgConf {
+		roundedConf[k] = math.Round(v*10000) / 10000
+	}
+
+	dbSizeKB := int64(0)
+	if info, err := os.Stat(store.Path); err == nil {
+		dbSizeKB = info.Size() / 1024
+	}
+
+	summary := map[string]any{
+		"schema_version":         dbSchemaVersion(store),
+		"files_seen":             result.Files + result.Skipped + result.Blocked,
+		"files_indexed":          result.Files + result.Skipped, // Skipped == hash-skip but still "indexed" prior runs
+		"files_blocked":          result.Blocked,
+		"symbol_count_by_kind":   kindCounts,
+		"edge_count_by_kind":     edgeKindCounts,
+		"avg_confidence_by_kind": roundedConf,
+		"db_size_kb":             dbSizeKB,
+		"duration_ms":            result.DurationMS,
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(summary)
+}
+
+// dbSchemaVersion reads the current schema_version. Best-effort; returns 0
+// on any error (the snapshot diff will still surface the discrepancy).
+func dbSchemaVersion(store *db.Store) int {
+	var v int
+	_ = store.DB().QueryRow(`SELECT version FROM schema_version`).Scan(&v)
+	return v
 }
 
 // gitChangedCount returns the number of files with uncommitted changes

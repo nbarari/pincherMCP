@@ -24,9 +24,23 @@ go test ./internal/server/ -v
 
 # View per-function coverage gaps
 go tool cover -func=cover.out | grep -v "100.0%" | sort -t'%' -k1 -n
+
+# Pinned-corpus snapshot tests (#33)
+make corpus-test                  # verify each pinned corpus matches its snapshot
+make corpus-snapshot-update       # regenerate snapshots after intentional changes
 ```
 
 **After any schema change** (adding a column to `db.go`), rebuild `pincher.exe` and reconnect via `/mcp` in Claude Code so the binary serving MCP requests picks up the new schema.
+
+### Pinned-corpus snapshot policy (#33)
+
+`testdata/corpus/<name>/` holds small hand-crafted corpora. `<name>.snapshot.json` is the committed expected output of `pincher index --json-summary <corpus>`. Counts (symbols, edges, files, kinds, average confidence) are exact-match. Noisy fields (`db_size_kb`, `duration_ms`) are stripped before comparison; tolerance bands for those land with the CI integration PR.
+
+Two redundant gates run the diff:
+- `make corpus-test` (uses `jq` — preferred for local dev)
+- `TestCorpusSnapshot_*` in `cmd/pinch/snapshot_test.go` (pure Go — runs as part of `go test ./...`, works on platforms without `jq`)
+
+When future PRs intentionally change extraction behaviour, run `make corpus-snapshot-update`. The resulting JSON diff IS the rationale; review it in the PR. Negative-assertion fields (when added) are NOT auto-regenerated — they require explicit code-review approval to change.
 
 ## Architecture
 

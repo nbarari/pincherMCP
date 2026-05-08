@@ -12,3 +12,9 @@ CLAUDE.md
 cover*.out
 cover*.html
 *.exe~
+
+# Built binary (Makefile target produces ./pincher).
+/pincher
+
+# Corpus-snapshot scratch directory (#33).
+testdata/corpus/.snapshot-data/
