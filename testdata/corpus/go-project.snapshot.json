@@ -12,7 +12,7 @@
   "files_blocked": 0,
   "files_indexed": 2,
   "files_seen": 2,
-  "schema_version": 8,
+  "schema_version": 9,
   "search_relevance": [
     {
       "query": "Open",

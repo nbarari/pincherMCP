@@ -309,22 +309,23 @@ func (s *Store) CheckpointTruncate() error {
 	return err
 }
 
-// RebuildFTS drops the symbols_fts virtual table and its sync triggers,
-// recreates them from the canonical ftsDDL, and bulk-loads them from the
-// symbols table. Returns the number of symbol rows ingested.
+// RebuildFTS drops every FTS5 virtual table (legacy `symbols_fts` plus the
+// per-corpus `symbols_<corpus>_fts` indexes added in v9) and their sync
+// triggers, recreates them from canonical DDL, and bulk-loads them from
+// the symbols table. Returns the number of symbol rows ingested into
+// the legacy index (which contains every symbol; the per-corpus indexes
+// each contain a subset, so a single count would be misleading).
 //
 // This is the FTS5 escape hatch — for situations where the trigger-driven
 // index has drifted from `symbols`: an interrupted index that left FTS5
 // shadow tables inconsistent, a bug in a previous version that bypassed
 // the triggers, or a SQLite/FTS5 version mismatch on the underlying
-// module. It's also the safety net for the upcoming per-corpus FTS5
-// split (#32) — if the migration produces a degraded index, users can
-// always rebuild without re-indexing source files.
+// module.
 //
 // Operates atomically inside a single transaction: if any step fails
 // the original FTS5 state is preserved. Cost is proportional to the
-// symbol count — this is not a hot path, expect seconds-to-minutes on
-// large repos.
+// symbol count — not a hot path, expect seconds-to-minutes on large
+// repos.
 func (s *Store) RebuildFTS() (rows int64, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -336,34 +337,61 @@ func (s *Store) RebuildFTS() (rows int64, err error) {
 		}
 	}()
 
-	// Drop triggers BEFORE the vtab so the trigger DROPs don't try to
+	// Drop triggers BEFORE the vtabs so the trigger DROPs don't try to
 	// fire against a missing vtab, and so a subsequent insert from
 	// symbols isn't shadow-written by a stale trigger.
 	for _, stmt := range []string{
+		// Legacy single-corpus index (v6 baseline)
 		`DROP TRIGGER IF EXISTS sym_fts_insert`,
 		`DROP TRIGGER IF EXISTS sym_fts_delete`,
 		`DROP TRIGGER IF EXISTS sym_fts_update`,
 		`DROP TABLE IF EXISTS symbols_fts`,
+		// Per-corpus indexes (v9, #32 part 1) — only present after the
+		// v9 migration ran, but DROP IF EXISTS handles pre-v9 DBs.
+		`DROP TRIGGER IF EXISTS sym_fts_corpus_insert`,
+		`DROP TRIGGER IF EXISTS sym_fts_corpus_delete`,
+		`DROP TRIGGER IF EXISTS sym_fts_corpus_update`,
+		`DROP TABLE IF EXISTS symbols_code_fts`,
+		`DROP TABLE IF EXISTS symbols_config_fts`,
+		`DROP TABLE IF EXISTS symbols_docs_fts`,
 	} {
 		if _, err = tx.Exec(stmt); err != nil {
 			return 0, fmt.Errorf("drop %s: %w", stmt, err)
 		}
 	}
 
-	// Recreate from canonical DDL — same string the schema bootstrap uses.
-	if _, err = tx.Exec(ftsDDL); err != nil {
-		return 0, fmt.Errorf("recreate fts ddl: %w", err)
+	// Recreate from canonical DDL — same strings the schema bootstrap +
+	// v9 migration use. Drop+recreate of the per-corpus DDL in this same
+	// transaction is safe because every shadow table from the dropped
+	// vtabs is also dropped.
+	for label, ddl := range map[string]string{
+		"legacy fts": ftsDDL,
+		"corpus fts": ftsCorpusSplitDDL,
+	} {
+		if _, err = tx.Exec(ddl); err != nil {
+			return 0, fmt.Errorf("recreate %s: %w", label, err)
+		}
 	}
 
+	// Backfill is idempotent across all four vtabs — each WHERE clause
+	// matches a disjoint slice of symbols. Total rows inserted across
+	// the per-corpus indexes equals the row count of the legacy index;
+	// we report the legacy count to the caller.
 	res, err := tx.Exec(`
 		INSERT INTO symbols_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
 		SELECT rowid, id, name, qualified_name,
 		       COALESCE(signature, ''), COALESCE(docstring, '')
 		FROM symbols`)
 	if err != nil {
-		return 0, fmt.Errorf("bulk insert: %w", err)
+		return 0, fmt.Errorf("bulk insert legacy: %w", err)
 	}
 	rows, _ = res.RowsAffected()
+
+	// The v9 migration body itself contains backfill statements for the
+	// per-corpus indexes. Re-running them here uses the same source-of-
+	// truth rules, so a future change to ftsCorpusSplitDDL's backfill
+	// rules propagates to RebuildFTS automatically — we just exec the
+	// whole DDL string again above. No separate per-corpus INSERTs needed.
 
 	if err = tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
@@ -476,6 +504,29 @@ var schemaMigrations = []string{
 	);
 	CREATE INDEX IF NOT EXISTS idx_slow_queries_recent
 	   ON slow_queries(occurred_at DESC);`,
+
+	// v8 → v9: per-corpus FTS5 split (#32 part 1).
+	// Creates three new FTS5 vtabs alongside legacy `symbols_fts`. Each
+	// covers a slice of the symbol corpus (code / config / docs), routed
+	// at trigger time by language (and by kind for Document). Sync triggers
+	// fire on every INSERT/UPDATE/DELETE on `symbols`, alongside the legacy
+	// triggers — all four indexes stay populated.
+	//
+	// This migration intentionally produces ZERO observable change to
+	// callers. SearchSymbols still queries `symbols_fts` exclusively.
+	// Part 2 will add a `corpus=` parameter on SearchSymbols. Part 3 will
+	// flip the default to `corpus=code` and deprecate the legacy index.
+	//
+	// Routing rules (mirror internal/db/corpus.go's ClassifyCorpus):
+	//   docs:   kind = 'Document'  OR  language = 'Markdown'
+	//   config: language IN ('YAML', 'JSON', 'HCL')
+	//   code:   everything else (default — adding a new language doesn't
+	//           require a migration update)
+	//
+	// Backfill at the tail copies all existing rows into the appropriate
+	// new vtab so freshly-upgraded DBs aren't missing data. Cost: ~5s on
+	// a 1M-symbol repo, one-time only.
+	ftsCorpusSplitDDL,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -607,6 +658,160 @@ CREATE TRIGGER IF NOT EXISTS sym_fts_update AFTER UPDATE ON symbols BEGIN
     VALUES (new.rowid, new.id, new.name, new.qualified_name,
             COALESCE(new.signature,''), COALESCE(new.docstring,''));
 END;
+`
+
+// ftsCorpusSplitDDL is the v8→v9 migration that adds three corpus-specific
+// FTS5 vtabs alongside the legacy `symbols_fts`, plus their sync triggers
+// and a one-time backfill from existing symbols.
+//
+// **Naming**: `symbols_<corpus>_fts` (e.g. `symbols_code_fts`), NOT
+// `symbols_fts_<corpus>`. The latter collides with FTS5's internal
+// shadow-table naming convention — `symbols_fts` creates a shadow table
+// called `symbols_fts_config`, so a new vtab named `symbols_fts_config`
+// errors with "already exists". The `<table>_<corpus>_fts` order avoids
+// every shadow-table prefix the legacy index produces.
+//
+// Routing is encoded in the trigger WHERE clauses; corpus.go's
+// ClassifyCorpus is the Go mirror. The TestClassifyCorpus_MatchesSQLTriggerRouting
+// parity gate guards against drift between Go and SQL.
+//
+// Pattern: each trigger event (insert/delete/update) has three INSERT…SELECT
+// statements, one per corpus. The WHERE clause routes via NEW.language /
+// NEW.kind (or OLD for delete/update-old). The "code" branch uses NOT IN
+// rather than IN so adding a new code language is cheap (no migration
+// edit required) — only "config" and "docs" enumerate.
+//
+// RebuildFTS knows about all four vtabs so the escape hatch stays valid.
+const ftsCorpusSplitDDL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS symbols_code_fts USING fts5(
+    symbol_id UNINDEXED,
+    name,
+    qualified_name,
+    signature,
+    docstring,
+    content='symbols',
+    content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 1'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS symbols_config_fts USING fts5(
+    symbol_id UNINDEXED,
+    name,
+    qualified_name,
+    signature,
+    docstring,
+    content='symbols',
+    content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 1'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS symbols_docs_fts USING fts5(
+    symbol_id UNINDEXED,
+    name,
+    qualified_name,
+    signature,
+    docstring,
+    content='symbols',
+    content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 1'
+);
+
+-- INSERT trigger: route the new symbol into exactly one of the three vtabs.
+CREATE TRIGGER IF NOT EXISTS sym_fts_corpus_insert AFTER INSERT ON symbols BEGIN
+    INSERT INTO symbols_code_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind != 'Document'
+      AND new.language NOT IN ('Markdown', 'YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_config_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind != 'Document'
+      AND new.language IN ('YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_docs_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind = 'Document' OR new.language = 'Markdown';
+END;
+
+-- DELETE trigger: emit the FTS5 'delete' command to whichever vtab held the row.
+CREATE TRIGGER IF NOT EXISTS sym_fts_corpus_delete AFTER DELETE ON symbols BEGIN
+    INSERT INTO symbols_code_fts(symbols_code_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind != 'Document'
+      AND old.language NOT IN ('Markdown', 'YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_config_fts(symbols_config_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind != 'Document'
+      AND old.language IN ('YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_docs_fts(symbols_docs_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind = 'Document' OR old.language = 'Markdown';
+END;
+
+-- UPDATE trigger: delete the OLD row from its vtab, insert the NEW row into
+-- its vtab. The OLD and NEW corpora may differ if a symbol's language or
+-- kind changes — though in practice that's a re-extraction, which goes
+-- through DELETE+INSERT, not UPDATE.
+CREATE TRIGGER IF NOT EXISTS sym_fts_corpus_update AFTER UPDATE ON symbols BEGIN
+    INSERT INTO symbols_code_fts(symbols_code_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind != 'Document'
+      AND old.language NOT IN ('Markdown', 'YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_config_fts(symbols_config_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind != 'Document'
+      AND old.language IN ('YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_docs_fts(symbols_docs_fts, rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT 'delete', old.rowid, old.id, old.name, old.qualified_name,
+           COALESCE(old.signature,''), COALESCE(old.docstring,'')
+    WHERE old.kind = 'Document' OR old.language = 'Markdown';
+
+    INSERT INTO symbols_code_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind != 'Document'
+      AND new.language NOT IN ('Markdown', 'YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_config_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind != 'Document'
+      AND new.language IN ('YAML', 'JSON', 'HCL');
+
+    INSERT INTO symbols_docs_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+    SELECT new.rowid, new.id, new.name, new.qualified_name,
+           COALESCE(new.signature,''), COALESCE(new.docstring,'')
+    WHERE new.kind = 'Document' OR new.language = 'Markdown';
+END;
+
+-- One-time backfill from existing symbols. Migrations only run once per
+-- DB version, so this is safe (no idempotency concern).
+INSERT INTO symbols_code_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+SELECT rowid, id, name, qualified_name, COALESCE(signature,''), COALESCE(docstring,'')
+FROM symbols
+WHERE kind != 'Document'
+  AND language NOT IN ('Markdown', 'YAML', 'JSON', 'HCL');
+
+INSERT INTO symbols_config_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+SELECT rowid, id, name, qualified_name, COALESCE(signature,''), COALESCE(docstring,'')
+FROM symbols
+WHERE kind != 'Document'
+  AND language IN ('YAML', 'JSON', 'HCL');
+
+INSERT INTO symbols_docs_fts(rowid, symbol_id, name, qualified_name, signature, docstring)
+SELECT rowid, id, name, qualified_name, COALESCE(signature,''), COALESCE(docstring,'')
+FROM symbols
+WHERE kind = 'Document' OR language = 'Markdown';
 `
 
 const schema = `

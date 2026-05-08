@@ -8,7 +8,7 @@
   "files_blocked": 3,
   "files_indexed": 3,
   "files_seen": 6,
-  "schema_version": 8,
+  "schema_version": 9,
   "search_relevance": [
     {
       "query": "Greeter",
