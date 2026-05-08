@@ -2,12 +2,13 @@
   "avg_confidence_by_kind": {
     "Class": 0.85,
     "Function": 0.85,
+    "Section": 1,
     "Setting": 1
   },
   "edge_count_by_kind": {},
   "files_blocked": 3,
-  "files_indexed": 3,
-  "files_seen": 6,
+  "files_indexed": 4,
+  "files_seen": 7,
   "schema_version": 9,
   "search_relevance": [
     {
@@ -32,6 +33,7 @@
   "symbol_count_by_kind": {
     "Class": 1,
     "Function": 1,
+    "Section": 4,
     "Setting": 11
   }
 }

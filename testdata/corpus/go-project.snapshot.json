@@ -3,15 +3,16 @@
     "Class": 1,
     "Function": 1,
     "Method": 1,
-    "Module": 1
+    "Module": 1,
+    "Section": 1
   },
   "edge_count_by_kind": {
     "CALLS": 3,
     "IMPORTS": 1
   },
   "files_blocked": 0,
-  "files_indexed": 2,
-  "files_seen": 2,
+  "files_indexed": 3,
+  "files_seen": 3,
   "schema_version": 9,
   "search_relevance": [
     {
@@ -37,6 +38,7 @@
     "Class": 1,
     "Function": 4,
     "Method": 1,
-    "Module": 2
+    "Module": 2,
+    "Section": 2
   }
 }

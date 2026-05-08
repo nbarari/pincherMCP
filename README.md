@@ -343,7 +343,7 @@ Every symbol carries an `extraction_confidence` score surfaced in search results
 
 | Score | Parser | Languages |
 |---|---|---|
-| `1.0` | `go/ast` full AST / `gopkg.in/yaml.v3` Node tree / `mvdan.cc/sh/v3` shell parser / `hashicorp/hcl/v2/hclsyntax` | Go, YAML, JSON, Bash, HCL/Terraform |
+| `1.0` | `go/ast` full AST / `gopkg.in/yaml.v3` Node tree / `mvdan.cc/sh/v3` shell parser / `hashicorp/hcl/v2/hclsyntax` / `yuin/goldmark` CommonMark | Go, YAML, JSON, Bash, HCL/Terraform, Markdown |
 | `0.85` | Stable regex | Python, JavaScript, JSX, TypeScript, TSX, Rust, Java |
 | `0.70` | Approximate regex | Ruby, PHP, C, C++, C#, Kotlin, Swift |
 
@@ -397,6 +397,7 @@ RETURN f.name, f.file_path LIMIT 50
 | YAML / JSON | `gopkg.in/yaml.v3` Node tree | 1.0 | Settings (dotted-path keys, sequence elements, multi-doc-aware) |
 | Bash | `mvdan.cc/sh/v3/syntax` (the `shfmt` parser) | 1.0 | Functions (POSIX `name() { … }` and reserved-word `function name { … }` styles; covers `.sh`, `.bash`) |
 | HCL / Terraform | `github.com/hashicorp/hcl/v2/hclsyntax` (the parser Terraform itself uses) | 1.0 | Resources, DataSources, Modules, Variables, Outputs, Locals (one per assignment), Providers, plus `Block` symbols for nested `lifecycle` / `provisioner` / `connection` / `dynamic` / `backend` / `required_providers` (any depth). `.tfvars` assignments emit `Setting` symbols. Covers `.tf`, `.tfvars`. |
+| Markdown | `github.com/yuin/goldmark` CommonMark | 1.0 | One `Section` symbol per heading. Hierarchical dotted-path qualified name (`intro.getting_started.installation`). Each Section's byte range covers its full body — heading line through just before the next same-or-shallower heading — so `symbol` retrieval round-trips the whole subsection. Covers `.md`, `.markdown`, `.mdx`. |
 | Python | Regex | 0.85 | Functions, Classes, Methods |
 | TypeScript / TSX | Regex | 0.85 | Functions, Classes, Interfaces, Methods |
 | JavaScript / JSX | Regex | 0.85 | Functions, Classes, Methods |
@@ -411,7 +412,7 @@ RETURN f.name, f.file_path LIMIT 50
 
 Files in Scala, Lua, Zig, Elixir, Haskell, Dart, and R are detected as source files but skipped — no extraction yet.
 
-Go, YAML/JSON, Markdown, and HCL/Terraform have full parser-based extraction (confidence 1.0). The other languages use regex patterns. The interface is stable: replace any language's extractor with tree-sitter bindings and confidence jumps to 1.0 with no other changes.
+Go, YAML/JSON, Bash, HCL/Terraform, and Markdown have full parser-based extraction (confidence 1.0). The other languages use regex patterns. The interface is stable: replace any language's extractor with a pure-Go AST library and confidence jumps to 1.0 with no other changes.
 
 YAML/JSON files emit one `Setting` symbol per key with a dotted-path qualified name (e.g., `services.web.image`, `tasks.0.name`). Multi-document YAML uses a `docN` prefix. Each Setting's byte range covers the key plus its full nested value, so retrieving `services.web` returns the entire `web` block — the same shape as retrieving a function body.
 
@@ -714,7 +715,7 @@ The story: more languages and bigger projects without silent degradation.
 - ✅ **Bash extractor** — `mvdan.cc/sh/v3/syntax` (the shfmt parser) at confidence 1.0. ([#38](https://github.com/kwad77/pincherMCP/pull/38))
 - ✅ **HCL/Terraform extractor** — `hashicorp/hcl/v2/hclsyntax` at confidence 1.0; covers `.tf` and `.tfvars`, recurses into nested blocks. ([#67](https://github.com/kwad77/pincherMCP/pull/67))
 - ✅ **Per-corpus FTS5 split** — three new vtabs (`symbols_{code,config,docs}_fts`) populate alongside legacy via v9 triggers. `corpus=` parameter on the `search` tool routes queries to the right index; default is `code`. Legacy `symbols_fts` is reachable via `corpus=all` and deprecated for future removal. ([#32](https://github.com/kwad77/pincherMCP/issues/32))
-- **Markdown extractor** — pure-Go AST extraction via `goldmark`; deferred from #38 pending the per-corpus FTS5 split (avoids BM25 dilution).
+- ✅ **Markdown extractor** — pure-Go AST extraction via `yuin/goldmark` (CommonMark). One `Section` symbol per heading with hierarchical dotted-path qualified name. Routes to the docs corpus via `ClassifyCorpus`. Covers `.md`, `.markdown`, `.mdx`.
 - **Per-symbol confidence scoring** — replaces the per-language constant with composable signals (path patterns, content shape, identifier quality). Subsumes the static blocklist into a tunable score. ([#34](https://github.com/kwad77/pincherMCP/issues/34))
 
 ### v0.3 — Trust + observability
