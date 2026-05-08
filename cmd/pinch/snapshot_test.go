@@ -190,3 +190,72 @@ func TestCorpusSnapshot_MakeTargetIsRunnable(t *testing.T) {
 		t.Errorf("unexpected output:\n%s", out)
 	}
 }
+
+// TestSnapshot_ExtractionFailuresGate_DetectsCollisions is the
+// positive-regression test for the QN-collision snapshot gate. It
+// indexes a corpus, records a synthetic qualified_name_collision via
+// the diagnostic surface (#42), then re-emits the snapshot JSON and
+// asserts the new entry surfaces in `extraction_failures_by_reason`.
+//
+// **Why this matters**: the committed snapshots all show
+// `extraction_failures_by_reason: {}` (zero failures). If a future
+// extractor change introduces a collision pattern in any pinned
+// corpus, the snapshot diff will surface
+// `qualified_name_collision: N` immediately at PR time. This test
+// proves the wiring works — the gate isn't just a serialized field,
+// it's an actual catcher.
+func TestSnapshot_ExtractionFailuresGate_DetectsCollisions(t *testing.T) {
+	corpusPath, err := filepath.Abs("../../testdata/corpus/go-project")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	store, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer store.Close()
+
+	idx := index.New(store)
+	result, err := idx.Index(context.Background(), corpusPath, false)
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+
+	// Inject a fake qualified_name_collision row directly. In real
+	// usage the indexer's recordExtractionHeuristics would write it.
+	if err := store.RecordExtractionFailure(
+		result.ProjectID, "synthetic.go", "Go",
+		"qualified_name_collision",
+		"qualified_name \"x\" appears 3 times (extractor produced duplicates)",
+	); err != nil {
+		t.Fatalf("RecordExtractionFailure: %v", err)
+	}
+
+	stdoutOrig := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	emitSnapshotJSON(store, result, dataDir)
+	w.Close()
+	os.Stdout = stdoutOrig
+
+	var actual map[string]any
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	if err := json.Unmarshal(buf.Bytes(), &actual); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+
+	failures, ok := actual["extraction_failures_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("extraction_failures_by_reason missing or wrong type: %#v", actual["extraction_failures_by_reason"])
+	}
+	got := failures["qualified_name_collision"]
+	if got == nil {
+		t.Fatalf("qualified_name_collision key absent — gate is wired wrong, won't catch future collisions")
+	}
+	if n, _ := got.(float64); n != 1 {
+		t.Errorf("qualified_name_collision = %v, want 1", got)
+	}
+}

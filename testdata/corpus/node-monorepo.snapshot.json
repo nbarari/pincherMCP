@@ -6,6 +6,7 @@
     "Setting": 1
   },
   "edge_count_by_kind": {},
+  "extraction_failures_by_reason": {},
   "files_blocked": 3,
   "files_indexed": 4,
   "files_seen": 7,

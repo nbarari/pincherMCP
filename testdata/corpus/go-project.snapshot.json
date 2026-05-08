@@ -10,6 +10,7 @@
     "CALLS": 3,
     "IMPORTS": 1
   },
+  "extraction_failures_by_reason": {},
   "files_blocked": 0,
   "files_indexed": 3,
   "files_seen": 3,

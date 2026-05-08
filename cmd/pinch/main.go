@@ -312,6 +312,27 @@ func emitSnapshotJSON(store *db.Store, result *index.IndexResult, dataDir string
 		"duration_ms":            result.DurationMS,
 	}
 
+	// extraction_failures_by_reason: per-corpus count of each
+	// extraction_failure reason. The cross-cutting QN-collision gate.
+	//
+	// **Why this is in every snapshot**: every recent extractor bug
+	// (#69, #74, #79, #80) reduced to "extractor produced a duplicate
+	// qualified_name." Each was caught only AFTER nbarari hit it on a
+	// real corpus. With this field in every snapshot, a future variant
+	// of the same bug class fails CI at PR time — the snapshot diff
+	// surfaces the new non-zero count immediately, instead of slipping
+	// through to a daily-DB report weeks later.
+	//
+	// Always emitted (even when the map is empty) so the diff against a
+	// "0 failures" snapshot is unambiguous: `{}` → `{ qualified_name_collision: 1 }`
+	// is a clear regression signal. The map type makes the diff
+	// human-readable in PR review.
+	failures, _ := store.ExtractionFailureCountsByReason(result.ProjectID)
+	if failures == nil {
+		failures = map[string]int{}
+	}
+	summary["extraction_failures_by_reason"] = failures
+
 	// search_relevance: per-corpus curated query → top-hit-kind + qualified
 	// name. The relevance regression gate that prerequisites #32 (per-corpus
 	// FTS5 split). Without this, switching FTS architecture could silently

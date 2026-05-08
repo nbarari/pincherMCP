@@ -633,3 +633,77 @@ func TestRebuildFTS_RebuildsAllFourVtabs(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExtractionFailureCountsByReason — powers the QN-collision snapshot gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestExtractionFailureCountsByReason_Empty pins the no-failures path:
+// a fresh project MUST return an empty map. Under the JSON encoder
+// this becomes `{}`, which is the "healthy" snapshot value committed
+// for every corpus.
+func TestExtractionFailureCountsByReason_Empty(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+
+	got, err := s.ExtractionFailureCountsByReason("p1")
+	if err != nil {
+		t.Fatalf("ExtractionFailureCountsByReason: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map for fresh project, got %v", got)
+	}
+}
+
+// TestExtractionFailureCountsByReason_GroupsByReason exercises the
+// GROUP BY aggregation: multiple failures of the same reason collapse
+// to one count; failures with different reasons appear as separate
+// keys. This is the shape that drives the snapshot diff at PR time.
+func TestExtractionFailureCountsByReason_GroupsByReason(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+
+	// Three QN collisions across three files; one byte_range failure.
+	for _, f := range []string{"a.c", "b.c", "c.c"} {
+		if err := s.RecordExtractionFailure("p1", f, "C", "qualified_name_collision", "details"); err != nil {
+			t.Fatalf("record %s: %v", f, err)
+		}
+	}
+	if err := s.RecordExtractionFailure("p1", "d.go", "Go", "byte_range_negative", "end<=start"); err != nil {
+		t.Fatalf("record byte_range: %v", err)
+	}
+
+	got, err := s.ExtractionFailureCountsByReason("p1")
+	if err != nil {
+		t.Fatalf("ExtractionFailureCountsByReason: %v", err)
+	}
+	if got["qualified_name_collision"] != 3 {
+		t.Errorf("qualified_name_collision count = %d, want 3", got["qualified_name_collision"])
+	}
+	if got["byte_range_negative"] != 1 {
+		t.Errorf("byte_range_negative count = %d, want 1", got["byte_range_negative"])
+	}
+}
+
+// TestExtractionFailureCountsByReason_PerProject — counts MUST scope
+// to the requested project. Gates against a future change that
+// accidentally aggregates across projects.
+func TestExtractionFailureCountsByReason_PerProject(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+	s.UpsertProject(testProject("p2"))
+
+	s.RecordExtractionFailure("p1", "a.c", "C", "qualified_name_collision", "")
+	s.RecordExtractionFailure("p2", "b.c", "C", "qualified_name_collision", "")
+	s.RecordExtractionFailure("p2", "c.c", "C", "qualified_name_collision", "")
+
+	got1, _ := s.ExtractionFailureCountsByReason("p1")
+	got2, _ := s.ExtractionFailureCountsByReason("p2")
+
+	if got1["qualified_name_collision"] != 1 {
+		t.Errorf("p1 count = %d, want 1", got1["qualified_name_collision"])
+	}
+	if got2["qualified_name_collision"] != 2 {
+		t.Errorf("p2 count = %d, want 2", got2["qualified_name_collision"])
+	}
+}

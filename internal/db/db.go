@@ -1811,6 +1811,34 @@ func (s *Store) ClearExtractionFailures(projectID string) error {
 	return err
 }
 
+// ExtractionFailureCountsByReason returns a map of reason → count for the
+// project's extraction_failures rows. Powers the corpus-snapshot QN-
+// collision gate: any non-zero count for `qualified_name_collision` or
+// `byte_range_negative` shows up in the snapshot diff at PR time, so a
+// new variant of issues #69/#74/#79/#80 fails CI loudly.
+//
+// Reads via the reader pool (#51) — pure SELECT + GROUP BY.
+func (s *Store) ExtractionFailureCountsByReason(projectID string) (map[string]int, error) {
+	rows, err := s.ro.Query(
+		`SELECT reason, COUNT(*) FROM extraction_failures WHERE project_id = ? GROUP BY reason`,
+		projectID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var reason string
+		var count int
+		if err := rows.Scan(&reason, &count); err != nil {
+			return nil, err
+		}
+		out[reason] = count
+	}
+	return out, rows.Err()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // slow_queries (#42 part 2)
 // ─────────────────────────────────────────────────────────────────────────────
