@@ -122,6 +122,7 @@ To add a schema change:
 - The generated `symbol_id` column on `symbols` (v6 migration) mirrors `id` to satisfy FTS5's content-lookup column-name parity. Read-only by definition (`GENERATED ALWAYS … VIRTUAL`); never written to directly.
 - `flushBuffers` is called when the in-memory batch reaches 500 symbols or 1000 edges to bound memory during large index runs.
 - Bloat-trap and blocklist are belt-and-suspenders: gocodewalker's `.gitignore` respect is the first line of defense; `IsBloatTrap` refuses obvious dead-end paths before walking; `ShouldSkip` filters individual files (lockfiles, minified, source maps) that ARE committed.
+- Symlink safety relies on `gocodewalker`'s default behavior (v1.5.1, audited #41 item 3): symlinks are reported as paths but NOT recursed into. A `vendor/external -> /etc` symlink inside a project does NOT cause `/etc` to be walked. Pinned by tests in `internal/index/symlink_safety_test.go` so a future gocodewalker upgrade that flips the default to "follow symlinks" surfaces immediately. The bloat-trap separately resolves symlinks in the user-supplied root path via `filepath.EvalSymlinks` so `pincher index ~/myproject-symlink-to-home` is refused.
 
 ## Dependencies
 
