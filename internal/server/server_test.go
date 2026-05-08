@@ -3037,3 +3037,278 @@ func TestRateLimit_TrustProxyOff_XFFSpoofIgnored_Integration(t *testing.T) {
 		t.Fatalf("second request (XFF spoof attempt): got %d, want 429", w.Code)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleFetch — SSRF protection, redirect validation, scheme allow-list
+// (Issue #41 item 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// fetchTestSetup provides the bookkeeping common to every fetch test: a
+// project so mustProject succeeds, and a flag flipped to allow loopback
+// fetches against an httptest.Server (which always binds to 127.0.0.1).
+//
+// Tests that exercise the SSRF gate against unsafe URLs should NOT set
+// fetchAllowLoopback — their goal is to prove that rejection happens in
+// production-shape code paths.
+func fetchTestSetup(t *testing.T) (*Server, *db.Store) {
+	t.Helper()
+	srv, store, _ := newTestServer(t)
+	if err := store.UpsertProject(db.Project{
+		ID: "p", Path: "/p", Name: "proj", IndexedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	return srv, store
+}
+
+func fetchArgs(url string) map[string]any {
+	return map[string]any{"url": url, "project": "p"}
+}
+
+func TestHandleFetch_HappyPath(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	srv.fetchAllowLoopback = true // httptest.Server binds 127.0.0.1
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><title>Hello</title></head><body>world</body></html>`))
+	}))
+	defer upstream.Close()
+
+	result, err := srv.handleFetch(context.Background(), makeReq(fetchArgs(upstream.URL)))
+	if err != nil {
+		t.Fatalf("handleFetch: %v", err)
+	}
+	m := decode(t, result)
+	if m["title"] != "Hello" {
+		t.Errorf("title = %v, want %q", m["title"], "Hello")
+	}
+	if m["stored"] != true {
+		t.Errorf("stored = %v, want true", m["stored"])
+	}
+}
+
+// Negative scheme allow-list — only http/https accepted.
+
+func TestHandleFetch_RejectsFileScheme(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("file:///etc/passwd")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "scheme") || !strings.Contains(body, "not allowed") {
+		t.Errorf("expected scheme rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsGopherScheme(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("gopher://example.com/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "scheme") {
+		t.Errorf("expected gopher scheme rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsDataScheme(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("data:text/plain;base64,SGVsbG8=")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "scheme") {
+		t.Errorf("expected data: scheme rejection, got: %s", body)
+	}
+}
+
+// SSRF gate — block private/loopback/link-local/multicast IPs.
+
+func TestHandleFetch_RejectsCloudMetadataIP(t *testing.T) {
+	// 169.254.169.254 is the AWS / GCP / Azure cloud-metadata endpoint.
+	// Reaching it from a fetch tool is a classic SSRF for cred theft.
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://169.254.169.254/latest/meta-data/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "link-local") {
+		t.Errorf("expected metadata-IP rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsRFC1918_10Net(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://10.0.0.1/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "private network") {
+		t.Errorf("expected RFC1918 10/8 rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsRFC1918_172Net(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://172.17.0.1/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "private network") {
+		t.Errorf("expected RFC1918 172.16/12 rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsRFC1918_192Net(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://192.168.1.1/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "private network") {
+		t.Errorf("expected RFC1918 192.168/16 rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsLoopbackByDefault(t *testing.T) {
+	// fetchAllowLoopback is OFF — production behaviour. 127.0.0.1 MUST
+	// be rejected even though tests can opt in for httptest.Server.
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://127.0.0.1:8080/admin")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "loopback") {
+		t.Errorf("expected loopback rejection (allow-loopback off), got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsIPv6Loopback(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://[::1]:8080/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "loopback") {
+		t.Errorf("expected IPv6 loopback rejection, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RejectsZeroAddress(t *testing.T) {
+	// 0.0.0.0 — unspecified. Hitting it on Linux often resolves to
+	// localhost; treat as SSRF.
+	srv, _ := fetchTestSetup(t)
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs("http://0.0.0.0:8080/")))
+	body := textOf(t, result)
+	if !strings.Contains(body, "blocked") {
+		t.Errorf("expected 0.0.0.0 rejection, got: %s", body)
+	}
+}
+
+// Redirect-target validation — a public initial URL CANNOT redirect into
+// a private/loopback/link-local target.
+
+func TestHandleFetch_RedirectToPrivateBlocked(t *testing.T) {
+	// The upstream server is on httptest (loopback, allowed via flag).
+	// It responds with a 302 redirect to 10.0.0.1, which is RFC1918.
+	// CheckRedirect must reject before any TCP connection to 10.0.0.1.
+	srv, _ := fetchTestSetup(t)
+	srv.fetchAllowLoopback = true
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://10.0.0.1/internal", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs(upstream.URL)))
+	body := textOf(t, result)
+	if !strings.Contains(body, "redirect target blocked") {
+		t.Errorf("expected redirect-block error, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RedirectToMetadataIPBlocked(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	srv.fetchAllowLoopback = true
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/iam/security-credentials/", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs(upstream.URL)))
+	body := textOf(t, result)
+	if !strings.Contains(body, "redirect target blocked") || !strings.Contains(body, "link-local") {
+		t.Errorf("expected metadata-redirect block, got: %s", body)
+	}
+}
+
+func TestHandleFetch_RedirectChainCapped(t *testing.T) {
+	// Cap is maxFetchRedirects = 5. Build a chain that always redirects
+	// back to itself with a counter; expect rejection at hop 6.
+	srv, _ := fetchTestSetup(t)
+	srv.fetchAllowLoopback = true
+
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, upstream.URL+"/next", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	result, _ := srv.handleFetch(context.Background(), makeReq(fetchArgs(upstream.URL)))
+	body := textOf(t, result)
+	if !strings.Contains(body, "too many redirects") {
+		t.Errorf("expected redirect-cap error, got: %s", body)
+	}
+}
+
+// Body-size cap — even if the upstream sends gigabytes, we read only
+// maxFetchBytes and close. Asserts io.LimitReader actually bounds the read
+// rather than trusting Content-Length.
+
+func TestHandleFetch_BodySizeCapEnforced(t *testing.T) {
+	srv, _ := fetchTestSetup(t)
+	srv.fetchAllowLoopback = true
+
+	// Upstream sends maxFetchBytes * 2 bytes. Pincher MUST cap at
+	// maxFetchBytes regardless of how much the upstream tries to stream.
+	// We don't set Content-Length — Go's net/http defaults to chunked
+	// encoding, so the upstream actually streams the full payload and the
+	// only thing bounding the read is io.LimitReader on our side.
+	bigSize := maxFetchBytes * 2
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(make([]byte, bigSize))
+	}))
+	defer upstream.Close()
+
+	result, err := srv.handleFetch(context.Background(), makeReq(fetchArgs(upstream.URL)))
+	if err != nil {
+		t.Fatalf("handleFetch: %v", err)
+	}
+	m := decode(t, result)
+	rawBytes, ok := m["raw_bytes"].(float64)
+	if !ok {
+		t.Fatalf("raw_bytes missing or not numeric: %v", m["raw_bytes"])
+	}
+	if int(rawBytes) > maxFetchBytes {
+		t.Errorf("raw_bytes = %d exceeds cap %d (LimitReader not enforcing)", int(rawBytes), maxFetchBytes)
+	}
+	// And we should have read close to the cap — proves the cap is the
+	// effective bound, not some smaller default that would silently
+	// truncate legitimate large responses below their useful content.
+	if int(rawBytes) < maxFetchBytes/2 {
+		t.Errorf("raw_bytes = %d, expected close to %d (cap)", int(rawBytes), maxFetchBytes)
+	}
+}
+
+// validateFetchURL unit tests — covering the helper directly so we get
+// finer-grained negative assertions than the integration handler tests.
+
+func TestValidateFetchURL_BlocksMulticast(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	if err := srv.validateFetchURL("http://224.0.0.1/"); err == nil ||
+		!strings.Contains(err.Error(), "multicast") {
+		t.Errorf("expected multicast block, got %v", err)
+	}
+}
+
+func TestValidateFetchURL_AllowsPublicIP(t *testing.T) {
+	// 8.8.8.8 (Google DNS) is a public IP — MUST pass validation
+	// purely. We're not actually fetching anything here, just checking
+	// the gate.
+	srv, _, _ := newTestServer(t)
+	if err := srv.validateFetchURL("http://8.8.8.8/"); err != nil {
+		t.Errorf("expected 8.8.8.8 to pass validation, got %v", err)
+	}
+}
+
+func TestValidateFetchURL_NoHost(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	if err := srv.validateFetchURL("http:///path"); err == nil {
+		t.Error("expected error on URL with no host")
+	}
+}
