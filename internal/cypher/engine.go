@@ -39,7 +39,20 @@ type Executor struct {
 }
 
 // Execute parses and executes a Cypher query.
+// Execute parses and executes a Cypher query.
+//
+// SECURITY: rejects empty ProjectID. The runNodeScan / runJoinQuery / runBFS
+// paths only append `project_id=?` to the SQL when ProjectID is non-empty,
+// so a caller forgetting to set it would get cross-project results.
+// Refusing here is defense-in-depth — handleQuery (the MCP entrypoint)
+// already enforces a non-empty project via mustProject, but in-code
+// callers might construct an Executor directly. The constraint is
+// announced explicitly at the boundary so misuse fails loudly instead
+// of silently leaking cross-project data.
 func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
+	if e.ProjectID == "" {
+		return nil, fmt.Errorf("cypher: ProjectID is required (refusing to run cross-project query)")
+	}
 	q, err := parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher parse: %w", err)

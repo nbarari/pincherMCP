@@ -1354,7 +1354,15 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 
 	exec := &cypher.Executor{DB: s.store.DB(), MaxRows: maxRows, ProjectID: projectID}
-	result, err := exec.Execute(ctx, cql)
+	// Defense-in-depth deadline. The Executor honors context cancellation
+	// via QueryContext, but the incoming MCP context may not have one —
+	// so a pathological query (huge LIMIT × complex regex) could run
+	// indefinitely. 10s is well above the documented 99th-percentile
+	// latency (~5ms BFS depth 3) but bounded enough that a runaway
+	// query doesn't tie up the server.
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result, err := exec.Execute(queryCtx, cql)
 	if err != nil {
 		return errResult(fmt.Sprintf("cypher error: %v", err)), nil
 	}

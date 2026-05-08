@@ -78,7 +78,7 @@ func insertEdge(t *testing.T, db *sql.DB, fromID, toID, kind string) {
 
 func exec(t *testing.T, db *sql.DB, query string) *Result {
 	t.Helper()
-	e := &Executor{DB: db, MaxRows: 100}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), query)
 	if err != nil {
 		t.Fatalf("Execute(%q): %v", query, err)
@@ -431,7 +431,7 @@ func TestCypherPropToCol(t *testing.T) {
 func TestEmptyQuery(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), "")
 	if err != nil {
 		t.Fatalf("empty query should not error: %v", err)
@@ -602,7 +602,7 @@ func TestMaxRows_Capping(t *testing.T) {
 		insertSym(t, db, string(rune('a'+i)), string(rune('A'+i)), "Function", "Go")
 	}
 	// MaxRows = 0 → should use default (not panic or return 0)
-	e := &Executor{DB: db, MaxRows: 0}
+	e := &Executor{DB: db, MaxRows: 0, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), "MATCH (f:Function) RETURN f.name")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -616,7 +616,7 @@ func TestMaxRows_ExceedsCap(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
 	// MaxRows > 10000 → should be capped at 10000
-	e := &Executor{DB: db, MaxRows: 99999}
+	e := &Executor{DB: db, MaxRows: 99999, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), "MATCH (f:Function) RETURN f.name")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -664,7 +664,7 @@ func TestNodeScan_CountWithAlias(t *testing.T) {
 func TestExecute_InvalidCypher(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
-	e := &Executor{DB: db, MaxRows: 100}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
 	// Malformed Cypher that can't be executed (bad WHERE with no op)
 	_, err := e.Execute(context.Background(), "MATCH (f:Function) WHERE RETURN f.name")
 	// Execute may or may not error — just verify no panic
@@ -787,7 +787,7 @@ func TestRunJoinQuery_WithEdge(t *testing.T) {
 func TestExecute_EmptyQuery(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
-	e := &Executor{DB: db, MaxRows: 100}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
 	_, err := e.Execute(context.Background(), "")
 	// Empty query should return an error
 	if err == nil {
@@ -799,7 +799,7 @@ func TestExecute_EmptyQuery(t *testing.T) {
 func TestExecute_NoMatchClause(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
-	e := &Executor{DB: db, MaxRows: 100}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
 	_, err := e.Execute(context.Background(), "RETURN 1")
 	_ = err // just verify no panic
 }
@@ -937,7 +937,7 @@ func TestMatchesConditions_GteLte(t *testing.T) {
 func TestExecute_ParseError(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
-	e := &Executor{DB: db, MaxRows: 100}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
 	// A deeply malformed query that cannot be parsed
 	_, err := e.Execute(context.Background(), "MATCH ((( GARBLED NONSENSE )))!!!!!")
 	// Either an error or empty result is acceptable — we just need the parse
@@ -1318,10 +1318,12 @@ func TestProjectID_NodeScan_Isolation(t *testing.T) {
 		t.Errorf("proj2 node scan: want 1 result, got %d", r.Total)
 	}
 
-	// Without ProjectID, both are visible
-	r = exec(t, db, "MATCH (n:Function) WHERE n.name='SharedName' RETURN n.name")
-	if r.Total != 2 {
-		t.Errorf("unscoped node scan: want 2 results, got %d", r.Total)
+	// SECURITY: empty ProjectID is REFUSED by Execute() (#41 item 5).
+	// In-code callers that forget to scope a query fail loud rather than
+	// returning cross-project data.
+	unscoped := &Executor{DB: db, MaxRows: 100}
+	if _, err := unscoped.Execute(context.Background(), "MATCH (n:Function) WHERE n.name='SharedName' RETURN n.name"); err == nil {
+		t.Error("expected unscoped node scan to be rejected, got nil error")
 	}
 }
 
@@ -1349,10 +1351,14 @@ func TestProjectID_JoinQuery_Isolation(t *testing.T) {
 		t.Errorf("proj2 join: want 1 row, got %d", r.Total)
 	}
 
-	// Unscoped sees all
-	r = exec(t, db, "MATCH (a)-[:CALLS]->(b) RETURN a.name, b.name")
-	if r.Total != 2 {
-		t.Errorf("unscoped join: want 2 rows, got %d", r.Total)
+	// SECURITY: an unscoped Executor (empty ProjectID) is REFUSED by Execute()
+	// rather than silently returning cross-project data. This is the
+	// defense-in-depth gate added in #41 item 5: in-code callers that
+	// forget to set ProjectID fail loud instead of leaking rows from
+	// other projects.
+	unscoped := &Executor{DB: db, MaxRows: 100}
+	if _, err := unscoped.Execute(context.Background(), "MATCH (a)-[:CALLS]->(b) RETURN a.name, b.name"); err == nil {
+		t.Error("expected unscoped Executor to be rejected, got nil error")
 	}
 }
 
@@ -1405,7 +1411,7 @@ func TestProjectID_BFS_MaxRows(t *testing.T) {
 	}
 
 	// With maxRows=2, BFS CTE should return at most 2 results
-	e := &Executor{DB: db, MaxRows: 2}
+	e := &Executor{DB: db, MaxRows: 2, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), "MATCH (a)-[:CALLS*1..5]->(b) WHERE a.name='Root' RETURN b.name")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -1432,7 +1438,7 @@ func TestRunBFS_GotoDoneEarlyExit(t *testing.T) {
 	}
 
 	// With MaxRows=1, the outer loop should exit after len(resultRows) >= 2
-	e := &Executor{DB: db, MaxRows: 1}
+	e := &Executor{DB: db, MaxRows: 1, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(),
 		"MATCH (a:Function)-[:CALLS*1..1]->(b) RETURN a.name, b.name LIMIT 10")
 	if err != nil {
@@ -1449,7 +1455,7 @@ func TestRunBFS_GotoDoneEarlyExit(t *testing.T) {
 
 func TestExecute_ParseError_ReturnsError(t *testing.T) {
 	db := newTestDB(t)
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	// IN is not a supported operator — should return an error via parseConditions
 	_, err := e.Execute(context.Background(), `MATCH (n:Function) WHERE n.name IN ["Foo"] RETURN n.name`)
 	if err == nil {
@@ -1460,7 +1466,7 @@ func TestExecute_ParseError_ReturnsError(t *testing.T) {
 func TestExecute_InvalidRegex_ReturnsError(t *testing.T) {
 	db := newTestDB(t)
 	insertSym(t, db, "f1", "Foo", "Function", "Go")
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	// (*invalid is not a valid regex — should fail at parse time (B2 fix)
 	_, err := e.Execute(context.Background(), `MATCH (n:Function) WHERE n.name =~ "(*invalid" RETURN n.name`)
 	if err == nil {
@@ -1472,7 +1478,7 @@ func TestExecute_ValidRegex_Matches(t *testing.T) {
 	db := newTestDB(t)
 	insertSym(t, db, "f1", "FooBar", "Function", "Go")
 	insertSym(t, db, "f2", "BazQux", "Function", "Go")
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(), `MATCH (n:Function) WHERE n.name =~ "Foo.*" RETURN n.name`)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -1484,7 +1490,7 @@ func TestExecute_ValidRegex_Matches(t *testing.T) {
 
 func TestExecute_UnsupportedOperator_ReturnsError(t *testing.T) {
 	db := newTestDB(t)
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	// LIKE is not a supported operator in our Cypher subset
 	_, err := e.Execute(context.Background(), `MATCH (n:Function) WHERE n.name LIKE "Foo%" RETURN n.name`)
 	if err == nil {
@@ -1504,7 +1510,7 @@ func TestRunJoinQuery_ToKindFilter(t *testing.T) {
 	insertSym(t, db, "jq-mt", "Callee", "Method", "Go")
 	insertEdge(t, db, "jq-fn", "jq-mt", "CALLS")
 
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(),
 		"MATCH (a:Function)-[:CALLS]->(b:Method) RETURN a.name, b.name")
 	if err != nil {
@@ -1523,7 +1529,7 @@ func TestRunJoinQuery_NamedEdgeVar(t *testing.T) {
 	insertEdge(t, db, "ev-a", "ev-b", "CALLS")
 
 	// r is a named edge variable — should populate r.kind and r.confidence
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(),
 		"MATCH (a)-[r:CALLS]->(b) RETURN a.name, r.kind, b.name")
 	if err != nil {
@@ -1548,7 +1554,7 @@ func TestRunJoinQuery_UnpushedCondition(t *testing.T) {
 	insertEdge(t, db, "up-a", "up-b", "CALLS")
 
 	// Regex condition can't be pushed to SQL — goes to unpushed list
-	e := &Executor{DB: db}
+	e := &Executor{DB: db, ProjectID: "proj1"}
 	r, err := e.Execute(context.Background(),
 		`MATCH (a)-[:CALLS]->(b) WHERE a.name =~ "Sou.*" RETURN a.name, b.name`)
 	if err != nil {
@@ -1556,5 +1562,146 @@ func TestRunJoinQuery_UnpushedCondition(t *testing.T) {
 	}
 	if r.Total == 0 {
 		t.Error("expected 1 join result with regex unpushed condition")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Security: SQL-injection probes, project-scope enforcement, deadline
+// (#41 item 5)
+//
+// The audit found the SQL injection surface well-defended:
+//   - cypherPropToCol is an allowlist (returns "" for unknown properties,
+//     and callers skip when col == "")
+//   - Every value is bound via ? placeholders, never concatenated
+//   - project_id is bound when set, refused when empty (post-fix)
+//
+// These tests pin those defenses so a future refactor can't silently
+// regress to string concatenation or relax the project-scope gate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCypherSecurity_StringValueIsBound_NoSQLInjection(t *testing.T) {
+	// A name field containing classic SQL-injection payloads MUST be
+	// treated as a literal value (no match), NOT executed as SQL. This
+	// proves the WHERE name=? path uses a bound parameter rather than
+	// string concatenation.
+	db := newTestDB(t)
+	defer db.Close()
+	insertSym(t, db, "ok-1", "RealFn", "Function", "Go")
+
+	payloads := []string{
+		`'; DROP TABLE symbols; --`,
+		`' OR '1'='1`,
+		`' OR 1=1 --`,
+		`"; DELETE FROM symbols; --`,
+		`\'; DROP TABLE symbols; --`,
+	}
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
+	for _, payload := range payloads {
+		query := `MATCH (f:Function) WHERE f.name = "` + payload + `" RETURN f.name`
+		r, err := e.Execute(context.Background(), query)
+		if err != nil {
+			// A parse error is acceptable (the payload contains characters
+			// the lexer can't tokenize) — the bug we're guarding against
+			// is "executes as SQL injection," not "rejects malformed input."
+			continue
+		}
+		// If parse succeeded, the result MUST be empty: the payload is
+		// just a string that doesn't match any real symbol.
+		if r.Total != 0 {
+			t.Errorf("payload %q: got %d rows, want 0 (potential SQL injection)", payload, r.Total)
+		}
+	}
+
+	// And — the symbols table MUST still exist after every probe.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count); err != nil {
+		t.Fatalf("symbols table gone after injection probes: %v", err)
+	}
+	if count == 0 {
+		t.Error("symbols table is empty — injection probe deleted rows")
+	}
+}
+
+func TestCypherSecurity_UnknownPropertyIsIgnored(t *testing.T) {
+	// Cypher property names must pass the cypherPropToCol allowlist.
+	// An unknown property name is silently skipped at the SQL push-down
+	// stage — never concatenated as a column name into the SQL. Pinning
+	// this ensures a future refactor can't accidentally turn an unknown
+	// property into a runtime SQL error or, worse, an injected column.
+	db := newTestDB(t)
+	defer db.Close()
+	insertSym(t, db, "p1-fn", "RealFn", "Function", "Go")
+
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
+	// `weird_property` is not in cypherPropToCol's allowlist — this
+	// WHERE clause cannot push down.
+	r, err := e.Execute(context.Background(),
+		`MATCH (f:Function) WHERE f.weird_property = "anything" RETURN f.name`)
+	if err != nil {
+		t.Fatalf("query with unknown property errored: %v", err)
+	}
+	// Behaviour: query runs, unpushed condition is evaluated in Go,
+	// no rows match because RealFn has no weird_property field. The
+	// key invariant is "no SQL syntax error, no injected column."
+	if r.Total > 0 {
+		t.Errorf("unknown property matched %d rows, want 0", r.Total)
+	}
+}
+
+func TestCypherSecurity_EmptyProjectIDRefused(t *testing.T) {
+	// The defense-in-depth gate: an Executor without ProjectID set
+	// is refused with a clear error. Direct callers that forget to
+	// scope a query fail loud rather than leak cross-project data.
+	db := newTestDB(t)
+	defer db.Close()
+	insertSym(t, db, "p1", "Anything", "Function", "Go")
+
+	e := &Executor{DB: db, MaxRows: 100} // ProjectID intentionally empty
+	_, err := e.Execute(context.Background(), "MATCH (f:Function) RETURN f.name")
+	if err == nil {
+		t.Fatal("expected error from Execute with empty ProjectID, got nil")
+	}
+	if !strings.Contains(err.Error(), "ProjectID is required") {
+		t.Errorf("error message %q should mention 'ProjectID is required'", err.Error())
+	}
+}
+
+func TestCypherSecurity_DeadlineEnforced(t *testing.T) {
+	// QueryContext respects context cancellation. A caller passing an
+	// already-expired context MUST get a timeout error rather than
+	// blocking the goroutine. handleQuery wraps every Cypher query in
+	// a 10s WithTimeout — this test pins that the Executor honors it.
+	db := newTestDB(t)
+	defer db.Close()
+	insertSym(t, db, "x", "X", "Function", "Go")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately expired
+
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
+	_, err := e.Execute(ctx, "MATCH (f:Function) RETURN f.name")
+	if err == nil {
+		t.Error("expected context-cancelled error, got nil")
+	}
+}
+
+func TestCypherSecurity_BadRegexErrorClean(t *testing.T) {
+	// An invalid regex pattern MUST produce a clean error at parse time,
+	// NOT a panic during row evaluation. The parser pre-compiles =~
+	// patterns so the failure mode is bounded.
+	db := newTestDB(t)
+	defer db.Close()
+	insertSym(t, db, "p1", "Foo", "Function", "Go")
+
+	e := &Executor{DB: db, MaxRows: 100, ProjectID: "proj1"}
+	_, err := e.Execute(context.Background(),
+		`MATCH (f:Function) WHERE f.name =~ "(*invalid" RETURN f.name`)
+	if err == nil {
+		t.Error("expected error for invalid regex, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "regex") && !strings.Contains(err.Error(), "invalid") {
+		// We don't pin the exact wording, but the error must hint at the
+		// cause so callers can debug.
+		t.Logf("regex error: %v (acceptable; mentions parse details)", err)
 	}
 }
