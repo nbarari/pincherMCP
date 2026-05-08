@@ -458,3 +458,155 @@ func keysOf(m map[string]ExtractedSymbol) []string {
 	}
 	return out
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #71 — Ansible-aware edges (RENDERS slice)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestExtractYAML_AnsibleRendersEdge_FullForm pins the canonical
+// Ansible task syntax: `- name: ...` with `template:` action whose
+// args include `src: foo.j2`. This is the most common form in real
+// Ansible role tasks.
+func TestExtractYAML_AnsibleRendersEdge_FullForm(t *testing.T) {
+	src := `---
+- name: render dhcp config
+  template:
+    src: dhcp.j2
+    dest: /etc/dnsmasq/dhcp.conf
+- name: render firewall rules
+  template:
+    src: firewall.j2
+    dest: /etc/firewall.conf
+`
+	r := Extract([]byte(src), "YAML", "roles/network/tasks/main.yml")
+	if r == nil {
+		t.Fatal("nil result")
+	}
+
+	got := edgesByName(r.Edges, "RENDERS")
+	for _, want := range []string{"dhcp.j2", "firewall.j2"} {
+		if !contains(got, want) {
+			t.Errorf("missing RENDERS edge to %q; got: %v", want, got)
+		}
+	}
+}
+
+// TestExtractYAML_AnsibleRendersEdge_FlowForm pins the short form:
+// `template: { src: foo.j2 }` inline. Ansible accepts both.
+func TestExtractYAML_AnsibleRendersEdge_FlowForm(t *testing.T) {
+	src := `---
+- template: { src: bar.j2, dest: /etc/bar.conf }
+`
+	r := Extract([]byte(src), "YAML", "roles/x/tasks/main.yml")
+	got := edgesByName(r.Edges, "RENDERS")
+	if !contains(got, "bar.j2") {
+		t.Errorf("missing RENDERS edge to bar.j2; got: %v", got)
+	}
+}
+
+// TestExtractYAML_AnsibleRendersEdge_PathFiltering — the edge MUST NOT
+// fire for files outside Ansible-canonical paths. A Helm values.yaml
+// or k8s manifest with a `template:` key has different semantics and
+// shouldn't produce a render edge.
+func TestExtractYAML_AnsibleRendersEdge_PathFiltering(t *testing.T) {
+	src := `---
+spec:
+  template:
+    src: not-ansible.j2
+`
+	for _, path := range []string{
+		"helm/values.yaml",
+		"k8s/deployment.yaml",
+		"compose.yml",
+	} {
+		t.Run(path, func(t *testing.T) {
+			r := Extract([]byte(src), "YAML", path)
+			renders := edgesByName(r.Edges, "RENDERS")
+			if len(renders) != 0 {
+				t.Errorf("non-Ansible path %q produced RENDERS edges %v", path, renders)
+			}
+		})
+	}
+}
+
+// TestExtractYAML_AnsibleRendersEdge_PlaybookPath asserts top-level
+// playbook conventions (site.yml, deploy.yml, playbook*.yml) trigger
+// the Ansible scan. A playbook with a `template:` task should still
+// produce the edge.
+func TestExtractYAML_AnsibleRendersEdge_PlaybookPath(t *testing.T) {
+	src := `---
+- hosts: all
+  tasks:
+    - template:
+        src: motd.j2
+        dest: /etc/motd
+`
+	for _, path := range []string{
+		"site.yml",
+		"deploy.yaml",
+		"playbook-prod.yml",
+	} {
+		t.Run(path, func(t *testing.T) {
+			r := Extract([]byte(src), "YAML", path)
+			got := edgesByName(r.Edges, "RENDERS")
+			if !contains(got, "motd.j2") {
+				t.Errorf("playbook path %q didn't trigger Ansible scan; got edges: %v", path, got)
+			}
+		})
+	}
+}
+
+// TestExtractYAML_AnsibleRendersEdge_FromModule — the edge's FromQN
+// MUST be the file's module (basename minus extension). The indexer's
+// resolution pass keys on that to attach the edge to the right symbol.
+func TestExtractYAML_AnsibleRendersEdge_FromModule(t *testing.T) {
+	src := `---
+- template:
+    src: foo.j2
+`
+	r := Extract([]byte(src), "YAML", "roles/web/tasks/main.yml")
+	if len(r.Edges) == 0 {
+		t.Fatal("no edges")
+	}
+	got := r.Edges[0].FromQN
+	if got != "main" {
+		t.Errorf("FromQN = %q, want %q (module name)", got, "main")
+	}
+}
+
+// TestExtractYAML_AnsibleRendersEdge_NoTemplateNoEdge confirms the
+// presence of an Ansible-canonical path alone doesn't fire spurious
+// edges — only actual `template:` tasks do.
+func TestExtractYAML_AnsibleRendersEdge_NoTemplateNoEdge(t *testing.T) {
+	src := `---
+- name: install package
+  apt:
+    name: nginx
+    state: present
+`
+	r := Extract([]byte(src), "YAML", "roles/x/tasks/main.yml")
+	renders := edgesByName(r.Edges, "RENDERS")
+	if len(renders) != 0 {
+		t.Errorf("non-template task in Ansible path emitted RENDERS edges: %v", renders)
+	}
+}
+
+// edgesByName extracts ToName values from edges of a given kind.
+func edgesByName(edges []ExtractedEdge, kind string) []string {
+	out := make([]string, 0, len(edges))
+	for _, e := range edges {
+		if e.Kind == kind {
+			out = append(out, e.ToName)
+		}
+	}
+	return out
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

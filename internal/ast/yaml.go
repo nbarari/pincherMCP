@@ -184,7 +184,123 @@ func extractYAML(source []byte, relPath string) *FileResult {
 		})
 	}
 
+	// Ansible-aware edge extraction (#71 phase 1, RENDERS slice). Only
+	// fires when the file path matches Ansible task / handler / playbook
+	// conventions — keeps non-Ansible YAML untouched (Helm values, k8s
+	// manifests, generic config, etc.). Emits RENDERS edges for
+	// `template: src: foo.j2` patterns.
+	if isAnsibleTaskFile(relPath) {
+		result.Edges = append(result.Edges, ansibleRenderEdges(docs, result.Module)...)
+	}
+
 	return result
+}
+
+// isAnsibleTaskFile returns true when `relPath` looks like an Ansible
+// task or handler file. The detection is intentionally conservative:
+// only files inside `tasks/` or `handlers/` directories qualify, plus
+// top-level playbook conventions (`site.yml`, `deploy.yml`, `playbook*`).
+//
+// Why path-based: YAML doesn't carry schema; a generic Helm or k8s
+// manifest could also have `template:` keys with completely different
+// semantics. Restricting to Ansible-canonical paths avoids false
+// positives without requiring deeper YAML schema introspection.
+func isAnsibleTaskFile(relPath string) bool {
+	clean := strings.ReplaceAll(relPath, "\\", "/")
+	if strings.Contains(clean, "/tasks/") || strings.Contains(clean, "/handlers/") {
+		return true
+	}
+	base := filepath.Base(clean)
+	switch base {
+	case "site.yml", "site.yaml",
+		"deploy.yml", "deploy.yaml",
+		"playbook.yml", "playbook.yaml":
+		return true
+	}
+	if strings.HasPrefix(base, "playbook") &&
+		(strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")) {
+		return true
+	}
+	return false
+}
+
+// ansibleRenderEdges scans a parsed YAML document for the Ansible
+// `template:` action pattern and emits a RENDERS edge for each one.
+//
+// The patterns it recognises:
+//
+//	# Full keyed form
+//	- name: render config
+//	  template:
+//	    src: foo.j2
+//	    dest: /etc/foo.conf
+//
+//	# Short flow form
+//	- template: { src: bar.j2 }
+//
+// Edges:
+//
+//	{ FromQN: <module>, ToName: <src-value>, Kind: "RENDERS", Confidence: 1.0 }
+//
+// The edge target is the literal `src` value as it appears in the YAML —
+// the indexer's edge-resolution pass will look it up against the global
+// symbol table. Confidence 1.0: this is YAML-parser-backed, not regex.
+func ansibleRenderEdges(docs []*yaml.Node, module string) []ExtractedEdge {
+	var edges []ExtractedEdge
+
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.MappingNode:
+			// Each mapping pair is (key, value). When key.Value == "template"
+			// and value is a mapping with `src:`, emit an edge.
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				k := n.Content[i]
+				v := n.Content[i+1]
+				if k != nil && k.Kind == yaml.ScalarNode && k.Value == "template" {
+					if src := ansibleFindSrc(v); src != "" {
+						edges = append(edges, ExtractedEdge{
+							FromQN:     module,
+							ToName:     src,
+							Kind:       "RENDERS",
+							Confidence: 1.0,
+						})
+					}
+				}
+				walk(v)
+			}
+		}
+	}
+	for _, d := range docs {
+		walk(d)
+	}
+	return edges
+}
+
+// ansibleFindSrc extracts the `src` value from an Ansible task's
+// `template:` argument node. Handles both full mapping form
+// (`{ src: foo.j2, dest: ... }`) and flow form (`src: foo.j2` inline).
+// Returns "" if not present or not a scalar string.
+func ansibleFindSrc(n *yaml.Node) string {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		v := n.Content[i+1]
+		if k != nil && k.Kind == yaml.ScalarNode && k.Value == "src" &&
+			v != nil && v.Kind == yaml.ScalarNode {
+			return v.Value
+		}
+	}
+	return ""
 }
 
 // yamlSanitizeKey replaces characters that would collide with the dotted-path
