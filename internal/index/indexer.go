@@ -190,6 +190,19 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				return
 			}
 
+			// Hash-skip above guarantees we only reach here when this file's
+			// content actually changed (or force=true). Clear the file's
+			// existing symbols and edges before re-emitting, so symbols
+			// removed in the new version don't linger as orphans (they'd
+			// otherwise return stale snippets for queries that name them, or
+			// haunt trace/changes blast-radius). DeleteSymbolsForFile cascades
+			// to edges with either endpoint in this file. Errors are logged
+			// but non-fatal — emitting fresh symbols on top of a stale set is
+			// less wrong than emitting nothing at all.
+			if delErr := idx.store.DeleteSymbolsForFile(projectID, relPath); delErr != nil {
+				slog.Warn("pincher.index.delete_stale.err", "err", delErr, "file", relPath)
+			}
+
 			// Three-layer extraction in one pass
 			result := ast.ExtractWithModule(content, lang, relPath, modulePath)
 			if result == nil || len(result.Symbols) == 0 {
