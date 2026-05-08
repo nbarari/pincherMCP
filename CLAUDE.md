@@ -34,6 +34,11 @@ make bench                        # run all benchmarks at default (1s) per-bench
 make bench BENCHTIME=3s           # full run for stable numbers
 make bench-index                  # only internal/index benchmarks
 make bench-server                 # only internal/server benchmarks
+
+# Diagnostic surface (#42)
+pincher doctor                    # human-readable health report
+pincher doctor --json             # structured output for CI / dashboard
+pincher --slow-query-ms 50        # opt-in slow-query capture (also via env)
 ```
 
 **After any schema change** (adding a column to `db.go`), rebuild `pincher.exe` and reconnect via `/mcp` in Claude Code so the binary serving MCP requests picks up the new schema.
