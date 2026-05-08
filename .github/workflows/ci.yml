@@ -57,3 +57,46 @@ jobs:
           TOTAL=$(go tool cover -func=cover.out | grep "^total" | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"
           awk -v t="$TOTAL" 'BEGIN { if (t+0 < 83) { print "Coverage " t "% is below 83% threshold"; exit 1 } }'
+
+  # corpus-snapshot exercises the Makefile-driven snapshot pipeline (#33).
+  # The Go-test gate (TestCorpusSnapshot_* in cmd/pinch/snapshot_test.go)
+  # already covers the same diff logic, but this job additionally proves
+  # the make + jq pipeline stays runnable — catches Makefile breakage and
+  # missing dependencies that the Go tests would silently miss.
+  #
+  # ubuntu-only: jq isn't available by default on the Windows runner, and
+  # the Go-side test gate covers cross-platform behaviour anyway.
+  corpus-snapshot:
+    name: Corpus snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify pinned-corpus snapshots
+        run: make corpus-test
+
+  # bench-smoke runs the #50 benchmark harness at a small benchtime to
+  # prove benchmarks stay COMPILABLE and don't crash. This isn't a perf-
+  # regression gate (CI runner variance makes wall-clock numbers flaky)
+  # — it's a "the harness still works" gate. A future PR can add baseline
+  # + tolerance bands once we settle on a runner profile.
+  bench-smoke:
+    name: Benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run benchmarks (smoke only — 100ms per benchmark)
+        run: |
+          go test ./internal/index/ -run=^$ -bench=. -benchtime=100ms -benchmem
+          go test ./internal/server/ -run=^$ -bench=. -benchtime=100ms -benchmem
