@@ -494,7 +494,10 @@ func ReadSymbolSourceCapped(projectRoot string, sym db.Symbol, maxBytes int) (st
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Watch starts a background goroutine that re-indexes projects when files change.
-// Uses polling with adaptive interval (2s for active projects, 30s otherwise).
+// Uses polling with a 5-second ticker. If any Index() is currently running
+// (from any source — Watch itself, the CLI, or another caller), the tick is
+// skipped: the per-project mutex would just queue the work and waste CPU
+// during catch-up.
 func (idx *Indexer) Watch(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -504,6 +507,12 @@ func (idx *Indexer) Watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if idx.anyActive() {
+				// Skip; let in-flight indexing finish. Avoids the
+				// continuous-tick / 53%-CPU catch-up storm we hit
+				// during long initial indexes.
+				continue
+			}
 			projects, err := idx.store.ListProjects()
 			if err != nil {
 				continue
@@ -520,6 +529,14 @@ func (idx *Indexer) Watch(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// anyActive reports whether any Index() call is currently in flight on
+// this Indexer. Used by Watch to back off during catch-up.
+func (idx *Indexer) anyActive() bool {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return len(idx.active) > 0
 }
 
 // hasChanges checks if any source file in the project has changed since last index.
