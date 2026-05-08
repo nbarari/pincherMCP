@@ -2977,6 +2977,157 @@ func TestClientIP_IPv6_RemoteAddr(t *testing.T) {
 	}
 }
 
+// XFF parsing robustness — #41 item 6.
+
+func TestClientIP_XFF_StripsPort_IPv4(t *testing.T) {
+	// Some proxies emit "1.2.3.4:8080" in X-Forwarded-For. Without
+	// stripping the port, ephemeral source ports would each get their
+	// own rate-limit bucket — bypassing per-IP throttling.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": "1.2.3.4:8080",
+	})
+	got := srv.clientIP(r)
+	if got != "1.2.3.4" {
+		t.Errorf("XFF=1.2.3.4:8080: got %q, want %q (port should be stripped)", got, "1.2.3.4")
+	}
+}
+
+func TestClientIP_XFF_StripsPort_IPv6Bracketed(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": "[2001:db8::1]:8080",
+	})
+	got := srv.clientIP(r)
+	if got != "2001:db8::1" {
+		t.Errorf("XFF=[2001:db8::1]:8080: got %q, want %q (port should be stripped)", got, "2001:db8::1")
+	}
+}
+
+func TestClientIP_XFF_BareIPv6_NoPort(t *testing.T) {
+	// A bare IPv6 (no brackets, no port) MUST pass through unchanged —
+	// SplitHostPort fails on it, we fall through to the raw value.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": "2001:db8::1",
+	})
+	got := srv.clientIP(r)
+	if got != "2001:db8::1" {
+		t.Errorf("XFF=bare IPv6: got %q, want %q", got, "2001:db8::1")
+	}
+}
+
+func TestClientIP_XFF_EmptyLeftmost_FallsThrough(t *testing.T) {
+	// Pathological XFF: leading comma → empty leftmost entry. The
+	// safe behaviour is to fall through to RemoteAddr rather than
+	// use the empty string as a rate-limit key.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": ", 1.2.3.4",
+	})
+	got := srv.clientIP(r)
+	if got != "10.0.0.1" {
+		t.Errorf("empty-leftmost XFF: got %q, want %q (RemoteAddr fallback)", got, "10.0.0.1")
+	}
+}
+
+func TestClientIP_XFF_OnlyComma_FallsThrough(t *testing.T) {
+	// XFF that's just a comma → both sides empty → fall through.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": ",",
+	})
+	got := srv.clientIP(r)
+	if got != "10.0.0.1" {
+		t.Errorf("comma-only XFF: got %q, want %q (RemoteAddr fallback)", got, "10.0.0.1")
+	}
+}
+
+func TestClientIP_XFF_LeadingWhitespaceAndPort(t *testing.T) {
+	// Combined: leading whitespace + port. TrimSpace runs first, then
+	// SplitHostPort handles the port.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	r := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+		"X-Forwarded-For": "   1.2.3.4:9999  , 5.6.7.8",
+	})
+	got := srv.clientIP(r)
+	if got != "1.2.3.4" {
+		t.Errorf("padded XFF entry: got %q, want %q", got, "1.2.3.4")
+	}
+}
+
+func TestClientIP_XFF_PathologicalValueSafelyContained(t *testing.T) {
+	// Audit finding: Go's net/http validates header values at WIRE parse
+	// time (a real request with \r\n in a header value is rejected
+	// before reaching our handler) but NOT at Header.Set time. So an
+	// in-process call could in theory shove anything through.
+	//
+	// Defense: even if a pathological value reached clientIP, the
+	// returned string is only used as a sync.Map key for rate-limiting.
+	// No SQL, no HTML, no echo back to the client. So the blast radius
+	// is "rate-limit fragmentation," not exploitation.
+	//
+	// This test pins both halves of that:
+	//   1. clientIP doesn't panic on values containing CR/LF/null bytes.
+	//   2. The pathological value flows through allowRequest the same
+	//      way a normal IP does — no special branch breaks.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	srv.SetRateLimit(2, time.Minute)
+
+	pathologicals := []string{
+		"1.2.3.4\r\nX-Admin: true",
+		"1.2.3.4\x00",
+		"1.2.3.4 with spaces and tabs\t",
+		strings.Repeat("a", 1024), // very long
+	}
+	for _, payload := range pathologicals {
+		req := reqWithRemoteAndHeaders("10.0.0.1:5555", map[string]string{
+			"X-Forwarded-For": payload,
+		})
+		// MUST NOT panic.
+		key := srv.clientIP(req)
+		if key == "" {
+			t.Errorf("clientIP returned empty for payload %q", payload)
+		}
+		// MUST be usable as a rate-limit key (allowRequest doesn't
+		// branch or panic on the input shape).
+		if !srv.allowRequest(key) && !srv.allowRequest(key) {
+			// Two "allowed" calls within the limit MUST both succeed —
+			// we just want allowRequest to return true at least once
+			// without crashing. The double-call is for the limit=2 cap
+			// to absorb either return.
+			t.Errorf("allowRequest panicked or returned false for both calls on %q", payload)
+		}
+	}
+}
+
+func TestClientIP_XFF_MultipleHeaders_FirstWins(t *testing.T) {
+	// RFC allows the same header to appear multiple times. Header.Get
+	// returns ONLY the first instance. Document this behaviour: a
+	// trusted proxy chain that comma-appends to a single XFF header
+	// is handled correctly; a proxy that ADDs a second header would
+	// have its value ignored. This is the right behaviour given the
+	// trust model — the first proxy in our chain is the one we trust.
+	srv, _, _ := newTestServer(t)
+	srv.SetTrustProxy(true)
+	req := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+	req.RemoteAddr = "10.0.0.1:5555"
+	// Header.Add appends rather than replacing, producing two values.
+	req.Header.Add("X-Forwarded-For", "1.2.3.4")
+	req.Header.Add("X-Forwarded-For", "9.9.9.9")
+	got := srv.clientIP(req)
+	if got != "1.2.3.4" {
+		t.Errorf("multiple XFF headers: got %q, want first %q", got, "1.2.3.4")
+	}
+}
+
 func TestRateLimit_TrustProxyOn_PerXFFClient_Integration(t *testing.T) {
 	// End-to-end integration: same TCP source (the proxy), different
 	// XFF values (different real clients). Rate limit MUST apply per

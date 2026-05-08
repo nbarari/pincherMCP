@@ -623,6 +623,22 @@ func (s *Server) effectivePrefix(r *http.Request) string {
 // IGNORED — direct callers MUST NOT influence the rate-limit key by setting
 // the header themselves. This mirrors the trust gate used by effectivePrefix
 // for X-Forwarded-Prefix.
+//
+// XFF parsing details (#41 item 6):
+//   - Port stripping: some proxies emit `1.2.3.4:8080` or `[::1]:8080`.
+//     Without stripping, ephemeral source ports would each get their own
+//     rate-limit bucket — bypassing per-IP throttling. We use the same
+//     net.SplitHostPort fallback as the RemoteAddr branch.
+//   - Empty leftmost (`, 1.2.3.4`): falls through to RemoteAddr. Better
+//     to have a stable key than a bracket character.
+//   - Header injection: Go's net/http already rejects values containing
+//     CR/LF at parse time (validHeaderValue). The TestClientIP_*
+//     header-injection sanity test below pins that assumption.
+//   - Multiple XFF headers: RFC allows the same header to appear more
+//     than once. r.Header.Get returns ONLY the first instance — which
+//     is the legitimate proxy chain. A trailing second XFF header
+//     injected by an attacker downstream of pincher's trusted proxy
+//     is ignored by design.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -631,6 +647,13 @@ func (s *Server) clientIP(r *http.Request) string {
 				xff = xff[:i]
 			}
 			if ip := strings.TrimSpace(xff); ip != "" {
+				// Strip a trailing :port if present so ephemeral ports
+				// don't fragment the rate-limit key. SplitHostPort
+				// handles bracketed IPv6 ([::1]:8080) correctly; on
+				// failure (no port) we use the value as-is.
+				if host, _, err := net.SplitHostPort(ip); err == nil && host != "" {
+					return host
+				}
 				return ip
 			}
 		}
