@@ -688,26 +688,61 @@ Measured on this codebase (13 files, 618 symbols, 5,785 edges, Windows 11, SQLit
 
 ## <img src="docs/assets/crab.png" width="22" alt=""/> Roadmap
 
-### v0.2 — Parser accuracy
-- **Tree-sitter bindings for Python, TypeScript, Rust, Java** — extraction confidence 1.0 for the four most common non-Go languages; no CGO required via the pure-Go tree-sitter port
-- **IMPORTS edge kind** — track `import` / `require` / `use` statements as graph edges, enabling cross-file dependency queries
-- **Struct field extraction** — index individual fields/properties as symbols (currently only types/classes are indexed, not their members)
+Each release tier names a theme and the issues that close it. Issue numbers link the roadmap to actionable work — track progress at https://github.com/kwad77/pincherMCP/issues.
 
-### v0.3 — Multi-project & team use
-- **Cross-project `query`** — today `query` is scoped to one project; v0.3 adds an optional `project=*` mode matching `search`
-- **Shared index server mode** — one `pincher --http :8080` instance with a `--data-dir` on a network path serves a whole team; MCP clients point at it instead of running a local binary
-- **Webhook-triggered re-index** — `POST /v1/reindex` endpoint callable from git post-receive hooks; replaces the 2s polling loop for server deployments
+### v0.2 — Index quality at scale
 
-### v0.4 — Enterprise
-- **PostgreSQL backend** — drop-in replacement for the SQLite store; enables multi-writer, HA deployments; query API unchanged
-- **Role-based access** — per-project API keys with read/write/admin scopes
-- **Audit log** — append-only log of every tool call with caller identity, timestamp, and latency
+The story: more languages and bigger projects without silent degradation.
+
+- **Pinned-corpus snapshot tests** — committed corpora (`testdata/corpus/*`) with expected JSON snapshots; CI gate catches extraction drift on every PR. ([#33](https://github.com/kwad77/pincherMCP/issues/33))
+- **Markdown + Bash extractors** — pure-Go AST extraction (goldmark, mvdan.cc/sh/v3); replaces tree-sitter as the path to confidence 1.0 for non-Go languages. ([#38](https://github.com/kwad77/pincherMCP/pull/38))
+- **Per-corpus FTS5 split** — separate inverted indexes for code / config / docs so prose tokens can't dilute BM25 ranking on code identifiers. ([#32](https://github.com/kwad77/pincherMCP/issues/32))
+- **Per-symbol confidence scoring** — replaces the per-language constant with composable signals (path patterns, content shape, identifier quality). Subsumes the static blocklist into a tunable score. ([#34](https://github.com/kwad77/pincherMCP/issues/34))
+
+### v0.3 — Trust + observability
+
+The story: pincher's behaviour should be predictable, audit-tested, and self-debuggable.
+
+- ✅ **Security audit** — every documented security claim has a regression test. Six items: timing-safe auth, fetch SSRF block-list, dashboard XSS escaping + CSP, Cypher project-scope gate, X-Forwarded-For parsing robustness, walker symlink-non-recursion. ([#41](https://github.com/kwad77/pincherMCP/issues/41) — closed)
+- **Diagnostic surface** — `pincher doctor` subcommand, `extraction_failures` table with sanity heuristics, slow-query log. Makes drift visible without dropping into SQLite. ([#42](https://github.com/kwad77/pincherMCP/issues/42))
+- **Dashboard CSP tightening** — externalize inline JS to `/v1/dashboard.js`, drop `'unsafe-inline'` from `script-src`. Follow-up to PR #46.
+
+### v0.4 — Performance under load
+
+The story: the documented latency claims should hold under multi-tool concurrent use, on million-symbol corpora.
+
+- **Pinned-corpus benchmarks** — per-corpus baseline `bench.txt`; CI gates `>20%` latency or `>30%` allocation regressions. ([#50](https://github.com/kwad77/pincherMCP/issues/50))
+- **Reader pool** — split read connections from the single-writer to use SQLite WAL's concurrent-read capability. ~3× expected throughput on read-heavy workloads. ([#51](https://github.com/kwad77/pincherMCP/issues/51))
+- **Incremental edge resolution** — `resolveCalls` / `resolveImports` only re-process files touched in the current `Index()` run. Filed when bench data justifies it.
+
+### v0.5 — Polish + extension surface
+
+The story: things that require pincher to be production-ready first.
+
+- **Struct field extraction** — index fields/properties as symbols (currently only types/classes); blocked on per-corpus FTS so the field count doesn't dilute code search.
+- **Cross-project `query`** — explicit opt-in via `corpus=all` parameter. PR #47 made empty `ProjectID` an error; cross-project becomes the explicit non-default.
+- **Webhook-triggered re-index** — `POST /v1/reindex` for git post-receive hooks; replaces 2s polling for server deployments.
+- **VS Code extension** — auto-configures MCP, hover-to-inspect command.
+- **`.pincher.yml` per-project config** — per-project blocklist additions, confidence threshold defaults, primary-language hint.
 
 ### v1.0 — Stable API
-- API stability guarantee: no breaking changes to tool schemas or symbol ID format
-- Pre-built binaries for Linux/macOS/Windows (amd64 + arm64) on every release
-- Docker image: `ghcr.io/kwad77/pinchermcp:latest` (~12MB scratch image)
-- VS Code extension: auto-configures MCP JSON, adds hover-to-inspect command
+
+The story: explicit "you can build against pincher without churn fear."
+
+- **Tool schemas frozen** — no breaking changes to the 15 tool I/O shapes after this.
+- **Symbol-ID format frozen** — `{file_path}::{qualified_name}#{kind}` is the contract.
+- **HTTP REST surface frozen** — `POST /v1/{tool}`, basepath/trust-proxy/rate-limit/SSRF behaviours all locked.
+- **`SECURITY.md`** — documented threat model, what pincher promises, what it doesn't, how to report findings.
+- **Pre-built binaries** ✅ — every release publishes Linux/macOS/Windows (amd64 + arm64). Already shipping; promoted to a guarantee.
+- **Docker image** ✅ — `ghcr.io/kwad77/pinchermcp:latest`. Already shipping; promoted to a guarantee.
+
+### Out-of-scope until real demand
+
+These were on the original roadmap but the threshold for shipping them is "a real user has asked for this and we have a concrete deployment we can validate against":
+
+- **PostgreSQL backend** — meaningful scope; SQLite + cross-process lockfile + WAL covers the documented single-team-per-machine case.
+- **Role-based access** beyond auth + SSRF — the highest-priority bits (timing-safe auth, request validation) are in. Multi-tenant ACL is a different product.
+- **Shared multi-user server mode** — PR #29's lockfile is the pre-work; full multi-user mode requires real deployment validation we haven't done.
 
 ---
 
