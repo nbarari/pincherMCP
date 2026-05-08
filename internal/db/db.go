@@ -153,28 +153,102 @@ func Open(dir string) (*Store, error) {
 	// that starved checkpoints in the first place.
 	_, _ = db.Exec("PRAGMA journal_size_limit = 268435456")
 
-	// Reader pool — opened AFTER migrations + WAL guardrail so the file
-	// it opens against is fully initialised. The `mode=ro` parameter
-	// makes SQLite enforce read-only at the file level, so even a routing
-	// bug that sends a write through s.ro fails fast with
-	// "attempt to write a readonly database" instead of silently
-	// corrupting state. busy_timeout matches the writer so contention
-	// retries align. cache_size is half the writer's; readers don't
-	// need as much page-cache because they don't dirty pages.
+	if err := s.attachReaderPool(path, DefaultReaderPoolSize); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// DefaultReaderPoolSize is the reader pool's MaxOpenConns when not
+// overridden via OpenWithReaders / SetReaderPoolSize. 4 connections
+// covers the typical concurrent-tool-call burst (search + symbol +
+// query + trace simultaneously) without exhausting file descriptors
+// on small VMs.
+const DefaultReaderPoolSize = 4
+
+// MaxReaderPoolSize caps any caller-requested reader pool size.
+// Above ~32 connections, SQLite's per-process locking machinery costs
+// more than the parallelism gains; documented limit so a user passing
+// --db-readers 1000 doesn't shoot themselves in the foot.
+const MaxReaderPoolSize = 32
+
+// MinReaderPoolSize prevents callers from disabling the reader pool
+// entirely (which would defeat the point of having one). 1 means
+// reads serialize but still go through the RO path so SQLite's
+// mode=ro defense still applies; useful in resource-constrained
+// environments where the extra connections matter.
+const MinReaderPoolSize = 1
+
+// OpenWithReaders is Open + a tunable reader pool size. Callers that
+// want non-default parallelism (server deployments fronted by HTTP,
+// perf-tuned configurations) use this; everyone else uses Open.
+//
+// readers is clamped to [MinReaderPoolSize, MaxReaderPoolSize]. Pass 0
+// to use DefaultReaderPoolSize.
+func OpenWithReaders(dir string, readers int) (*Store, error) {
+	s, err := Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if readers != DefaultReaderPoolSize {
+		if err := s.SetReaderPoolSize(readers); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// SetReaderPoolSize re-tunes the reader pool's MaxOpenConns at runtime.
+// readers is clamped to [MinReaderPoolSize, MaxReaderPoolSize]; pass 0
+// to fall back to DefaultReaderPoolSize.
+func (s *Store) SetReaderPoolSize(readers int) error {
+	if readers <= 0 {
+		readers = DefaultReaderPoolSize
+	}
+	if readers < MinReaderPoolSize {
+		readers = MinReaderPoolSize
+	}
+	if readers > MaxReaderPoolSize {
+		readers = MaxReaderPoolSize
+	}
+	if s.ro == nil {
+		return fmt.Errorf("reader pool not initialised")
+	}
+	s.ro.SetMaxOpenConns(readers)
+	s.ro.SetMaxIdleConns(readers)
+	return nil
+}
+
+// attachReaderPool opens the reader-side pool against `path`. Internal
+// helper so Open + OpenWithReaders share the same DSN + RO discipline.
+//
+// `mode=ro` makes SQLite enforce read-only at the file level, so even a
+// routing bug that sends a write through s.ro fails fast with "attempt
+// to write a readonly database" instead of silently corrupting state.
+// busy_timeout matches the writer so contention retries align.
+// cache_size is half the writer's; readers don't need as much page-cache
+// because they don't dirty pages.
+func (s *Store) attachReaderPool(path string, readers int) error {
+	if readers < MinReaderPoolSize {
+		readers = MinReaderPoolSize
+	}
+	if readers > MaxReaderPoolSize {
+		readers = MaxReaderPoolSize
+	}
 	roDSN := fmt.Sprintf(
 		"file:%s?mode=ro&_pragma=cache_size(-32768)&_pragma=busy_timeout(5000)",
 		path,
 	)
 	ro, err := sql.Open("sqlite", roDSN)
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open reader pool: %w", err)
+		return fmt.Errorf("open reader pool: %w", err)
 	}
-	ro.SetMaxOpenConns(4)
-	ro.SetMaxIdleConns(4)
+	ro.SetMaxOpenConns(readers)
+	ro.SetMaxIdleConns(readers)
 	s.ro = ro
-
-	return s, nil
+	return nil
 }
 
 // DB returns the WRITER pool for advanced callers that need to write.
