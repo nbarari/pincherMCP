@@ -308,9 +308,79 @@ func emitSnapshotJSON(store *db.Store, result *index.IndexResult, dataDir string
 		"duration_ms":            result.DurationMS,
 	}
 
+	// search_relevance: per-corpus curated query → top-hit-kind + qualified
+	// name. The relevance regression gate that prerequisites #32 (per-corpus
+	// FTS5 split). Without this, switching FTS architecture could silently
+	// shift BM25 ranking and we'd never know.
+	if rel := computeSearchRelevance(store, result); rel != nil {
+		summary["search_relevance"] = rel
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(summary)
+}
+
+// searchRelevanceQueries maps a corpus name (== project name) to the curated
+// query set whose top-hit metadata is locked into the snapshot. Adding a
+// query to a corpus = a new line here + run `make corpus-snapshot-update`
+// to record the current top-hit. A future PR that shifts ranking — including
+// #32's per-corpus FTS5 split — produces a snapshot diff that surfaces
+// every shift explicitly for review.
+//
+// Each entry is a curated representative: a query whose intended top hit
+// is unambiguous on its corpus. Avoid queries that match multiple symbols
+// equally well (the BM25 tiebreak is implementation-defined and would
+// cause flaky snapshots).
+var searchRelevanceQueries = map[string][]string{
+	"go-project": {
+		"Open",   // Function in internal/auth/auth.go — the marquee Go API
+		"Greet",  // Function in cmd/cli/main.go — distinct second hit
+		"User",   // Method on Session — proves Method routing
+	},
+	"k8s-ops": {
+		"image",        // Setting (services.web.image, helm.values.image, etc.)
+		"replicaCount", // Setting in helm/values.yaml
+		"deployment",   // Module — the deployment.yaml file's module name
+	},
+	"node-monorepo": {
+		"Greeter",         // Class in src/index.ts
+		"compilerOptions", // Setting in tsconfig.json
+		"makeGreeter",     // Function in src/index.ts
+	},
+}
+
+// SearchRelevanceHit is the per-query record persisted to the snapshot.
+type SearchRelevanceHit struct {
+	Query       string `json:"query"`
+	TopHitKind  string `json:"top_hit_kind,omitempty"`
+	TopHitQN    string `json:"top_hit_qn,omitempty"`
+	NoMatch     bool   `json:"no_match,omitempty"`
+}
+
+// computeSearchRelevance runs the curated query set for the given corpus
+// and returns the top-hit metadata for each. Returns nil if the project
+// has no registered query set (most corpora don't need one).
+func computeSearchRelevance(store *db.Store, result *index.IndexResult) []SearchRelevanceHit {
+	queries, ok := searchRelevanceQueries[result.Project]
+	if !ok {
+		return nil
+	}
+	out := make([]SearchRelevanceHit, 0, len(queries))
+	for _, q := range queries {
+		hit := SearchRelevanceHit{Query: q}
+		results, err := store.SearchSymbols(result.ProjectID, q, "", "", 1)
+		if err != nil || len(results) == 0 {
+			hit.NoMatch = true
+			out = append(out, hit)
+			continue
+		}
+		top := results[0]
+		hit.TopHitKind = top.Symbol.Kind
+		hit.TopHitQN = top.Symbol.QualifiedName
+		out = append(out, hit)
+	}
+	return out
 }
 
 // dbSchemaVersion reads the current schema_version. Best-effort; returns 0

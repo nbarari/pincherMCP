@@ -13,6 +13,23 @@
   "files_indexed": 2,
   "files_seen": 2,
   "schema_version": 8,
+  "search_relevance": [
+    {
+      "query": "Open",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "auth.Open"
+    },
+    {
+      "query": "Greet",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "main.Greet"
+    },
+    {
+      "query": "User",
+      "top_hit_kind": "Method",
+      "top_hit_qn": "auth.*Session.User"
+    }
+  ],
   "symbol_count_by_kind": {
     "Class": 1,
     "Function": 4,

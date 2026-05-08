@@ -9,6 +9,23 @@
   "files_indexed": 3,
   "files_seen": 6,
   "schema_version": 8,
+  "search_relevance": [
+    {
+      "query": "Greeter",
+      "top_hit_kind": "Class",
+      "top_hit_qn": "src.index.Greeter"
+    },
+    {
+      "query": "compilerOptions",
+      "top_hit_kind": "Setting",
+      "top_hit_qn": "compilerOptions"
+    },
+    {
+      "query": "makeGreeter",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "src.index.makeGreeter"
+    }
+  ],
   "symbol_count_by_kind": {
     "Class": 1,
     "Function": 1,

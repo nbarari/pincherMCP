@@ -7,6 +7,23 @@
   "files_indexed": 3,
   "files_seen": 3,
   "schema_version": 8,
+  "search_relevance": [
+    {
+      "query": "image",
+      "top_hit_kind": "Setting",
+      "top_hit_qn": "image"
+    },
+    {
+      "query": "replicaCount",
+      "top_hit_kind": "Setting",
+      "top_hit_qn": "replicaCount"
+    },
+    {
+      "query": "deployment",
+      "top_hit_kind": "Setting",
+      "top_hit_qn": "doc0.kind"
+    }
+  ],
   "symbol_count_by_kind": {
     "Setting": 39
   }

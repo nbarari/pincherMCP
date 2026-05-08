@@ -131,6 +131,43 @@ func canonicalJSON(t *testing.T, v any) []byte {
 	return b
 }
 
+// TestSearchRelevance_UnregisteredCorpus asserts that computeSearchRelevance
+// returns nil for any corpus that doesn't have a query set registered. This
+// keeps the snapshot for ad-hoc / one-off corpora free of a bogus
+// "search_relevance": [] entry, which would otherwise be a noisy diff anchor.
+func TestSearchRelevance_UnregisteredCorpus(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer store.Close()
+
+	result := &index.IndexResult{Project: "no-such-corpus", ProjectID: "x"}
+	if got := computeSearchRelevance(store, result); got != nil {
+		t.Fatalf("expected nil for unregistered corpus, got %#v", got)
+	}
+}
+
+// TestSearchRelevance_QueriesRegistered guards against the obvious mistake
+// of adding a corpus to the `corpora` test slice without registering its
+// query set. A new corpus with no queries means the relevance gate can't
+// catch ranking shifts on it — silently broken substrate.
+func TestSearchRelevance_QueriesRegistered(t *testing.T) {
+	for _, name := range corpora {
+		t.Run(name, func(t *testing.T) {
+			queries, ok := searchRelevanceQueries[name]
+			if !ok {
+				t.Fatalf("corpus %q has no entry in searchRelevanceQueries; "+
+					"add a curated query set or remove the corpus from the gate.", name)
+			}
+			if len(queries) == 0 {
+				t.Fatalf("corpus %q has an empty query set; add at least one curated query.", name)
+			}
+		})
+	}
+}
+
 // TestCorpusSnapshot_MakeTargetIsRunnable smoke-tests `make corpus-test`
 // itself if make + jq are available. Skipped otherwise to keep CI green
 // on platforms without those tools (Windows). The Go-only test above

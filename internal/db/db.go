@@ -1024,7 +1024,11 @@ func (s *Store) SearchSymbols(projectID, query, kind, language string, limit int
 		q += " AND s.language = ?"
 		args = append(args, language)
 	}
-	q += " ORDER BY score LIMIT ?"
+	// qualified_name tiebreak makes ranking deterministic when BM25 scores
+	// tie. Without it, ordering depends on rowid, which is set by concurrent
+	// indexer insertion order and varies per run — flaky for snapshot tests
+	// and surprising for users who rely on stable pagination.
+	q += " ORDER BY score, s.qualified_name LIMIT ?"
 	args = append(args, limit)
 
 	// Reader pool (#51) — FTS5 MATCH + JOIN is read-only.
