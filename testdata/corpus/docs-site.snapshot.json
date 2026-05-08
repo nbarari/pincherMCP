@@ -1,0 +1,34 @@
+{
+  "avg_confidence_by_kind": {
+    "Section": 1
+  },
+  "edge_count_by_kind": {},
+  "extraction_failures_by_reason": {},
+  "files_blocked": 0,
+  "files_indexed": 6,
+  "files_seen": 6,
+  "schema_version": 9,
+  "search_relevance": [
+    {
+      "corpus": "docs",
+      "query": "Authentication",
+      "top_hit_kind": "Section",
+      "top_hit_qn": "api_reference.authentication"
+    },
+    {
+      "corpus": "docs",
+      "query": "Installation",
+      "top_hit_kind": "Section",
+      "top_hit_qn": "getting_started.installation"
+    },
+    {
+      "corpus": "docs",
+      "query": "Endpoints",
+      "top_hit_kind": "Section",
+      "top_hit_qn": "api_reference.endpoints"
+    }
+  ],
+  "symbol_count_by_kind": {
+    "Section": 36
+  }
+}

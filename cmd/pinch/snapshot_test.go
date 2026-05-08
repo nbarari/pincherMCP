@@ -21,6 +21,7 @@ var corpora = []string{
 	"go-project",
 	"k8s-ops",
 	"node-monorepo",
+	"docs-site",
 }
 
 // TestCorpusSnapshot pins the snapshot round-trip end-to-end without

@@ -385,6 +385,14 @@ var searchRelevanceQueries = map[string][]searchRelevanceQuery{
 		{Query: "compilerOptions", Corpus: db.CorpusConfig},
 		{Query: "makeGreeter", Corpus: db.CorpusCode},
 	},
+	"docs-site": {
+		// Docs corpus — Markdown headings extracted by the goldmark-backed
+		// extractor (#81). Each query targets a hierarchical qualified name
+		// produced by the heading walker.
+		{Query: "Authentication", Corpus: db.CorpusDocs},   // api_reference.authentication
+		{Query: "Installation", Corpus: db.CorpusDocs},     // getting_started.installation
+		{Query: "Endpoints", Corpus: db.CorpusDocs},        // api_reference.endpoints
+	},
 }
 
 // SearchRelevanceHit is the per-query record persisted to the snapshot.
