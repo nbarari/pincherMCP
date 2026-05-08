@@ -3645,3 +3645,116 @@ func TestADR_AcceptsArbitraryStringValues(t *testing.T) {
 		})
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// slow_queries server-side capture (#42 part 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSlowQuery_DisabledByDefault(t *testing.T) {
+	// Threshold defaults to 0 → no rows persisted regardless of latency.
+	srv, store, _ := newTestServer(t)
+	// Don't call SetSlowQueryThreshold.
+
+	// Force latency by sleeping inside a fake handler call. Since we can't
+	// easily inject latency into existing handlers, we just call jsonResultWithMeta
+	// directly with a start in the past.
+	past := time.Now().Add(-500 * time.Millisecond)
+	srv.jsonResultWithMeta(map[string]any{}, past, "test_tool", map[string]any{}, 0)
+
+	rows, err := store.ListSlowQueries(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("threshold=0 should not record any rows, got %d", len(rows))
+	}
+}
+
+func TestSlowQuery_ThresholdBoundary(t *testing.T) {
+	// Latency >= threshold → recorded; below → not.
+	srv, store, _ := newTestServer(t)
+	srv.SetSlowQueryThreshold(50)
+
+	// Below threshold (10ms latency).
+	past := time.Now().Add(-10 * time.Millisecond)
+	srv.jsonResultWithMeta(map[string]any{}, past, "fast_tool", map[string]any{}, 0)
+
+	// Above threshold (200ms latency).
+	past = time.Now().Add(-200 * time.Millisecond)
+	srv.jsonResultWithMeta(map[string]any{}, past, "slow_tool", map[string]any{}, 0)
+
+	rows, err := store.ListSlowQueries(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row above threshold, got %d", len(rows))
+	}
+	if rows[0].Tool != "slow_tool" {
+		t.Errorf("captured tool = %q, want slow_tool", rows[0].Tool)
+	}
+}
+
+func TestSlowQuery_ProjectIDPropagatesFromArgs(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.SetSlowQueryThreshold(50)
+
+	past := time.Now().Add(-100 * time.Millisecond)
+	srv.jsonResultWithMeta(map[string]any{}, past, "search",
+		map[string]any{"project": "proj-abc", "query": "open"}, 0)
+
+	rows, _ := store.ListSlowQueries(0)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	if rows[0].ProjectID != "proj-abc" {
+		t.Errorf("ProjectID = %q, want proj-abc", rows[0].ProjectID)
+	}
+}
+
+// TestSlowQuery_SecretRedaction is the security gate. Argument values
+// keyed under sensitive names MUST be redacted before persistence — pincher
+// would otherwise persist credentials on disk indefinitely.
+func TestSlowQuery_SecretRedaction(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.SetSlowQueryThreshold(50)
+
+	past := time.Now().Add(-100 * time.Millisecond)
+	srv.jsonResultWithMeta(map[string]any{}, past, "fetch",
+		map[string]any{
+			"url":           "https://api.example.com",
+			"api_key":       "sk-abc123-this-must-not-persist",
+			"BearerToken":   "ey-must-not-persist",
+			"password":      "p4ssw0rd",
+			"nested": map[string]any{
+				"my_secret": "must-also-not-persist",
+				"normal":    "ok",
+			},
+		}, 0)
+
+	rows, _ := store.ListSlowQueries(0)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	args := rows[0].Arguments
+
+	// Sensitive values MUST NOT appear verbatim.
+	for _, secret := range []string{
+		"sk-abc123-this-must-not-persist",
+		"ey-must-not-persist",
+		"p4ssw0rd",
+		"must-also-not-persist",
+	} {
+		if strings.Contains(args, secret) {
+			t.Errorf("CREDENTIAL LEAK: %q appears unredacted in persisted args:\n%s", secret, args)
+		}
+	}
+	// Sensitive keys should appear with [redacted] sentinel.
+	if !strings.Contains(args, "[redacted]") {
+		t.Errorf("expected [redacted] sentinel in persisted args, got: %s", args)
+	}
+	// Non-sensitive values must pass through.
+	if !strings.Contains(args, "https://api.example.com") {
+		t.Errorf("non-sensitive 'url' value should be preserved, got: %s", args)
+	}
+}

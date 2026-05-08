@@ -78,6 +78,12 @@ type Server struct {
 	// fetch tool is a classic SSRF pivot.
 	fetchAllowLoopback bool
 
+	// slowQueryThresholdMS — tool calls whose latency exceeds this value
+	// (in milliseconds) are persisted to the slow_queries table (#42 part 2).
+	// 0 disables the capture entirely (zero overhead for users who don't
+	// opt in). Set via SetSlowQueryThreshold or --slow-query-ms flag.
+	slowQueryThresholdMS int64
+
 	// HTTP rate limiting — sliding window per remote IP.
 	rateMu      sync.Mutex
 	rateWindows map[string][]time.Time // IP → request timestamps in current window
@@ -575,6 +581,102 @@ func (s *Server) SetBasePath(p string) { s.basePath = normalizeBasePath(p) }
 // proxy that strips and re-adds these headers itself.
 func (s *Server) SetTrustProxy(t bool) { s.trustProxy = t }
 
+// SetSlowQueryThreshold configures the latency above which tool calls are
+// persisted to the slow_queries table (#42 part 2). 0 disables capture.
+// Typical: SetSlowQueryThreshold(50) to log calls over 50ms.
+func (s *Server) SetSlowQueryThreshold(ms int64) { s.slowQueryThresholdMS = ms }
+
+// maybeRecordSlowQuery is called from {json,text}ResultWithMeta after the
+// per-call latency is computed. No-op when slowQueryThresholdMS is 0.
+//
+// Argument values are passed through redactSensitiveArgs before persisting,
+// so secret-shaped values (api_key, bearer, password, token, etc.) are
+// replaced with "[redacted]" — never stores raw credentials passed via
+// tool calls. The redaction is keyed on the field NAME, so a value that
+// happens to look like a token but is keyed under (say) `query` stays
+// visible because the user might want to see what slow query they ran.
+func (s *Server) maybeRecordSlowQuery(tool string, args map[string]any, latencyMS int64) {
+	if s.slowQueryThresholdMS <= 0 {
+		return
+	}
+	if latencyMS < s.slowQueryThresholdMS {
+		return
+	}
+	projectID, _ := args["project"].(string)
+	redacted := redactSensitiveArgs(args)
+	argsJSON, _ := json.Marshal(redacted)
+	if err := s.store.RecordSlowQuery(tool, projectID, latencyMS, string(argsJSON)); err != nil {
+		slog.Warn("pincher.slow_query_record.err", "err", err, "tool", tool)
+	}
+}
+
+// sensitiveArgKeys is the case-insensitive set of argument names whose
+// values should be redacted before persisting to slow_queries. Match is
+// substring on the lowercased key name; a key like `my_api_key` triggers
+// redaction because it contains `api_key`.
+//
+// We err on the side of over-redaction. Losing a debug detail is cheap;
+// persisting a credential is expensive.
+var sensitiveArgKeys = []string{
+	"api_key", "apikey", "api-key",
+	"bearer", "token",
+	"password", "passwd", "secret",
+	"authorization", "auth",
+}
+
+// redactSensitiveArgs walks an args map and replaces any value whose key
+// matches a sensitive pattern with the literal string "[redacted]".
+// Returns a NEW map; the input is not mutated.
+//
+// Recursion: nested maps and []any of maps are walked. Other value types
+// (strings, numbers, bools) are passed through unchanged.
+func redactSensitiveArgs(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		if isSensitiveKey(k) {
+			out[k] = "[redacted]"
+			continue
+		}
+		switch val := v.(type) {
+		case map[string]any:
+			out[k] = redactSensitiveArgs(val)
+		case []any:
+			out[k] = redactSensitiveSlice(val)
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func redactSensitiveSlice(in []any) []any {
+	out := make([]any, len(in))
+	for i, v := range in {
+		switch val := v.(type) {
+		case map[string]any:
+			out[i] = redactSensitiveArgs(val)
+		case []any:
+			out[i] = redactSensitiveSlice(val)
+		default:
+			out[i] = v
+		}
+	}
+	return out
+}
+
+func isSensitiveKey(k string) bool {
+	lc := strings.ToLower(k)
+	for _, pat := range sensitiveArgKeys {
+		if strings.Contains(lc, pat) {
+			return true
+		}
+	}
+	return false
+}
+
 // BasePath returns the configured basepath, or "" if none.
 func (s *Server) BasePath() string { return s.basePath }
 
@@ -1038,7 +1140,7 @@ func (s *Server) registerTools() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	path := str(args, "path")
 	if path == "" {
@@ -1063,11 +1165,11 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"skipped":    result.Skipped,
 		"duration_ms": result.DurationMS,
 	}
-	return s.jsonResultWithMeta(data, start, 0), nil
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	id := str(args, "id")
 	if id == "" {
@@ -1144,7 +1246,7 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"extraction_confidence":  sym.ExtractionConfidence,
 		"source":                 source,
 	}
-	return s.jsonResultWithMeta(data, start, tokensSaved), nil
+	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
 
 // maxBatchSymbols caps the number of IDs accepted by the symbols batch tool
@@ -1152,7 +1254,7 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 const maxBatchSymbols = 100
 
 func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	ids := strSlice(args, "ids")
 	if len(ids) == 0 {
@@ -1199,11 +1301,11 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 		"symbols": results,
 		"count":   len(results),
 	}
-	return s.jsonResultWithMeta(data, start, savedVsFullRead(len(results), responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(results), responseJSON)), nil
 }
 
 func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	id := str(args, "id")
 	if id == "" {
@@ -1246,11 +1348,11 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 		"imports": imports,
 	}
 	responseJSON, _ := json.Marshal(data)
-	return s.jsonResultWithMeta(data, start, savedVsFileSizes(root, allPaths, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(root, allPaths, responseJSON)), nil
 }
 
 func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	query := str(args, "query")
 	if query == "" {
@@ -1359,11 +1461,11 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"count":   len(rows),
 		"query":   query,
 	}
-	return s.jsonResultWithMeta(data, start, tokensSaved), nil
+	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
 
 func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	cql := str(args, "cypher")
 	if cql == "" {
@@ -1397,11 +1499,11 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"rows":    result.Rows,
 		"total":   result.Total,
 	}
-	return s.jsonResultWithMeta(data, start, savedVsFullRead(result.Total, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(result.Total, responseJSON)), nil
 }
 
 func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	name := str(args, "name")
 	if name == "" {
@@ -1469,11 +1571,11 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if addRisk {
 		data["risk_summary"] = riskCounts
 	}
-	return s.jsonResultWithMeta(data, start, savedVsFileSizes(traceRoot, tracedPaths, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(traceRoot, tracedPaths, responseJSON)), nil
 }
 
 func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	projectArg := str(args, "project")
 	scope := str(args, "scope")
@@ -1565,11 +1667,11 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 			"low":             riskCounts["LOW"],
 		},
 	}
-	return s.jsonResultWithMeta(data, start, savedVsFullRead(totalTracedSyms, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(totalTracedSyms, responseJSON)), nil
 }
 
 func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	projectID, errRes := s.mustProject(args)
 	if errRes != nil {
@@ -1637,11 +1739,11 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 		symCount = p.SymCount
 	}
 	responseJSON, _ := json.Marshal(data)
-	return s.jsonResultWithMeta(data, start, savedVsFullRead(symCount, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(symCount, responseJSON)), nil
 }
 
 func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	projectID, errRes := s.mustProject(args)
 	if errRes != nil {
@@ -1659,11 +1761,11 @@ func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"node_kinds":      kindCounts,
 		"edge_kinds":      edgeKindCounts,
 	}
-	return s.jsonResultWithMeta(data, start, 0), nil
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start := time.Now()
+	start, tool, args := beginCall(req)
 	projects, err := s.store.ListProjects()
 	if err != nil {
 		return errResult(fmt.Sprintf("list error: %v", err)), nil
@@ -1681,11 +1783,11 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 		})
 	}
 	data := map[string]any{"projects": rows, "count": len(rows)}
-	return s.jsonResultWithMeta(data, start, 0), nil
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 	action := str(args, "action")
 	key := str(args, "key")
 	value := str(args, "value")
@@ -1739,11 +1841,11 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		return errResult(fmt.Sprintf("unknown action %q", action)), nil
 	}
 
-	return s.jsonResultWithMeta(data, start, 0), nil
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 	projectArg := str(args, "project")
 
 	// Resolve project — optional; health without a project still returns schema version + db path.
@@ -1774,11 +1876,11 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 		data["extraction_coverage"] = report.Coverage
 	}
-	return s.jsonResultWithMeta(data, start, 0), nil
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleStats(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, _ := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	calls := atomic.LoadInt64(&s.statsCalls)
 	tokensUsed := atomic.LoadInt64(&s.statsTokensUsed)
@@ -1878,7 +1980,7 @@ func (s *Server) handleStats(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 
 	b.WriteString("└" + strings.Repeat("─", w) + "┘")
-	return s.textResultWithMeta(b.String(), start, 0), nil
+	return s.textResultWithMeta(b.String(), start, tool, args, 0), nil
 }
 
 
@@ -1961,7 +2063,7 @@ func (s *Server) fetchIPBlockReason(ip net.IP) string {
 }
 
 func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	start, args := beginCall(req)
+	start, tool, args := beginCall(req)
 
 	rawURL := str(args, "url")
 	if rawURL == "" {
@@ -2060,7 +2162,7 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"raw_bytes": len(rawBytes),
 		"stored":    true,
 	}
-	return s.jsonResultWithMeta(data, start, tokensSaved), nil
+	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
 
 // extractTextFromHTML strips HTML markup and returns (title, bodyText).
@@ -2163,8 +2265,9 @@ func savedVsFileSizes(root string, filePaths []string, payloadBytes []byte) int 
 	return max(0, total/charsPerToken-db.ApproxTokens(string(payloadBytes)))
 }
 
-func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tokensSaved int) *mcp.CallToolResult {
+func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool string, args map[string]any, tokensSaved int) *mcp.CallToolResult {
 	latency := time.Since(start).Milliseconds()
+	s.maybeRecordSlowQuery(tool, args, latency)
 
 	// Estimate tokens in this response
 	b, _ := json.Marshal(data)
@@ -2202,8 +2305,9 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tokens
 // textResultWithMeta performs the same session accounting as jsonResultWithMeta
 // but returns a pre-formatted text string rather than a JSON object. Used by
 // handleStats so the output is human-readable on the command line.
-func (s *Server) textResultWithMeta(text string, start time.Time, tokensSaved int) *mcp.CallToolResult {
+func (s *Server) textResultWithMeta(text string, start time.Time, tool string, args map[string]any, tokensSaved int) *mcp.CallToolResult {
 	latency := time.Since(start).Milliseconds()
+	s.maybeRecordSlowQuery(tool, args, latency)
 	tokensUsed := db.ApproxTokens(text)
 	costAvoided := float64(tokensSaved) / 1_000_000.0 * baseCostPer1M
 
@@ -2235,8 +2339,11 @@ func errResult(msg string) *mcp.CallToolResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // beginCall combines the two-line handler preamble into one.
-func beginCall(req *mcp.CallToolRequest) (time.Time, map[string]any) {
-	return time.Now(), parseArgs(req)
+// beginCall returns the call's start time, tool name, and parsed args.
+// Tool name is captured here once so jsonResultWithMeta can stamp it
+// onto the slow_queries row without each handler re-extracting it.
+func beginCall(req *mcp.CallToolRequest) (time.Time, string, map[string]any) {
+	return time.Now(), req.Params.Name, parseArgs(req)
 }
 
 func parseArgs(req *mcp.CallToolRequest) map[string]any {

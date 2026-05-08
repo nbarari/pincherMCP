@@ -310,6 +310,63 @@ func TestStore_ROFallsBackToWriter(t *testing.T) {
 // extraction_failures (#42 part 1)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// slow_queries (#42 part 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSlowQuery_RecordAndList(t *testing.T) {
+	s := newTestStore(t)
+
+	// Cross-project tool (no project_id) and project-scoped tool both work.
+	cases := []struct {
+		tool, projectID, args string
+		duration              int64
+	}{
+		{"search", "p1", `{"query":"open"}`, 220},
+		{"list", "", `{}`, 80},
+		{"trace", "p2", `{"name":"main"}`, 1500},
+	}
+	for _, c := range cases {
+		if err := s.RecordSlowQuery(c.tool, c.projectID, c.duration, c.args); err != nil {
+			t.Fatalf("Record (%s): %v", c.tool, err)
+		}
+	}
+
+	got, err := s.ListSlowQueries(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != len(cases) {
+		t.Fatalf("got %d rows, want %d", len(got), len(cases))
+	}
+	// Default order is occurred_at DESC; most-recent insert first.
+	if got[0].Tool != "trace" {
+		t.Errorf("most-recent row = %q, want trace", got[0].Tool)
+	}
+	// project_id MUST round-trip: empty string in, empty string out (NOT NULL).
+	for _, sq := range got {
+		if sq.Tool == "list" && sq.ProjectID != "" {
+			t.Errorf("cross-project tool's project_id should be empty, got %q", sq.ProjectID)
+		}
+	}
+}
+
+func TestSlowQuery_LimitRespected(t *testing.T) {
+	s := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		if err := s.RecordSlowQuery("search", "p1", int64(100+i), "{}"); err != nil {
+			t.Fatalf("Record %d: %v", i, err)
+		}
+	}
+	got, err := s.ListSlowQueries(2)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("limit=2 returned %d rows", len(got))
+	}
+}
+
 func TestExtractionFailure_RecordAndList(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.UpsertProject(testProject("p1")); err != nil {

@@ -320,6 +320,26 @@ var schemaMigrations = []string{
 	);
 	CREATE INDEX IF NOT EXISTS idx_extraction_failures_recent
 	   ON extraction_failures(project_id, last_seen_at DESC);`,
+
+	// v7 → v8: slow_queries log — second piece of #42's diagnostic surface.
+	// Captures every tool call whose latency exceeds the configured threshold
+	// (--slow-query-ms, default 0 = disabled). Lets users see which queries
+	// are taking too long without external profiling.
+	//
+	// project_id is nullable: cross-project tools (e.g. list, health) don't
+	// have a project context. arguments is JSON-encoded after secret-shaped
+	// values are redacted ([redacted] sentinel) — never stores raw API keys
+	// or tokens passed in tool args.
+	`CREATE TABLE IF NOT EXISTS slow_queries (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		tool        TEXT    NOT NULL,
+		project_id  TEXT,
+		duration_ms INTEGER NOT NULL,
+		arguments   TEXT,
+		occurred_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_slow_queries_recent
+	   ON slow_queries(occurred_at DESC);`,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -1348,6 +1368,66 @@ func (s *Store) ListExtractionFailures(projectID string, limit int) ([]Extractio
 func (s *Store) ClearExtractionFailures(projectID string) error {
 	_, err := s.db.Exec(`DELETE FROM extraction_failures WHERE project_id = ?`, projectID)
 	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// slow_queries (#42 part 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SlowQuery is one row from the slow_queries table — a tool call whose
+// latency exceeded the configured --slow-query-ms threshold.
+type SlowQuery struct {
+	ID         int64
+	Tool       string
+	ProjectID  string // empty for cross-project tools
+	DurationMS int64
+	Arguments  string // JSON, with secret-shaped values redacted at record-time
+	OccurredAt time.Time
+}
+
+// RecordSlowQuery persists a slow-query row. Caller is responsible for
+// redacting any secret-shaped values from `arguments` before passing it
+// in (the server.go side handles redaction; this layer trusts the input).
+func (s *Store) RecordSlowQuery(tool, projectID string, durationMS int64, arguments string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO slow_queries (tool, project_id, duration_ms, arguments, occurred_at)
+		VALUES (?, NULLIF(?, ''), ?, ?, ?)`,
+		tool, projectID, durationMS, arguments, time.Now().Unix())
+	return err
+}
+
+// ListSlowQueries returns the most-recent slow-query rows, ordered by
+// occurred_at DESC. limit <= 0 returns all rows.
+//
+// Reads via the reader pool (#51) — pure SELECT.
+func (s *Store) ListSlowQueries(limit int) ([]SlowQuery, error) {
+	// Order by occurred_at DESC, then id DESC as tiebreaker — multiple
+	// inserts within the same second otherwise have implementation-defined
+	// order, which would make ListSlowQueries non-deterministic.
+	q := `SELECT id, tool, COALESCE(project_id, ''), duration_ms, COALESCE(arguments, ''), occurred_at
+	      FROM slow_queries
+	      ORDER BY occurred_at DESC, id DESC`
+	args := []any{}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.ro.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SlowQuery
+	for rows.Next() {
+		var sq SlowQuery
+		var occurred int64
+		if err := rows.Scan(&sq.ID, &sq.Tool, &sq.ProjectID, &sq.DurationMS, &sq.Arguments, &occurred); err != nil {
+			return nil, err
+		}
+		sq.OccurredAt = time.Unix(occurred, 0)
+		out = append(out, sq)
+	}
+	return out, rows.Err()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

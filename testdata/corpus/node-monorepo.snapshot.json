@@ -8,7 +8,7 @@
   "files_blocked": 3,
   "files_indexed": 3,
   "files_seen": 6,
-  "schema_version": 7,
+  "schema_version": 8,
   "symbol_count_by_kind": {
     "Class": 1,
     "Function": 1,

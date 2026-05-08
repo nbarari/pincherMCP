@@ -6,7 +6,7 @@
   "files_blocked": 0,
   "files_indexed": 3,
   "files_seen": 3,
-  "schema_version": 7,
+  "schema_version": 8,
   "symbol_count_by_kind": {
     "Setting": 39
   }

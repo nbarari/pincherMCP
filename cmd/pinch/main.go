@@ -42,6 +42,7 @@ func main() {
 		httpRate    = flag.Int("http-rate", 0, "Max HTTP requests per IP per minute. 0 = unlimited.")
 		basePath    = flag.String("basepath", "", "External URL prefix when behind a reverse proxy (e.g. /pincher). Both /pincher/v1/* and /v1/* will route. Falls back to $PINCHER_BASEPATH.")
 		trustProxy  = flag.Bool("trust-proxy", false, "Honor X-Forwarded-Prefix / X-Forwarded-Proto / X-Forwarded-Host headers. Only enable when behind a trusted proxy. Falls back to $PINCHER_TRUST_PROXY=1.")
+		slowQueryMS = flag.Int64("slow-query-ms", 0, "Persist tool calls slower than N ms to the slow_queries table for `pincher doctor` to surface (#42). 0 = disabled (zero overhead).")
 	)
 	flag.Parse()
 
@@ -93,6 +94,12 @@ func main() {
 
 	// Build MCP server with all 15 tools
 	srv := server.New(store, idx, version)
+
+	// Slow-query capture (#42 part 2) applies to BOTH MCP stdio calls and
+	// HTTP requests — must be set before either transport starts.
+	if *slowQueryMS > 0 {
+		srv.SetSlowQueryThreshold(*slowQueryMS)
+	}
 
 	// Context with graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
