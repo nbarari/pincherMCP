@@ -190,6 +190,100 @@ func TestIndex_ForceReindexResultsAreClean(t *testing.T) {
 	}
 }
 
+// TestIndex_StaleCleanupCascadesToCrossFileEdges pins the cross-feature
+// contract between PR #31 (stale-symbol cleanup) and PR #27 (cross-file
+// CALLS resolution): when a target function with inbound CALLS edges from
+// a different file is removed, both the symbol AND the inbound edges are
+// cleared.
+//
+// The DB-level `DeleteSymbolsForFile` already cascades to edges (covered by
+// db_test.go's TestDeleteSymbolsForFile). What this test pins is the full
+// indexer→delete→edge-cascade path in the presence of cross-file edges
+// that were resolved in the deferred `resolveCalls` pass — a path no
+// individual PR exercised end-to-end.
+func TestIndex_StaleCleanupCascadesToCrossFileEdges(t *testing.T) {
+	idx, store := newTestIndexer(t)
+	dir := t.TempDir()
+
+	// Setup: caller.go imports & calls Helper from helpers.go.
+	// resolveCalls runs in the deferred pass so this edge only resolves at
+	// the project level after wg.Wait().
+	writeFile(t, dir, "helpers.go", `package svc
+
+func Helper() string {
+	return "hi"
+}
+`)
+	writeFile(t, dir, "caller.go", `package svc
+
+func Run() {
+	_ = Helper()
+}
+`)
+
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	pid := db.ProjectIDFromPath(dir)
+
+	// Sanity: the cross-file CALLS edge from Run → Helper exists.
+	helperSyms, err := store.GetSymbolsByName(pid, "Helper", 5)
+	if err != nil || len(helperSyms) == 0 {
+		t.Fatalf("expected Helper indexed; err=%v len=%d", err, len(helperSyms))
+	}
+	helperID := helperSyms[0].ID
+
+	var inbound int
+	if err := store.DB().QueryRow(
+		`SELECT COUNT(*) FROM edges WHERE project_id = ? AND to_id = ? AND kind = 'CALLS'`,
+		pid, helperID,
+	).Scan(&inbound); err != nil {
+		t.Fatalf("count inbound edges: %v", err)
+	}
+	if inbound == 0 {
+		t.Fatalf("expected at least one CALLS edge into Helper before deletion (resolveCalls regression?)")
+	}
+
+	// Delete Helper from helpers.go (replace with just `package svc`).
+	helpersPath := writeFile(t, dir, "helpers.go", "package svc\n")
+	_ = helpersPath
+
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("re-index: %v", err)
+	}
+
+	// Negative: Helper symbol is gone.
+	helperSyms2, err := store.GetSymbolsByName(pid, "Helper", 5)
+	if err != nil {
+		t.Fatalf("GetSymbolsByName(Helper) after delete: %v", err)
+	}
+	if len(helperSyms2) != 0 {
+		t.Errorf("expected Helper to be deleted after edit, got %d", len(helperSyms2))
+	}
+
+	// Negative: no orphan inbound CALLS edges remain to the deleted symbol's ID.
+	// (The edge-cascade in DeleteSymbolsForFile covers `from_id OR to_id` in
+	// the deleted file. Edges to a deleted helper from a different file are
+	// caught only because helpers.go's deletion swept the to_id endpoint.)
+	var orphan int
+	if err := store.DB().QueryRow(
+		`SELECT COUNT(*) FROM edges WHERE project_id = ? AND to_id = ?`,
+		pid, helperID,
+	).Scan(&orphan); err != nil {
+		t.Fatalf("count orphan edges: %v", err)
+	}
+	if orphan != 0 {
+		t.Errorf("expected 0 orphan edges into deleted Helper (id=%s), got %d", helperID, orphan)
+	}
+
+	// Positive: Run is still present and well-formed (the OTHER file's index
+	// untouched).
+	runSyms, err := store.GetSymbolsByName(pid, "Run", 5)
+	if err != nil || len(runSyms) == 0 {
+		t.Errorf("expected Run to survive deletion of Helper; err=%v len=%d", err, len(runSyms))
+	}
+}
+
 func countAllSymbols(t *testing.T, store *db.Store, projectID string) int {
 	t.Helper()
 	var n int

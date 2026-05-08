@@ -143,6 +143,49 @@ func TestOpen_Idempotent(t *testing.T) {
 	s2.Close()
 }
 
+// TestOpen_WALGuardrailEngaged pins the WAL bounding behavior added in PR #22.
+// `journal_size_limit` is a silent no-op when journal_mode != WAL, so a
+// regression that breaks WAL would also break this assertion at the same
+// place — surfacing both failures at once. The 256 MiB cap is the documented
+// upper bound; any future change to the literal needs to update both this
+// test and the comment in db.go's Open() simultaneously.
+func TestOpen_WALGuardrailEngaged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	const want = int64(256 * 1024 * 1024) // 256 MiB
+	var got int64
+	if err := s.db.QueryRow("PRAGMA journal_size_limit").Scan(&got); err != nil {
+		t.Fatalf("PRAGMA journal_size_limit: %v", err)
+	}
+	if got != want {
+		t.Errorf("journal_size_limit = %d, want %d (WAL guardrail not engaged)", got, want)
+	}
+}
+
+// TestCheckpointTruncate_Idempotent ensures CheckpointTruncate is safe to
+// call repeatedly — the indexer invokes it at every Index() tail, so a
+// silent failure here would compound across re-indexes.
+func TestCheckpointTruncate_Idempotent(t *testing.T) {
+	s := newTestStore(t)
+	for i := 0; i < 3; i++ {
+		if err := s.CheckpointTruncate(); err != nil {
+			t.Fatalf("CheckpointTruncate (call %d): %v", i+1, err)
+		}
+	}
+	// Optimize is also called at the tail of Index(); same idempotency
+	// expectation — once is fine, three is fine, no work between calls.
+	for i := 0; i < 3; i++ {
+		if err := s.Optimize(); err != nil {
+			t.Fatalf("Optimize (call %d): %v", i+1, err)
+		}
+	}
+}
+
 func TestMigrate_UpgradeFromV1(t *testing.T) {
 	// Simulate a pre-versioning database that is at schema v1 (baseline only,
 	// no extraction_confidence column, no symbol_moves table).

@@ -381,7 +381,7 @@ RETURN f.name, f.file_path LIMIT 50
 
 **Supported clauses:** `WHERE`, `RETURN`, `ORDER BY`, `LIMIT`, `SKIP`, `COUNT()`
 
-**Edge kinds indexed:** `CALLS`, `IMPORTS` (Go only — resolved across files against `Module` symbols using the `module` line of `go.mod` to rewrite intra-module paths; external imports stay unresolved)
+**Edge kinds indexed:** `CALLS`, `IMPORTS`. For Go, both edge kinds are resolved **across files** using a deferred project-wide pass — `Bar()` calling `Foo()` from a different file in the same module produces a real `CALLS` edge, not a dropped reference. `IMPORTS` is resolved against `Module` symbols using the `module` line of `go.mod` to rewrite intra-module paths; external imports stay unresolved. For other languages, `CALLS` and `IMPORTS` are scoped to within a single file (the per-file regex-extracted name table can't safely match across files without producing false positives).
 
 **Node kinds indexed:** `Function`, `Method`, `Class` (and subtypes per language: `Interface`, `Struct`, `Trait`, `Type`), `Module` (one per Go file, qualified by within-module import path, e.g. `internal/db`), `Setting` (one per YAML/JSON key, qualified by dotted path, e.g. `services.web.image`), plus `Document` (URLs stored by the `fetch` tool)
 
@@ -420,6 +420,21 @@ The indexer refuses to extract from files that are guaranteed to produce noise r
 - **Source maps** by suffix: `*.map`.
 
 The skip count is reported in the indexer's structured log line as `blocked=N` and on `IndexResult.Blocked` for programmatic callers.
+
+### Refusing obvious bloat traps
+
+`pincher index <path>` refuses to walk paths that are statically known to produce noise rather than signal — exiting non-zero before any database write. This catches the case where a SessionStart hook fires from a parent shell pointed at the wrong directory:
+
+- The user's home directory itself (`$HOME`)
+- Common cache locations: `~/Library/Caches/*`, `~/.cache/*`, `%LOCALAPPDATA%\Temp\*`
+- Language package roots: `~/go/pkg/*`, `~/.cargo/*`, `~/.npm/*`, `~/.gem/*`, `~/.rustup/*`
+- Top-of-volume paths: `/`, `/usr`, `/var`, `/etc`, `/tmp`, `/private/tmp`
+
+The MCP `index` tool goes through the same guard, so the protection applies whether `pincher index` is invoked from the CLI or via Claude Code.
+
+### Cross-process safety
+
+Multiple pincher processes can safely share one data directory. Each `Index()` run acquires a per-project filesystem lockfile (`<dataDir>/locks/<project-id-hash>.lock`) before touching the database; concurrent indexers on the same project block at the file level instead of fighting over the SQLite WAL. Stale lockfiles are reclaimed automatically when (a) the holder PID is no longer alive, (b) the lock is older than 24 hours, or (c) the payload is corrupt. This is what keeps a manual `pincher index` and a Claude Code SessionStart hook from racing each other.
 
 ---
 
@@ -661,6 +676,10 @@ Measured on this codebase (13 files, 618 symbols, 5,785 edges, Windows 11, SQLit
 
 **SQLite configuration:** WAL mode, `busy_timeout=5000ms`, `SetMaxOpenConns(1)` (serialized single-writer). Readers never block writers in WAL mode.
 
+**WAL bounding:** `journal_size_limit=256 MiB` caps the WAL; `PRAGMA wal_checkpoint(TRUNCATE)` runs at the tail of each `Index()` run to fold the WAL back into the main DB at the natural quiet point. `PRAGMA optimize` runs on the same cadence to refresh query-planner stats. These are the WAL guardrails added after the 70 GB WAL incident produced by an unbounded multi-writer storm — the bound holds even under heavy churn.
+
+**Watch backoff:** the file-change watcher's 5-second tick body short-circuits when any `Index()` is in flight for any project. During large catch-up phases the watcher idles at near-zero CPU instead of bouncing repeatedly off the per-project mutex.
+
 ---
 
 ## <img src="docs/assets/crab.png" width="22" alt=""/> Roadmap
@@ -704,29 +723,41 @@ Authentication: the dashboard itself requires no bearer token (it's a browser pa
 
 ```
 pincherMCP/
-├── cmd/pinch/main.go            # Sole entry point: MCP server + `pincher index` CLI subcommand
+├── cmd/pinch/
+│   ├── main.go                  # Sole entry point: MCP server + `pincher index` CLI subcommand
+│   └── bloat_trap.go            # IsBloatTrap: refuse to index home dirs, caches, package roots
 ├── internal/
-│   ├── db/db.go                 # SQLite store: schema v5, migrations, all CRUD,
-│   │                            # FTS5 ops, graph ops, BPE token counting
+│   ├── db/db.go                 # SQLite store: schema v6, migrations, all CRUD,
+│   │                            # FTS5 ops, graph ops, BPE token counting,
+│   │                            # WAL guardrails (Optimize, CheckpointTruncate)
 │   ├── ast/
 │   │   ├── extractor.go         # Multi-language extraction, byte offsets, confidence
+│   │   ├── yaml.go              # YAML/JSON Setting extractor (yaml.v3 Node tree, conf 1.0)
+│   │   ├── blocklist.go         # ShouldSkip: lockfiles, minified bundles, source maps
 │   │   └── languages.go         # Extension → language detection
 │   ├── cypher/engine.go         # Cypher → SQL: tokenizer → parser → 3 query paths
-│   ├── index/indexer.go         # Index pipeline: walk → hash → extract → store → watch
+│   ├── index/
+│   │   ├── indexer.go           # Index pipeline: walk → hash → extract → resolve → store → watch
+│   │   └── lockfile.go          # Cross-process project lockfile with stale-holder reclaim
 │   └── server/server.go         # 15 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
+│                                # basepath / reverse-proxy support,
 │                                # session persistence, token savings accounting
 └── go.mod
 ```
 
 ### Schema
 
-Schema is versioned via `schema_version` table. Current version: **v5**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`.
+Schema is versioned via `schema_version` table. Current version: **v6**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`.
 
 ### Key invariants
 
 - `SetMaxOpenConns(1)` — SQLite is single-writer; all writes serialize at the pool
 - WAL mode — readers never block writers; 5s busy timeout prevents immediate failure during indexing
+- `journal_size_limit=256 MiB` + `wal_checkpoint(TRUNCATE)` at every `Index()` tail — keeps the WAL bounded under heavy churn
+- Cross-process project lockfile — multiple pincher binaries on one data directory serialize safely; stale-holder reclaim covers crashed processes
+- File re-parse always deletes the file's prior symbols before re-extraction — no stale rows leak; cascades to edges with either endpoint in the file
 - FTS5 triggers (`sym_fts_insert`, `sym_fts_delete`, `sym_fts_update`) auto-sync `symbols_fts` — never manually sync it
+- The generated `symbol_id` column on `symbols` mirrors `id` so FTS5 content lookups against the FTS column name work; never write to `symbol_id` directly
 - `symSelectFrom` and `symRow` (in `cypher/engine.go`) must stay in sync when adding columns
 - Batch flush at 500 symbols or 1,000 edges to bound memory on large repos
 
