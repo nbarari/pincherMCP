@@ -3,17 +3,33 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestIsBloatTrap_FilesystemRoot(t *testing.T) {
+	// Use a platform-appropriate filesystem root so the test exercises the
+	// real production input shape. On Linux/macOS this is "/"; on Windows
+	// the current drive's root (e.g. `C:\`). filepath.Abs of either form
+	// resolves to the OS-native root, which the production guard detects
+	// via `filepath.Dir(abs) == abs`.
+	root := "/"
+	if runtime.GOOS == "windows" {
+		// Resolve the current drive's root rather than hardcoding C:\.
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		root = filepath.VolumeName(cwd) + `\`
+	}
+
 	for _, hook := range []bool{true, false} {
-		trap, reason := isBloatTrap("/", hook)
+		trap, reason := isBloatTrap(root, hook)
 		if !trap {
-			t.Errorf("isBloatTrap(\"/\", hook=%v) = false; want true", hook)
+			t.Errorf("isBloatTrap(%q, hook=%v) = false; want true", root, hook)
 		}
 		if reason == "" {
-			t.Errorf("hook=%v: empty reason for /", hook)
+			t.Errorf("hook=%v: empty reason for %s", hook, root)
 		}
 	}
 }

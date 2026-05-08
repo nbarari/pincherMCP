@@ -56,7 +56,12 @@ func isBloatTrap(path string, hookMode bool) (bool, string) {
 	}
 
 	// Catastrophic cases: refused regardless of mode.
-	if abs == "/" {
+	//
+	// Cross-platform filesystem-root detection: on Linux/macOS, `filepath.Abs("/")`
+	// returns "/"; on Windows it returns the current drive's root (e.g. `C:\`).
+	// Both forms satisfy `filepath.Dir(p) == p` — the universal "this path is
+	// its own parent" property of any filesystem root.
+	if filepath.Dir(abs) == abs {
 		return true, "filesystem root"
 	}
 	if home := userHomeDir(); home != "" {
