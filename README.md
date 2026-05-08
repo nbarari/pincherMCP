@@ -306,7 +306,7 @@ All latencies measured on this codebase (13 files, 618 symbols, 5,785 edges). To
 | `adr` | Persistent key/value store per project. Survives context resets and binary upgrades. Actions: `get`, `set`, `list`, `delete`. Use to record architectural decisions, known gotchas, or onboarding notes that outlive the conversation. | <1ms |
 | `health` | Schema version, index staleness, per-language extraction coverage. Use to detect stale indexes. | 1ms |
 | `stats` | Session savings as a formatted CLI summary: without-pincher baseline, with-pincher actual, tokens saved, cost avoided, avg latency. Persists across reconnects. | 8ms |
-| `fetch` | Fetch a URL, extract its text, and store it as a searchable `Document` symbol in the project knowledge base. Use for API docs, READMEs, or specs you want to query later. Body cap: 512 KB fetched, 32 KB stored. Retrieve via `search kind:Document` or `symbol`. | ~200ms (network) |
+| `fetch` | Fetch a URL, extract its text, and store it as a searchable `Document` symbol in the project knowledge base. Use for API docs, READMEs, or specs you want to query later. Body cap: 512 KB fetched (enforced via `io.LimitReader` regardless of upstream `Content-Length`), 32 KB stored. Only `http` and `https` schemes are allowed. URLs that resolve to loopback, link-local (e.g. `169.254.169.254` cloud metadata), private (RFC1918), multicast, or unspecified addresses are refused — the same SSRF block-list applies to every redirect target, capped at 5 redirects. 15-second per-request deadline. Retrieve via `search kind:Document` or `symbol`. | ~200ms (network) |
 
 ### Stable Symbol IDs
 

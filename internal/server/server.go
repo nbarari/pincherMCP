@@ -70,6 +70,14 @@ type Server struct {
 	mu       sync.Mutex
 	httpAddr string
 
+	// fetchAllowLoopback opens the SSRF gate for loopback addresses
+	// (127.0.0.0/8, ::1). Default false — production deployments cannot
+	// fetch from localhost. Tests using httptest.Server set this to true
+	// since httptest binds to 127.0.0.1. Never expose this as a CLI flag
+	// without a serious threat-model review; loopback access from the
+	// fetch tool is a classic SSRF pivot.
+	fetchAllowLoopback bool
+
 	// HTTP rate limiting — sliding window per remote IP.
 	rateMu      sync.Mutex
 	rateWindows map[string][]time.Time // IP → request timestamps in current window
@@ -1814,6 +1822,78 @@ const maxFetchBytes = 512 * 1024
 // maxDocstringBytes caps the extracted text stored per Document symbol to 32 KB.
 const maxDocstringBytes = 32 * 1024
 
+// maxFetchRedirects caps the redirect chain depth in handleFetch. Each hop
+// is re-validated through validateFetchURL so a public-looking initial URL
+// can't redirect into RFC1918 / loopback / link-local ranges.
+const maxFetchRedirects = 5
+
+// validateFetchURL parses rawURL and returns an error if it is unsafe to
+// fetch. Two gates: scheme allow-list (http/https only) and SSRF block-list
+// against the resolved IPs. DNS resolution happens here — before any TCP
+// connection is opened — so a host whose A record points into RFC1918 is
+// refused at validation time, not after the connection lands inside a
+// private network.
+//
+// SECURITY: every IP returned by net.LookupIP is checked. A multi-A-record
+// host that mixes one public IP and one 127.0.0.1 entry is refused — the
+// http stack might otherwise pick the loopback entry on retry.
+func (s *Server) validateFetchURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme %q not allowed (only http/https)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("url has no host")
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("dns lookup failed for %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("dns lookup for %q returned no addresses", host)
+	}
+	for _, ip := range ips {
+		if blockReason := s.fetchIPBlockReason(ip); blockReason != "" {
+			return fmt.Errorf("blocked: %s (%s resolves to %s)", blockReason, host, ip)
+		}
+	}
+	return nil
+}
+
+// fetchIPBlockReason returns a non-empty reason string if ip is in one of the
+// SSRF block ranges. Empty string means the IP is allowed for fetching.
+//
+// Block list (per RFC + cloud-metadata practice):
+//   - Loopback (127/8 v4, ::1 v6) — unless fetchAllowLoopback is set (tests)
+//   - Link-local (169.254/16, fe80::/10) — covers AWS/GCP/Azure metadata
+//   - Private networks (10/8, 172.16/12, 192.168/16, fc00::/7)
+//   - Multicast and unspecified addresses
+func (s *Server) fetchIPBlockReason(ip net.IP) string {
+	if ip.IsLoopback() {
+		if s.fetchAllowLoopback {
+			return ""
+		}
+		return "loopback address"
+	}
+	if ip.IsLinkLocalUnicast() {
+		return "link-local address (cloud metadata range)"
+	}
+	if ip.IsPrivate() {
+		return "private network address (RFC1918/RFC4193)"
+	}
+	if ip.IsMulticast() {
+		return "multicast address"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified address"
+	}
+	return ""
+}
+
 func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, args := beginCall(req)
 
@@ -1823,9 +1903,8 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	titleOverride := str(args, "title")
 
-	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errResult(fmt.Sprintf("invalid url %q: must be http or https", rawURL)), nil
+	if err := s.validateFetchURL(rawURL); err != nil {
+		return errResult(fmt.Sprintf("invalid url %q: %v", rawURL, err)), nil
 	}
 
 	projectID, errRes := s.mustProject(args)
@@ -1844,7 +1923,23 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	httpReq.Header.Set("User-Agent", "pincherMCP/1.0")
 	httpReq.Header.Set("Accept", "text/html,text/plain,*/*")
 
-	resp, err := (&http.Client{}).Do(httpReq)
+	// Re-validate every redirect target against the SSRF block-list and
+	// cap the chain depth. The default http.Client follows up to 10
+	// redirects with no per-hop validation — a malicious site could
+	// redirect into RFC1918 or to 169.254.169.254 (cloud metadata)
+	// undetected.
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxFetchRedirects {
+				return fmt.Errorf("too many redirects (limit %d)", maxFetchRedirects)
+			}
+			if err := s.validateFetchURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect target blocked: %w", err)
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return errResult(fmt.Sprintf("fetch error: %v", err)), nil
 	}
