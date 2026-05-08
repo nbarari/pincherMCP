@@ -1173,6 +1173,12 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// snippetLines is the max lines of source included per result.
 	// Callers can suppress snippets via fields= projection.
 	const snippetLines = 5
+	// snippetReadCap bounds the disk read used to compute the 5-line snippet.
+	// Without it, a Setting/Section symbol whose byte range spans a whole
+	// YAML mapping or Markdown heading block would cause the indexer to slurp
+	// tens of KB just to slice 5 lines off the top. 2 KB is plenty for 5
+	// lines of even densely-packed source (avg ~200 chars/line).
+	const snippetReadCap = 2048
 
 	allFields := map[string]any{}
 	var rows []map[string]any
@@ -1190,9 +1196,12 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 
 		// Add a short snippet so Claude can often skip a follow-up symbol/context call.
 		// Suppress for variables/types where the signature IS the content.
+		// Skip the disk read entirely when the caller's fields= projection excludes
+		// snippet — otherwise we'd read kilobytes per result and discard them.
+		includeSnippet := fieldSet == nil || fieldSet["snippet"]
 		snippet := ""
-		if root != "" && r.Symbol.Kind != "Variable" && r.Symbol.Kind != "Type" {
-			if src, err := index.ReadSymbolSource(root, r.Symbol); err == nil && src != "" {
+		if includeSnippet && root != "" && r.Symbol.Kind != "Variable" && r.Symbol.Kind != "Type" {
+			if src, err := index.ReadSymbolSourceCapped(root, r.Symbol, snippetReadCap); err == nil && src != "" {
 				lines := strings.SplitN(src, "\n", snippetLines+1)
 				if len(lines) > snippetLines {
 					lines = lines[:snippetLines]

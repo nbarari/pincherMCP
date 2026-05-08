@@ -440,6 +440,18 @@ func (idx *Indexer) flushBatch(projectID string, syms []db.Symbol, edges []db.Ed
 //	1 Seek        → seek to start_byte
 //	1 Read        → read (end_byte - start_byte) bytes
 func ReadSymbolSource(projectRoot string, sym db.Symbol) (string, error) {
+	return ReadSymbolSourceCapped(projectRoot, sym, 0)
+}
+
+// ReadSymbolSourceCapped reads at most maxBytes from the symbol's byte range.
+// maxBytes <= 0 means unbounded (equivalent to ReadSymbolSource). When the
+// caller only needs the first few lines (e.g. handleSearch's 5-line snippet),
+// a small cap avoids reading tens of KB for symbols whose ranges cover whole
+// YAML mappings or Markdown sections.
+//
+// The caller is responsible for handling truncated tails — e.g. by treating
+// the last line as possibly partial when slicing by newlines.
+func ReadSymbolSourceCapped(projectRoot string, sym db.Symbol, maxBytes int) (string, error) {
 	if sym.StartByte == sym.EndByte {
 		return "", nil
 	}
@@ -453,6 +465,9 @@ func ReadSymbolSource(projectRoot string, sym db.Symbol) (string, error) {
 	size := sym.EndByte - sym.StartByte
 	if size <= 0 {
 		return "", nil
+	}
+	if maxBytes > 0 && size > maxBytes {
+		size = maxBytes
 	}
 	if _, err := f.Seek(int64(sym.StartByte), 0); err != nil {
 		return "", fmt.Errorf("seek: %w", err)

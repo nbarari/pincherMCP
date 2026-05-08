@@ -705,6 +705,95 @@ func TestReadSymbolSource_ValidFile(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ReadSymbolSourceCapped — bounded read for snippet extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestReadSymbolSourceCapped_TruncatesLargeRange(t *testing.T) {
+	// Build a 10 KB body so a small cap clearly truncates.
+	body := strings.Repeat("abcdefghij", 1024) // 10 KB
+	dir := t.TempDir()
+	writeFile(t, dir, "big.txt", body)
+
+	sym := db.Symbol{FilePath: "big.txt", StartByte: 0, EndByte: len(body)}
+
+	got, err := ReadSymbolSourceCapped(dir, sym, 256)
+	if err != nil {
+		t.Fatalf("ReadSymbolSourceCapped: %v", err)
+	}
+	if len(got) != 256 {
+		t.Errorf("expected 256 bytes (cap), got %d", len(got))
+	}
+	if got != body[:256] {
+		t.Errorf("content mismatch at cap boundary")
+	}
+}
+
+func TestReadSymbolSourceCapped_ZeroCapMeansUnbounded(t *testing.T) {
+	// maxBytes <= 0 should behave identically to ReadSymbolSource.
+	body := "package main\n\nfunc X() {}\n"
+	dir := t.TempDir()
+	writeFile(t, dir, "x.go", body)
+
+	sym := db.Symbol{FilePath: "x.go", StartByte: 0, EndByte: len(body)}
+
+	got, err := ReadSymbolSourceCapped(dir, sym, 0)
+	if err != nil {
+		t.Fatalf("ReadSymbolSourceCapped: %v", err)
+	}
+	if got != body {
+		t.Errorf("zero cap should return full body; got %d bytes, want %d", len(got), len(body))
+	}
+}
+
+func TestReadSymbolSourceCapped_CapLargerThanRange(t *testing.T) {
+	// When maxBytes exceeds the symbol size, the result should equal the
+	// full range (no padding, no error).
+	body := "short"
+	dir := t.TempDir()
+	writeFile(t, dir, "s.txt", body)
+
+	sym := db.Symbol{FilePath: "s.txt", StartByte: 0, EndByte: len(body)}
+
+	got, err := ReadSymbolSourceCapped(dir, sym, 1024)
+	if err != nil {
+		t.Fatalf("ReadSymbolSourceCapped: %v", err)
+	}
+	if got != body {
+		t.Errorf("cap > range should return full body; got %q, want %q", got, body)
+	}
+}
+
+func TestReadSymbolSourceCapped_ZeroLengthSymbol(t *testing.T) {
+	sym := db.Symbol{FilePath: "x.go", StartByte: 5, EndByte: 5}
+	got, err := ReadSymbolSourceCapped("/tmp", sym, 1024)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty for zero-length symbol, got %q", got)
+	}
+}
+
+func TestReadSymbolSource_DelegatesToCapped(t *testing.T) {
+	// Confirm ReadSymbolSource still returns the full range — the refactor
+	// to delegate through ReadSymbolSourceCapped(maxBytes=0) must not change
+	// any caller-visible behaviour.
+	body := strings.Repeat("x", 500)
+	dir := t.TempDir()
+	writeFile(t, dir, "x.txt", body)
+
+	sym := db.Symbol{FilePath: "x.txt", StartByte: 0, EndByte: len(body)}
+
+	got, err := ReadSymbolSource(dir, sym)
+	if err != nil {
+		t.Fatalf("ReadSymbolSource: %v", err)
+	}
+	if len(got) != 500 {
+		t.Errorf("ReadSymbolSource length = %d, want 500", len(got))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Index: empty directory (no source files)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -303,6 +303,73 @@ func TestHandleSearch_FieldProjection(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_SnippetOmittedWhenFieldsExcluded(t *testing.T) {
+	// When the caller's fields= projection excludes "snippet", the result
+	// row must not contain a snippet key — and the snippet-read disk path
+	// should not run. (The latter is also covered by the perf comment in
+	// handleSearch; this test pins the user-visible behaviour.)
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "projSnippet"
+	store.UpsertProject(db.Project{ID: "projSnippet", Path: "/tmp/projSnippet", Name: "projSnippet", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "sSnip", ProjectID: "projSnippet", FilePath: "z.go", Name: "ParseInput",
+			QualifiedName: "pkg.ParseInput", Kind: "Function", Language: "Go",
+			StartByte: 0, EndByte: 100, StartLine: 1, EndLine: 5},
+	})
+
+	result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query":  "ParseInput",
+		"fields": "id,name,kind",
+	}))
+	if err != nil {
+		t.Fatalf("handleSearch: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleSearch error: %v", decode(t, result))
+	}
+	m := decode(t, result)
+	rows, _ := m["results"].([]any)
+	if len(rows) == 0 {
+		t.Skip("no results — FTS not indexed yet")
+	}
+	row, _ := rows[0].(map[string]any)
+	if _, ok := row["snippet"]; ok {
+		t.Error("snippet should be absent when fields= excludes it")
+	}
+}
+
+func TestHandleSearch_SnippetIncludedByDefault(t *testing.T) {
+	// Without fields= projection, the row should include the snippet key
+	// (even if its value is empty when the file isn't on disk).
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "projSnipDefault"
+	store.UpsertProject(db.Project{ID: "projSnipDefault", Path: "/tmp/projSnipDefault", Name: "projSnipDefault", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "sSnipDef", ProjectID: "projSnipDefault", FilePath: "z.go", Name: "WriteOutput",
+			QualifiedName: "pkg.WriteOutput", Kind: "Function", Language: "Go",
+			StartByte: 0, EndByte: 100, StartLine: 1, EndLine: 5},
+	})
+
+	result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": "WriteOutput",
+	}))
+	if err != nil {
+		t.Fatalf("handleSearch: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleSearch error: %v", decode(t, result))
+	}
+	m := decode(t, result)
+	rows, _ := m["results"].([]any)
+	if len(rows) == 0 {
+		t.Skip("no results — FTS not indexed yet")
+	}
+	row, _ := rows[0].(map[string]any)
+	if _, ok := row["snippet"]; !ok {
+		t.Error("snippet key should be present when fields= is unset")
+	}
+}
+
 func TestHandleSearch_AllProjects(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	store.UpsertProject(db.Project{ID: "pA", Path: "/tmp/pA", Name: "pA", IndexedAt: time.Now()})
