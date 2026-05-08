@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -47,6 +48,7 @@ func main() {
 		basePath    = flag.String("basepath", "", "External URL prefix when behind a reverse proxy (e.g. /pincher). Both /pincher/v1/* and /v1/* will route. Falls back to $PINCHER_BASEPATH.")
 		trustProxy  = flag.Bool("trust-proxy", false, "Honor X-Forwarded-Prefix / X-Forwarded-Proto / X-Forwarded-Host headers. Only enable when behind a trusted proxy. Falls back to $PINCHER_TRUST_PROXY=1.")
 		slowQueryMS = flag.Int64("slow-query-ms", 0, "Persist tool calls slower than N ms to the slow_queries table for `pincher doctor` to surface (#42). 0 = disabled (zero overhead).")
+		dbReaders   = flag.Int("db-readers", db.DefaultReaderPoolSize, "Maximum concurrent SQLite read connections. Higher = more parallel tool calls behind a busy server; capped at 32. Falls back to $PINCHER_DB_READERS.")
 	)
 	flag.Parse()
 
@@ -86,8 +88,16 @@ func main() {
 		}
 	}
 
-	// Open SQLite store
-	store, err := db.Open(dir)
+	// Env fallback for --db-readers so install-time configuration can
+	// tune it without rewriting argv. Pass through unchanged if not set.
+	if envReaders := os.Getenv("PINCHER_DB_READERS"); envReaders != "" && *dbReaders == db.DefaultReaderPoolSize {
+		if v, parseErr := strconv.Atoi(envReaders); parseErr == nil && v > 0 {
+			*dbReaders = v
+		}
+	}
+
+	// Open SQLite store with the configured reader pool size.
+	store, err := db.OpenWithReaders(dir, *dbReaders)
 	if err != nil {
 		log.Fatalf("pincherMCP: failed to open database: %v", err)
 	}

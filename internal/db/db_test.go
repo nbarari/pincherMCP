@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +304,168 @@ func TestStore_ROFallsBackToWriter(t *testing.T) {
 	got := s.RO()
 	if got != s.db {
 		t.Error("RO() with nil ro pool should fall back to writer pool")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reader pool tunable + classification gate (#51 part 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestStore_OpenWithReaders_RespectsCustomSize(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenWithReaders(dir, 8)
+	if err != nil {
+		t.Fatalf("OpenWithReaders: %v", err)
+	}
+	defer s.Close()
+	if got := s.ro.Stats().MaxOpenConnections; got != 8 {
+		t.Errorf("MaxOpenConnections = %d, want 8", got)
+	}
+}
+
+func TestStore_OpenWithReaders_ClampsAboveMax(t *testing.T) {
+	// Pathological caller asks for 1000 — clamps to MaxReaderPoolSize.
+	dir := t.TempDir()
+	s, err := OpenWithReaders(dir, 1000)
+	if err != nil {
+		t.Fatalf("OpenWithReaders: %v", err)
+	}
+	defer s.Close()
+	if got := s.ro.Stats().MaxOpenConnections; got != MaxReaderPoolSize {
+		t.Errorf("MaxOpenConnections = %d, want clamped to %d", got, MaxReaderPoolSize)
+	}
+}
+
+func TestStore_OpenWithReaders_ClampsBelowMin(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenWithReaders(dir, -5)
+	if err != nil {
+		t.Fatalf("OpenWithReaders: %v", err)
+	}
+	defer s.Close()
+	// Negative falls through SetReaderPoolSize's "<= 0 → default" branch.
+	// Documented behaviour: pass 0 or negative to get the default.
+	if got := s.ro.Stats().MaxOpenConnections; got != DefaultReaderPoolSize {
+		t.Errorf("MaxOpenConnections = %d, want %d (default)", got, DefaultReaderPoolSize)
+	}
+}
+
+func TestStore_SetReaderPoolSize_RuntimeAdjust(t *testing.T) {
+	s := newTestStore(t)
+	if got := s.ro.Stats().MaxOpenConnections; got != DefaultReaderPoolSize {
+		t.Fatalf("initial pool size = %d, want %d", got, DefaultReaderPoolSize)
+	}
+	if err := s.SetReaderPoolSize(16); err != nil {
+		t.Fatalf("SetReaderPoolSize: %v", err)
+	}
+	if got := s.ro.Stats().MaxOpenConnections; got != 16 {
+		t.Errorf("after SetReaderPoolSize(16): MaxOpenConnections = %d, want 16", got)
+	}
+}
+
+// readerRoutedStoreMethods + writerRoutedStoreMethods enumerate every
+// exported *Store method by intent. The reflection-enumeration test
+// below verifies every method is in EXACTLY one of these sets — adding
+// a new method without classifying it fails the test loud, forcing the
+// PR reviewer to think about which pool it should use.
+//
+// SECURITY-RELEVANT: misclassifying a writer as a reader would either
+// fail at runtime ("attempt to write a readonly database") OR succeed
+// against a future relaxation of the RO mode. Misclassifying a reader
+// as a writer wastes a writer-pool slot but isn't unsafe. Erring
+// toward writer-routing is safe; toward reader-routing requires care.
+var readerRoutedStoreMethods = map[string]bool{
+	// Pure SELECTs (use s.ro).
+	"GetSymbol":               true,
+	"GetSymbolsByName":        true,
+	"GetSymbolsByQN":          true,
+	"GetSymbolsForFile":       true,
+	"GetHotspots":             true,
+	"SearchSymbols":           true,
+	"EdgesFrom":               true,
+	"EdgesTo":                 true,
+	"GraphStats":              true,
+	"AvgConfidenceByKind":     true,
+	"GetProject":              true,
+	"ListProjects":            true,
+	"GetADR":                  true,
+	"ListADRs":                true,
+	"GetFileHash":             true,
+	"ListExtractionFailures":  true,
+	"ListSlowQueries":         true,
+	"GetAllTimeSavings":       true,
+	"GetSessions":             true,
+	"ResolveStaleID":          true,
+	"TraceViaCTE":             true,
+	// Accessors that return the underlying *sql.DB. RO() returns the
+	// reader pool by definition; DB() returns the writer (semantic
+	// belongs to writer-routed since callers may write through it).
+	"RO": true,
+}
+
+var writerRoutedStoreMethods = map[string]bool{
+	// Mutations (use s.db).
+	"UpsertProject":            true,
+	"UpdateProjectCounts":      true,
+	"DeleteProject":            true,
+	"DeleteEmptyProjects":      true,
+	"BulkUpsertSymbols":        true,
+	"DeleteSymbolsForFile":     true,
+	"BulkUpsertEdges":          true,
+	"RecordSymbolMove":         true,
+	"DetectAndRecordMoves":     true,
+	"SetFileHash":              true,
+	"DeleteFileHash":           true,
+	"SetADR":                   true,
+	"DeleteADR":                true,
+	"RecordSession":            true,
+	"RecordExtractionFailure":  true,
+	"ClearExtractionFailures":  true,
+	"RecordSlowQuery":          true,
+	// Mixed read+write — kept on writer for transactional consistency.
+	"HealthCheck": true,
+	// Pragmas / lifecycle (writer-pool by definition).
+	"Optimize":           true,
+	"CheckpointTruncate": true,
+	"Close":              true,
+	"DB":                 true,
+	// Configuration (operates on the reader pool but is itself a write
+	// to the *Store — classified writer).
+	"SetReaderPoolSize": true,
+}
+
+// TestStore_AllExportedMethodsClassified is the routing classification
+// gate. Every exported method on *Store MUST appear in exactly one of
+// readerRoutedStoreMethods or writerRoutedStoreMethods. New methods
+// added without classification fail this test at the next CI run.
+//
+// Why this gate matters: without it, a new method authored under
+// time pressure could silently land using the WRITER pool for what
+// should be a reader-routed operation (or vice versa). The first form
+// is a perf regression that's hard to spot; the second is a runtime
+// failure waiting for the right deployment.
+func TestStore_AllExportedMethodsClassified(t *testing.T) {
+	storeType := reflect.TypeOf(&Store{})
+	classified := 0
+	for i := 0; i < storeType.NumMethod(); i++ {
+		name := storeType.Method(i).Name
+		// Reflection's NumMethod includes only exported methods on
+		// pointer receivers, which is what we want.
+		inReader := readerRoutedStoreMethods[name]
+		inWriter := writerRoutedStoreMethods[name]
+
+		if !inReader && !inWriter {
+			t.Errorf("exported *Store.%s is unclassified — add it to readerRoutedStoreMethods or writerRoutedStoreMethods in db_test.go (#51 part 2)", name)
+			continue
+		}
+		if inReader && inWriter {
+			t.Errorf("exported *Store.%s appears in BOTH allowlists — pick one", name)
+			continue
+		}
+		classified++
+	}
+	if classified == 0 {
+		t.Fatal("reflection found zero exported methods on *Store; allowlists may be stale")
 	}
 }
 
