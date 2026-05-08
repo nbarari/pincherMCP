@@ -325,41 +325,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "dashboard" && r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// Defense-in-depth CSP. The dashboard is an inline-only page
-		// (HTML + inline <style> + inline <script> + fetch() to /v1/*),
-		// so 'unsafe-inline' is required for both script-src and
-		// style-src. We compensate by:
-		//   - frame-ancestors 'none' — prevents clickjacking
-		//   - default-src 'self' — restricts everything else to origin
-		//   - connect-src 'self' — only the bundled fetch()es work
-		//   - img-src 'self' data: — inline pixel art / favicons
-		//   - object-src 'none' — no Flash/Java/etc.
-		//   - base-uri 'self' — no <base> hijack
-		//   - form-action 'self' — there are no forms today, but
-		//     guards against future ones being targeted off-origin
-		//
-		// A future PR can extract the inline JS to /v1/dashboard.js and
-		// drop unsafe-inline; the rest of the policy stays.
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; "+
-				"script-src 'self' 'unsafe-inline'; "+
-				"style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data:; "+
-				"connect-src 'self'; "+
-				"object-src 'none'; "+
-				"base-uri 'self'; "+
-				"form-action 'self'; "+
-				"frame-ancestors 'none'")
-		// X-Content-Type-Options stops MIME-sniffing-based attacks where
-		// a crafted response body is interpreted as a different type.
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		// X-Frame-Options is the legacy header for the same protection
-		// frame-ancestors gives in the CSP — kept for older browsers.
-		w.Header().Set("X-Frame-Options", "DENY")
-		// Referrer-Policy keeps the dashboard's URL from leaking to
-		// any third-party origin via outbound links.
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Tightened CSP (#56): no 'unsafe-inline' anywhere. The
+		// dashboard's CSS and JS now load from /v1/dashboard.css and
+		// /v1/dashboard.js so they hit script-src 'self' / style-src 'self'.
+		// XSS that injects an inline <script> into the rendered HTML is
+		// now BLOCKED BY THE BROWSER even if it bypasses our esc()
+		// escape pipeline — defense-in-depth beyond the source-side
+		// escaping work in #46.
+		s.writeDashboardSecurityHeaders(w, "default-src 'self'; "+
+			"script-src 'self'; "+
+			"style-src 'self'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"object-src 'none'; "+
+			"base-uri 'self'; "+
+			"form-action 'self'; "+
+			"frame-ancestors 'none'")
 		w.Write([]byte(renderDashboard(s.effectivePrefix(r))))
+		return
+	}
+	if path == "dashboard.js" && r.Method == http.MethodGet {
+		// Same security headers as the HTML response. Cache for 10 minutes
+		// to amortize repeat fetches by the same browser tab. The basepath
+		// substitution in the JS body means cache key is per-prefix; since
+		// most deployments have a stable prefix, this works as expected.
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		s.writeDashboardSecurityHeaders(w, "default-src 'none'; frame-ancestors 'none'")
+		w.Write([]byte(renderDashboardJS(s.effectivePrefix(r))))
+		return
+	}
+	if path == "dashboard.css" && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		s.writeDashboardSecurityHeaders(w, "default-src 'none'; frame-ancestors 'none'")
+		w.Write([]byte(renderDashboardCSS()))
 		return
 	}
 	// GET /v1/stats — dashboard-safe stats reader. Reads from DB only; never
@@ -720,6 +720,23 @@ func normalizeBasePath(p string) string {
 		p = "/" + p
 	}
 	return strings.TrimRight(p, "/")
+}
+
+// writeDashboardSecurityHeaders writes the CSP plus the three legacy
+// hardening headers shared by all dashboard responses (HTML, JS, CSS).
+// CSP is per-resource — the HTML needs the full resource policy; the
+// asset endpoints just need clickjacking protection and a strict default.
+func (s *Server) writeDashboardSecurityHeaders(w http.ResponseWriter, csp string) {
+	w.Header().Set("Content-Security-Policy", csp)
+	// X-Content-Type-Options stops MIME-sniffing-based attacks where a
+	// crafted response body is interpreted as a different type.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// X-Frame-Options is the legacy header for the same protection
+	// frame-ancestors gives in the CSP — kept for older browsers.
+	w.Header().Set("X-Frame-Options", "DENY")
+	// Referrer-Policy keeps the dashboard's URL from leaking to any
+	// third-party origin via outbound links.
+	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
 // effectivePrefix returns the externally-visible URL prefix for this request.

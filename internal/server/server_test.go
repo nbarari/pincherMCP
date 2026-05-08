@@ -2888,6 +2888,9 @@ func TestServeHTTP_TrustProxy_IgnoresHeaderByDefault(t *testing.T) {
 }
 
 func TestServeHTTP_Dashboard_InjectsBasePath(t *testing.T) {
+	// Post-#56: BP constant lives in /v1/dashboard.js, not the HTML
+	// shell. The HTML still has the prefix-rewritten <script src> and
+	// footer href; the BP constant moves to the JS endpoint.
 	srv, _, _ := newTestServer(t)
 	srv.SetBasePath("/pincher")
 	w := httpGet(t, srv, "/pincher/v1/dashboard")
@@ -2895,15 +2898,26 @@ func TestServeHTTP_Dashboard_InjectsBasePath(t *testing.T) {
 		t.Fatalf("dashboard: got %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, `const BP = "/pincher"`) {
-		t.Error("dashboard HTML missing injected BP constant")
+	if !strings.Contains(body, `src="/pincher/v1/dashboard.js"`) {
+		t.Error("dashboard HTML missing prefixed JS src")
+	}
+	if !strings.Contains(body, `href="/pincher/v1/dashboard.css"`) {
+		t.Error("dashboard HTML missing prefixed CSS href")
 	}
 	if !strings.Contains(body, `href="/pincher/v1/openapi.json"`) {
 		t.Error("dashboard footer link not prefixed")
 	}
-	// The placeholder must be fully substituted.
 	if strings.Contains(body, "__PINCHER_BASEPATH__") {
 		t.Error("dashboard HTML still contains unresolved __PINCHER_BASEPATH__ token")
+	}
+
+	// The JS endpoint receives the same prefix.
+	wJS := httpGet(t, srv, "/pincher/v1/dashboard.js")
+	if wJS.Code != http.StatusOK {
+		t.Fatalf("dashboard.js: got %d, want 200", wJS.Code)
+	}
+	if !strings.Contains(wJS.Body.String(), `const BP = "/pincher"`) {
+		t.Error("dashboard JS missing injected BP constant")
 	}
 }
 
@@ -2914,8 +2928,17 @@ func TestServeHTTP_Dashboard_NoBasePath(t *testing.T) {
 		t.Fatalf("dashboard: got %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, `const BP = ""`) {
-		t.Error("dashboard HTML should have empty BP when no basepath set")
+	// HTML should reference unprefixed asset URLs.
+	if !strings.Contains(body, `src="/v1/dashboard.js"`) {
+		t.Error("dashboard HTML missing unprefixed JS src")
+	}
+	// JS endpoint should have empty BP.
+	wJS := httpGet(t, srv, "/v1/dashboard.js")
+	if wJS.Code != http.StatusOK {
+		t.Fatalf("dashboard.js: got %d, want 200", wJS.Code)
+	}
+	if !strings.Contains(wJS.Body.String(), `const BP = ""`) {
+		t.Error("dashboard JS should have empty BP when no basepath set")
 	}
 	if strings.Contains(body, "__PINCHER_BASEPATH__") {
 		t.Error("dashboard still contains unresolved placeholder")
@@ -3535,8 +3558,9 @@ func TestValidateFetchURL_NoHost(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestDashboard_ESCWrapsAllAttributeJSONStringify(t *testing.T) {
-	// Render the dashboard (any basepath; behaviour is the same).
-	html := renderDashboard("")
+	// Post-#56: the JS lives in renderDashboardJS, not renderDashboard.
+	// Same attribute-injection patterns; just a different render call.
+	html := renderDashboardJS("")
 
 	// The five known attribute-injection sites must use esc(JSON.stringify(...)).
 	// Each pattern below is a stable substring of the expected safe form.
@@ -3558,7 +3582,8 @@ func TestDashboard_NoBareJSONStringifyInOnclickAttribute(t *testing.T) {
 	// Negative-shape regression: detect the unsafe pattern returning to
 	// any onclick handler. We scan for `onclick="<funcName>('+JSON.stringify`
 	// — the exact shape that bypasses HTML-attribute escaping.
-	html := renderDashboard("")
+	// Post-#56: scan the JS bundle, not the HTML shell.
+	html := renderDashboardJS("")
 
 	// Match `onclick="<JS>"` where <JS> contains a bare `+JSON.stringify(`
 	// not preceded by `esc(`.
@@ -3597,13 +3622,13 @@ func TestDashboard_NoBareJSONStringifyInOnclickAttribute(t *testing.T) {
 }
 
 func TestDashboard_EscFunctionDefined(t *testing.T) {
-	// Sanity check: the esc() helper must exist in the rendered template,
+	// Sanity check: the esc() helper must exist in the rendered JS,
 	// since every above test depends on it. Catches a regression where
 	// someone removes the helper definition while leaving call sites in
 	// place — would produce ReferenceError in browser, not a build break.
-	html := renderDashboard("")
-	if !strings.Contains(html, "const esc = s => String(s).replace") {
-		t.Error("esc() helper missing from dashboard — XSS escaping would fail at runtime")
+	js := renderDashboardJS("")
+	if !strings.Contains(js, "const esc = s => String(s).replace") {
+		t.Error("esc() helper missing from dashboard JS — XSS escaping would fail at runtime")
 	}
 }
 
@@ -3648,6 +3673,81 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 			t.Errorf("CSP missing required directive: %q\n  full CSP: %s", dir, csp)
 		}
 	}
+
+	// #56 negative gate: 'unsafe-inline' MUST NOT return to script-src
+	// or style-src. Pre-#56 the CSP included these because all JS/CSS
+	// was inline; #56 externalised both and dropped the relaxations.
+	// A future PR that quietly inlines a script for a hotfix would
+	// have to (a) fail this test loudly OR (b) deliberately re-add
+	// unsafe-inline, which would surface the security tradeoff in
+	// review.
+	mustNotContain := []string{
+		"script-src 'self' 'unsafe-inline'",
+		"style-src 'self' 'unsafe-inline'",
+		"'unsafe-eval'",
+	}
+	for _, banned := range mustNotContain {
+		if strings.Contains(csp, banned) {
+			t.Errorf("CSP MUST NOT contain %q (regressed XSS defense):\n  full CSP: %s", banned, csp)
+		}
+	}
+}
+
+func TestDashboard_AssetEndpoints(t *testing.T) {
+	// /v1/dashboard.js and /v1/dashboard.css MUST serve with the right
+	// Content-Type and a Cache-Control header. Pinning these signals
+	// catches a future change that drops the asset routes (which would
+	// break the dashboard at runtime) or removes caching (which would
+	// regress page-load performance).
+	srv, _, _ := newTestServer(t)
+
+	t.Run("javascript", func(t *testing.T) {
+		w := httpGet(t, srv, "/v1/dashboard.js")
+		if w.Code != http.StatusOK {
+			t.Fatalf("dashboard.js: got %d, want 200", w.Code)
+		}
+		if got := w.Header().Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+			t.Errorf("Content-Type = %q, want application/javascript; charset=utf-8", got)
+		}
+		if w.Header().Get("Cache-Control") == "" {
+			t.Error("Cache-Control header missing on JS asset")
+		}
+		// Asset CSP must be at least as strict as the HTML's, AND must
+		// not include 'unsafe-inline' — the asset itself isn't a place
+		// for inline blocks.
+		csp := w.Header().Get("Content-Security-Policy")
+		if strings.Contains(csp, "'unsafe-inline'") {
+			t.Errorf("dashboard.js CSP contains 'unsafe-inline': %s", csp)
+		}
+	})
+
+	t.Run("css", func(t *testing.T) {
+		w := httpGet(t, srv, "/v1/dashboard.css")
+		if w.Code != http.StatusOK {
+			t.Fatalf("dashboard.css: got %d, want 200", w.Code)
+		}
+		if got := w.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+			t.Errorf("Content-Type = %q, want text/css; charset=utf-8", got)
+		}
+		if w.Header().Get("Cache-Control") == "" {
+			t.Error("Cache-Control header missing on CSS asset")
+		}
+	})
+
+	t.Run("dashboard_html_no_inline_blocks", func(t *testing.T) {
+		// The HTML response MUST NOT contain inline <script>...</script> or
+		// <style>...</style> blocks with content — only references via
+		// src=/href=. If a future PR re-inlines anything, the CSP would
+		// reject it at runtime, but this test catches it at build time.
+		w := httpGet(t, srv, "/v1/dashboard")
+		body := w.Body.String()
+		if strings.Contains(body, "<script>") {
+			t.Error("dashboard HTML contains inline <script> block")
+		}
+		if strings.Contains(body, "<style>") {
+			t.Error("dashboard HTML contains inline <style> block")
+		}
+	})
 }
 
 func TestADR_AcceptsArbitraryStringValues(t *testing.T) {
