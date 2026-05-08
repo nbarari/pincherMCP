@@ -28,6 +28,12 @@ go tool cover -func=cover.out | grep -v "100.0%" | sort -t'%' -k1 -n
 # Pinned-corpus snapshot tests (#33)
 make corpus-test                  # verify each pinned corpus matches its snapshot
 make corpus-snapshot-update       # regenerate snapshots after intentional changes
+
+# Pinned-corpus performance benchmarks (#50 substrate)
+make bench                        # run all benchmarks at default (1s) per-bench
+make bench BENCHTIME=3s           # full run for stable numbers
+make bench-index                  # only internal/index benchmarks
+make bench-server                 # only internal/server benchmarks
 ```
 
 **After any schema change** (adding a column to `db.go`), rebuild `pincher.exe` and reconnect via `/mcp` in Claude Code so the binary serving MCP requests picks up the new schema.

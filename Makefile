@@ -27,7 +27,7 @@ SNAPSHOT_NOISE_FIELDS := db_size_kb,duration_ms
 # Equivalent to: del(.db_size_kb, .duration_ms)
 JQ_STRIP := 'del(.$(shell echo "$(SNAPSHOT_NOISE_FIELDS)" | sed "s/,/, ./g"))'
 
-.PHONY: build test corpus-test corpus-snapshot-update
+.PHONY: build test corpus-test corpus-snapshot-update bench bench-index bench-server
 
 build:
 	$(GO) build -o $(PINCHER_BIN) ./cmd/pinch/
@@ -75,3 +75,24 @@ corpus-snapshot-update: build
 	done
 	@echo ""
 	@echo "Snapshots regenerated. Review the git diff before committing."
+
+# Benchmarks (#50). Run against the pinned corpora so latency numbers can
+# be correlated to known-good symbol counts. These do NOT yet have CI gating
+# or committed baselines — that's a follow-up PR. For now they're a
+# developer-side substrate.
+#
+# Quick-run (1s per benchmark, fast feedback):
+#   make bench
+# Full-run (3s per benchmark, more stable numbers):
+#   make bench BENCHTIME=3s
+BENCHTIME ?= 1s
+
+bench: bench-index bench-server
+
+bench-index:
+	@echo "==> internal/index"
+	$(GO) test ./internal/index/ -run=^$$ -bench=. -benchtime=$(BENCHTIME) -benchmem
+
+bench-server:
+	@echo "==> internal/server"
+	$(GO) test ./internal/server/ -run=^$$ -bench=. -benchtime=$(BENCHTIME) -benchmem
