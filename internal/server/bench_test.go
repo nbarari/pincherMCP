@@ -138,6 +138,33 @@ func BenchmarkHandleQuery_SingleHopJoin_GoProject(b *testing.B) {
 	}
 }
 
+// BenchmarkHandleSearch_Parallel measures concurrent-read throughput
+// under the reader pool (#51). Pre-fix (single pool with MaxOpenConns=1),
+// every search call serialised through one connection; with the reader
+// pool, N concurrent calls fan out across the pool's connections and
+// scale closer to N×.
+//
+// The bench uses b.RunParallel to drive concurrent calls. With
+// MaxOpenConns(reader)=4 and GOMAXPROCS=4, expect throughput close
+// to 4× the single-call baseline.
+func BenchmarkHandleSearch_Parallel_GoProject(b *testing.B) {
+	srv, _, projectID := benchSetup(b, "go-project")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+				"query":   "Open",
+				"project": projectID,
+			}))
+			if err != nil {
+				b.Fatalf("handleSearch: %v", err)
+			}
+		}
+	})
+}
+
 // BenchmarkHandleArchitecture — whole-project graph scan. README claim:
 // 12ms for this codebase. On the go-project corpus expect much faster
 // (smaller scale).

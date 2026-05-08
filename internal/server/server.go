@@ -1376,7 +1376,8 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return errRes, nil
 	}
 
-	exec := &cypher.Executor{DB: s.store.DB(), MaxRows: maxRows, ProjectID: projectID}
+	// Cypher queries are pure SELECTs — route to the reader pool (#51).
+	exec := &cypher.Executor{DB: s.store.RO(), MaxRows: maxRows, ProjectID: projectID}
 	// Defense-in-depth deadline. The Executor honors context cancellation
 	// via QueryContext, but the incoming MCP context may not have one —
 	// so a pathological query (huge LIMIT × complex regex) could run
@@ -1579,7 +1580,7 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 
 	// Language breakdown
 	langs := make(map[string]int)
-	if langRows, err := s.store.DB().QueryContext(ctx,
+	if langRows, err := s.store.RO().QueryContext(ctx,
 		`SELECT language, COUNT(*) FROM symbols WHERE project_id=? GROUP BY language ORDER BY COUNT(*) DESC LIMIT 20`,
 		projectID); err == nil {
 		defer langRows.Close()
@@ -1595,7 +1596,7 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 
 	// Entry points
 	var entryPoints []map[string]any
-	if epRows, err := s.store.DB().QueryContext(ctx,
+	if epRows, err := s.store.RO().QueryContext(ctx,
 		`SELECT name, file_path, start_line FROM symbols WHERE project_id=? AND is_entry_point=1 LIMIT 20`,
 		projectID); err == nil {
 		defer epRows.Close()

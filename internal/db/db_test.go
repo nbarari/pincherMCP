@@ -186,6 +186,126 @@ func TestCheckpointTruncate_Idempotent(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Reader pool (#51) — single-writer preservation + RO enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestStore_WriterPoolStaysSingleWriter pins the SQLite single-writer
+// invariant: the writer pool MUST have MaxOpenConns(1). A future
+// "let's just bump this for parallelism" change would break correctness
+// silently — this test fails loud.
+func TestStore_WriterPoolStaysSingleWriter(t *testing.T) {
+	s := newTestStore(t)
+	got := s.db.Stats().MaxOpenConnections
+	if got != 1 {
+		t.Errorf("writer pool MaxOpenConnections = %d, want 1 (single-writer invariant)", got)
+	}
+}
+
+// TestStore_ReaderPoolHasMultipleConns confirms the reader pool is
+// actually multi-conn (the whole point of the split). If this returned
+// 1, we'd just be paying for a second pool with no parallelism benefit.
+func TestStore_ReaderPoolHasMultipleConns(t *testing.T) {
+	s := newTestStore(t)
+	got := s.ro.Stats().MaxOpenConnections
+	if got <= 1 {
+		t.Errorf("reader pool MaxOpenConnections = %d, want >1 (concurrent-read parallelism)", got)
+	}
+}
+
+// TestStore_ReaderPoolRejectsWrites is the security gate. Even if a
+// future routing bug sends a write through s.ro, SQLite enforces RO
+// at the file level and refuses with "attempt to write a readonly
+// database". This catches both the routing bug AND a hypothetical
+// SQLite version that loosens the check.
+func TestStore_ReaderPoolRejectsWrites(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.ro.Exec(`INSERT INTO projects(id, path, name, indexed_at) VALUES ('x','/x','x',0)`)
+	if err == nil {
+		t.Fatal("expected reader pool to refuse INSERT, got nil error")
+	}
+	// SQLite's exact error wording: "attempt to write a readonly database"
+	if !strings.Contains(strings.ToLower(err.Error()), "readonly") {
+		t.Errorf("expected readonly-database error, got: %v", err)
+	}
+}
+
+// TestStore_ReadsViaReaderPool_WhileWriteInProgress is the impact gate.
+// While a heavy write transaction holds the writer connection, a read
+// through s.ro MUST still complete promptly. Pre-fix (single pool with
+// MaxOpenConns=1), the read would queue behind the writer.
+func TestStore_ReadsViaReaderPool_WhileWriteInProgress(t *testing.T) {
+	s := newTestStore(t)
+	// Seed a project so the read has something to find.
+	if err := s.UpsertProject(testProject("read-during-write")); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// Hold a write transaction in a background goroutine.
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO projects(id,path,name,indexed_at) VALUES('blocking','/b','b',0)`); err != nil {
+		t.Fatalf("write inside tx: %v", err)
+	}
+	// Note: tx is HELD — we don't commit. The writer pool is "occupied".
+
+	// Concurrent read MUST succeed via reader pool.
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.GetProject("read-during-write")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("concurrent read failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("concurrent read blocked > 2s while writer tx held — reader pool not relieving contention")
+	}
+}
+
+// TestStore_CloseClosesBothPools verifies the lifecycle: Close() must
+// release BOTH pools, not just the writer. A leaked reader-pool
+// connection would prevent the SQLite file from being released and
+// cause "database is locked" on subsequent open attempts.
+func TestStore_CloseClosesBothPools(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := s.db.Stats().OpenConnections; got != 0 {
+		t.Errorf("writer pool OpenConnections after Close = %d, want 0", got)
+	}
+	if got := s.ro.Stats().OpenConnections; got != 0 {
+		t.Errorf("reader pool OpenConnections after Close = %d, want 0", got)
+	}
+}
+
+// TestStore_ROFallsBackToWriter pins the defensive RO() fallback: if
+// the reader pool failed to open for any reason, RO() returns the
+// writer pool so callers don't crash. Functionally correct (slower)
+// instead of broken.
+func TestStore_ROFallsBackToWriter(t *testing.T) {
+	s := newTestStore(t)
+	// Force the fallback path by clearing s.ro.
+	s.ro.Close()
+	s.ro = nil
+
+	got := s.RO()
+	if got != s.db {
+		t.Error("RO() with nil ro pool should fall back to writer pool")
+	}
+}
+
 func TestMigrate_UpgradeFromV1(t *testing.T) {
 	// Simulate a pre-versioning database that is at schema v1 (baseline only,
 	// no extraction_confidence column, no symbol_moves table).

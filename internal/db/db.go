@@ -39,8 +39,33 @@ func getTokenizer() tkz.Codec {
 }
 
 // Store wraps a SQLite database.
+//
+// Two connection pools point at the same underlying SQLite file:
+//
+//   - db: the WRITER pool. SetMaxOpenConns(1) preserves the
+//     single-writer invariant SQLite requires. All Exec / Begin paths
+//     route here.
+//   - ro: the READER pool. SetMaxOpenConns(N) (default 4); opened with
+//     `mode=ro` query parameter so SQLite enforces RO at the file
+//     level, not just by routing convention. All Query / QueryRow
+//     paths SHOULD route here.
+//
+// Why two pools (#51): SQLite WAL allows concurrent readers without
+// blocking the writer. Pre-fix, every read serialized through the
+// single writer pool — a `search` call queued behind an active
+// `Index()` waited for the indexer to release the connection between
+// flushes. With the reader pool, concurrent tool calls run in parallel.
+//
+// SECURITY / CORRECTNESS:
+//   - The reader pool's MaxOpenConns MUST stay at 1 (single-writer)
+//     — see TestStore_WriterPoolStaysSingleWriter.
+//   - Reads that happen to use s.db still work (writer pool serves
+//     reads too); migrating them to s.ro is purely a performance win.
+//   - Migrations, Optimize, CheckpointTruncate, all PRAGMA writes,
+//     all Exec, all Begin paths — must use s.db.
 type Store struct {
-	db   *sql.DB
+	db   *sql.DB // writer pool: MaxOpenConns=1
+	ro   *sql.DB // reader pool: MaxOpenConns=4 (default), mode=ro
 	Path string
 }
 
@@ -128,14 +153,63 @@ func Open(dir string) (*Store, error) {
 	// that starved checkpoints in the first place.
 	_, _ = db.Exec("PRAGMA journal_size_limit = 268435456")
 
+	// Reader pool — opened AFTER migrations + WAL guardrail so the file
+	// it opens against is fully initialised. The `mode=ro` parameter
+	// makes SQLite enforce read-only at the file level, so even a routing
+	// bug that sends a write through s.ro fails fast with
+	// "attempt to write a readonly database" instead of silently
+	// corrupting state. busy_timeout matches the writer so contention
+	// retries align. cache_size is half the writer's; readers don't
+	// need as much page-cache because they don't dirty pages.
+	roDSN := fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=cache_size(-32768)&_pragma=busy_timeout(5000)",
+		path,
+	)
+	ro, err := sql.Open("sqlite", roDSN)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open reader pool: %w", err)
+	}
+	ro.SetMaxOpenConns(4)
+	ro.SetMaxIdleConns(4)
+	s.ro = ro
+
 	return s, nil
 }
 
-// DB returns the raw *sql.DB for advanced callers (e.g. the Cypher executor).
+// DB returns the WRITER pool for advanced callers that need to write.
+// Most direct callers want RO() instead — this method preserved for
+// backward compatibility with code that doesn't yet distinguish.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
+// RO returns the READER pool — read-only, MaxOpenConns=4 by default.
+// Use this for direct sql.DB access in pure-SELECT contexts (e.g. the
+// Cypher executor). Routing reads here unlocks WAL's concurrent-reader
+// capability instead of serialising through the single writer.
+func (s *Store) RO() *sql.DB {
+	if s.ro != nil {
+		return s.ro
+	}
+	// Defensive fallback: if the reader pool failed to open for some
+	// reason, fall back to the writer so callers don't crash. Slower
+	// but functionally correct.
+	return s.db
+}
+
+// Close closes both pools. Safe to call multiple times; the underlying
+// sql.DB.Close handles redundant calls cleanly.
+func (s *Store) Close() error {
+	var firstErr error
+	if s.ro != nil {
+		if err := s.ro.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if err := s.db.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
 
 // Optimize runs SQLite's PRAGMA optimize — a lightweight stats refresh that
 // returns in milliseconds when nothing's changed and only does real work when
@@ -515,7 +589,8 @@ func (s *Store) UpdateProjectCounts(projectID string, files, syms, edges int) er
 
 // ListProjects returns all indexed projects.
 func (s *Store) ListProjects() ([]Project, error) {
-	rows, err := s.db.Query(
+	// Reader pool (#51).
+	rows, err := s.ro.Query(
 		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -536,7 +611,8 @@ func (s *Store) ListProjects() ([]Project, error) {
 
 // GetProject returns a single project by ID, or nil if not found.
 func (s *Store) GetProject(id string) (*Project, error) {
-	row := s.db.QueryRow(
+	// Reader pool (#51).
+	row := s.ro.QueryRow(
 		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count FROM projects WHERE id=?`, id)
 	var p Project
 	var ts int64
@@ -755,7 +831,8 @@ func (s *Store) DeleteSymbolsForFile(projectID, filePath string) error {
 
 // GetSymbol returns a symbol by its stable ID, or nil if not found.
 func (s *Store) GetSymbol(id string) (*Symbol, error) {
-	row := s.db.QueryRow(symSelectFrom+` WHERE id=?`, id)
+	// Reader pool (#51) — pure SELECT.
+	row := s.ro.QueryRow(symSelectFrom+` WHERE id=?`, id)
 	return scanOneSymbol(row)
 }
 
@@ -823,7 +900,8 @@ func (s *Store) SearchSymbols(projectID, query, kind, language string, limit int
 	q += " ORDER BY score LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	// Reader pool (#51) — FTS5 MATCH + JOIN is read-only.
+	rows, err := s.ro.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -897,7 +975,8 @@ func (s *Store) queryEdges(col, id string, kinds []string) ([]Edge, error) {
 		}
 		q += " AND kind IN (" + in + ")"
 	}
-	rows, err := s.db.Query(q, args...)
+	// Reader pool (#51) — covers EdgesFrom + EdgesTo.
+	rows, err := s.ro.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1066,18 +1145,23 @@ func (s *Store) TraceViaCTE(startID, direction string, edgeKinds []string, maxDe
 }
 
 // GraphStats returns node and edge counts grouped by kind.
+//
+// Hot path: PR #28's throttled refresh calls this every 5s during a
+// long Index() run, plus dashboard / list / architecture tools call
+// it on every request. Reader-pool routing (#51) means these calls
+// don't queue behind the active write transaction.
 func (s *Store) GraphStats(projectID string) (symCount, edgeCount int, kindCounts, edgeKindCounts map[string]int, err error) {
 	kindCounts = make(map[string]int)
 	edgeKindCounts = make(map[string]int)
 
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM symbols WHERE project_id=?`, projectID).Scan(&symCount); err != nil {
+	if err = s.ro.QueryRow(`SELECT COUNT(*) FROM symbols WHERE project_id=?`, projectID).Scan(&symCount); err != nil {
 		return
 	}
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM edges WHERE project_id=?`, projectID).Scan(&edgeCount); err != nil {
+	if err = s.ro.QueryRow(`SELECT COUNT(*) FROM edges WHERE project_id=?`, projectID).Scan(&edgeCount); err != nil {
 		return
 	}
 
-	rows, err2 := s.db.Query(`SELECT kind, COUNT(*) FROM symbols WHERE project_id=? GROUP BY kind`, projectID)
+	rows, err2 := s.ro.Query(`SELECT kind, COUNT(*) FROM symbols WHERE project_id=? GROUP BY kind`, projectID)
 	if err2 != nil {
 		err = err2
 		return
@@ -1095,7 +1179,7 @@ func (s *Store) GraphStats(projectID string) (symCount, edgeCount int, kindCount
 		return
 	}
 
-	erows, err3 := s.db.Query(`SELECT kind, COUNT(*) FROM edges WHERE project_id=? GROUP BY kind`, projectID)
+	erows, err3 := s.ro.Query(`SELECT kind, COUNT(*) FROM edges WHERE project_id=? GROUP BY kind`, projectID)
 	if err3 != nil {
 		err = err3
 		return
@@ -1118,7 +1202,8 @@ func (s *Store) GraphStats(projectID string) (symCount, edgeCount int, kindCount
 // signal-quality drift over time. Empty map on a project with no symbols.
 func (s *Store) AvgConfidenceByKind(projectID string) (map[string]float64, error) {
 	out := map[string]float64{}
-	rows, err := s.db.Query(
+	// Reader pool (#51) — pure aggregation read.
+	rows, err := s.ro.Query(
 		`SELECT kind, AVG(extraction_confidence) FROM symbols
 		 WHERE project_id=? GROUP BY kind`, projectID)
 	if err != nil {
@@ -1141,9 +1226,13 @@ func (s *Store) AvgConfidenceByKind(projectID string) (map[string]float64, error
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GetFileHash returns the stored content hash for a file, or "" if not indexed.
+//
+// Hot path: indexer's per-file hash check fires for every file in every
+// Index() walk. Reader pool (#51) lets these run in parallel during
+// re-index of large projects.
 func (s *Store) GetFileHash(projectID, path string) string {
 	var hash string
-	_ = s.db.QueryRow(`SELECT hash FROM files WHERE project_id=? AND path=?`, projectID, path).Scan(&hash)
+	_ = s.ro.QueryRow(`SELECT hash FROM files WHERE project_id=? AND path=?`, projectID, path).Scan(&hash)
 	return hash
 }
 
@@ -1176,7 +1265,8 @@ func (s *Store) SetADR(projectID, key, value string) error {
 // GetADR returns an ADR value by key.
 func (s *Store) GetADR(projectID, key string) (string, bool, error) {
 	var value string
-	err := s.db.QueryRow(`SELECT value FROM adrs WHERE project_id=? AND key=?`, projectID, key).Scan(&value)
+	// Reader pool (#51).
+	err := s.ro.QueryRow(`SELECT value FROM adrs WHERE project_id=? AND key=?`, projectID, key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}
@@ -1185,7 +1275,8 @@ func (s *Store) GetADR(projectID, key string) (string, bool, error) {
 
 // ListADRs returns all ADR entries for a project.
 func (s *Store) ListADRs(projectID string) (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT key, value FROM adrs WHERE project_id=? ORDER BY key`, projectID)
+	// Reader pool (#51).
+	rows, err := s.ro.Query(`SELECT key, value FROM adrs WHERE project_id=? ORDER BY key`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1284,8 +1375,10 @@ const symSelectFrom = `
 	FROM symbols`
 
 // querySymbols runs q with args and returns all symbols scanned from the result set.
+// querySymbols routes through the READER pool (#51). Used by every
+// Get*Symbol* method in this file — migrating once here covers them all.
 func (s *Store) querySymbols(q string, args ...any) ([]Symbol, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.ro.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
