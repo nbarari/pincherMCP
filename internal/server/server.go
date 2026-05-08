@@ -294,6 +294,40 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "dashboard" && r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// Defense-in-depth CSP. The dashboard is an inline-only page
+		// (HTML + inline <style> + inline <script> + fetch() to /v1/*),
+		// so 'unsafe-inline' is required for both script-src and
+		// style-src. We compensate by:
+		//   - frame-ancestors 'none' — prevents clickjacking
+		//   - default-src 'self' — restricts everything else to origin
+		//   - connect-src 'self' — only the bundled fetch()es work
+		//   - img-src 'self' data: — inline pixel art / favicons
+		//   - object-src 'none' — no Flash/Java/etc.
+		//   - base-uri 'self' — no <base> hijack
+		//   - form-action 'self' — there are no forms today, but
+		//     guards against future ones being targeted off-origin
+		//
+		// A future PR can extract the inline JS to /v1/dashboard.js and
+		// drop unsafe-inline; the rest of the policy stays.
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"object-src 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'; "+
+				"frame-ancestors 'none'")
+		// X-Content-Type-Options stops MIME-sniffing-based attacks where
+		// a crafted response body is interpreted as a different type.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// X-Frame-Options is the legacy header for the same protection
+		// frame-ancestors gives in the CSP — kept for older browsers.
+		w.Header().Set("X-Frame-Options", "DENY")
+		// Referrer-Policy keeps the dashboard's URL from leaking to
+		// any third-party origin via outbound links.
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Write([]byte(renderDashboard(s.effectivePrefix(r))))
 		return
 	}

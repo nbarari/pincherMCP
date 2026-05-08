@@ -3312,3 +3312,185 @@ func TestValidateFetchURL_NoHost(t *testing.T) {
 		t.Error("expected error on URL with no host")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard XSS protection (#41 item 4)
+//
+// Five JSON.stringify-into-attribute sites that previously produced JS-safe
+// but HTML-unsafe output. A user-controlled value containing `' onclick=...`
+// could break out of the onclick attribute and inject new attributes when
+// the dashboard renders the project list, search results, or ADR list.
+//
+// These tests don't render the dashboard in a real browser (Go can't), but
+// they pin the safe shape at the template-source level: every JSON.stringify
+// site that lands inside an HTML attribute MUST be wrapped in esc(). A
+// regression to bare JSON.stringify in those positions makes these tests
+// fail.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestDashboard_ESCWrapsAllAttributeJSONStringify(t *testing.T) {
+	// Render the dashboard (any basepath; behaviour is the same).
+	html := renderDashboard("")
+
+	// The five known attribute-injection sites must use esc(JSON.stringify(...)).
+	// Each pattern below is a stable substring of the expected safe form.
+	safeSites := []string{
+		"openDetail('+esc(JSON.stringify(id))+','+esc(JSON.stringify(name))+')",
+		"reindex('+esc(JSON.stringify(id))+',this)",
+		"deleteProject('+esc(JSON.stringify(id))+','+esc(JSON.stringify(name))+')",
+		"deleteADR('+esc(JSON.stringify(e.key||''))+')",
+		"copyID('+esc(JSON.stringify(r.id))+',this)",
+	}
+	for _, want := range safeSites {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard missing safe attribute-escape pattern:\n  want substring: %s", want)
+		}
+	}
+}
+
+func TestDashboard_NoBareJSONStringifyInOnclickAttribute(t *testing.T) {
+	// Negative-shape regression: detect the unsafe pattern returning to
+	// any onclick handler. We scan for `onclick="<funcName>('+JSON.stringify`
+	// — the exact shape that bypasses HTML-attribute escaping.
+	html := renderDashboard("")
+
+	// Match `onclick="<JS>"` where <JS> contains a bare `+JSON.stringify(`
+	// not preceded by `esc(`.
+	//
+	// Pattern: onclick=" ... +JSON.stringify( ... )+...
+	// We look for `+JSON.stringify(` and verify the preceding non-space
+	// chars are `+esc(` not just `+`.
+	idx := 0
+	for {
+		i := strings.Index(html[idx:], "+JSON.stringify(")
+		if i < 0 {
+			break
+		}
+		abs := idx + i
+		// Look back at most 8 chars for the safe wrapper "esc(".
+		start := abs - 8
+		if start < 0 {
+			start = 0
+		}
+		preceding := html[start:abs]
+		if !strings.Contains(preceding, "esc(") {
+			// Distinguish onclick context from "fetch body" context (safe).
+			// Walk back to find the nearest preceding " or '.
+			ctxStart := abs - 200
+			if ctxStart < 0 {
+				ctxStart = 0
+			}
+			ctx := html[ctxStart:abs]
+			if strings.Contains(ctx, "onclick=") || strings.Contains(ctx, "title=") {
+				t.Errorf("found bare JSON.stringify in attribute context at byte %d:\n  context: ...%s",
+					abs, html[ctxStart:abs+80])
+			}
+		}
+		idx = abs + len("+JSON.stringify(")
+	}
+}
+
+func TestDashboard_EscFunctionDefined(t *testing.T) {
+	// Sanity check: the esc() helper must exist in the rendered template,
+	// since every above test depends on it. Catches a regression where
+	// someone removes the helper definition while leaving call sites in
+	// place — would produce ReferenceError in browser, not a build break.
+	html := renderDashboard("")
+	if !strings.Contains(html, "const esc = s => String(s).replace") {
+		t.Error("esc() helper missing from dashboard — XSS escaping would fail at runtime")
+	}
+}
+
+// CSP and security headers on the dashboard response.
+
+func TestDashboard_SecurityHeaders(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := httpGet(t, srv, "/v1/dashboard")
+	if w.Code != http.StatusOK {
+		t.Fatalf("dashboard: got %d, want 200", w.Code)
+	}
+
+	wantHeaders := map[string]string{
+		"Content-Type":           "text/html; charset=utf-8",
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	}
+	for header, want := range wantHeaders {
+		got := w.Header().Get(header)
+		if got != want {
+			t.Errorf("header %s: got %q, want %q", header, got, want)
+		}
+	}
+
+	// CSP must be present and contain each of the directives we explicitly
+	// rely on. We don't check exact-match because future tightening (e.g.
+	// dropping unsafe-inline once JS is externalized) is good — we just
+	// want to fail loud if a directive disappears.
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing")
+	}
+	mustContain := []string{
+		"default-src 'self'",
+		"frame-ancestors 'none'", // clickjacking defense
+		"object-src 'none'",      // no Flash/Java/etc.
+		"base-uri 'self'",        // no <base> hijack
+	}
+	for _, dir := range mustContain {
+		if !strings.Contains(csp, dir) {
+			t.Errorf("CSP missing required directive: %q\n  full CSP: %s", dir, csp)
+		}
+	}
+}
+
+func TestADR_AcceptsArbitraryStringValues(t *testing.T) {
+	// Regression: the ADR write path MUST NOT silently sanitize, mangle,
+	// or reject arbitrary string values. Sanitization is the dashboard's
+	// job (esc() on render). Server-side filtering would create a
+	// false sense of safety AND lose data.
+	srv, store, _ := newTestServer(t)
+	if err := store.UpsertProject(db.Project{
+		ID: "xss-test", Path: "/p", Name: "p", IndexedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+
+	payloads := map[string]string{
+		"html_tags":  `<script>alert(1)</script>`,
+		"attr_break": `' onclick=alert(1)//`,
+		"quote":      `value with "double" and 'single' quotes`,
+		"newlines":   "line1\nline2\nline3",
+		"unicode":    "héllo wörld 你好 🦀",
+	}
+
+	for name, payload := range payloads {
+		t.Run(name, func(t *testing.T) {
+			// SET
+			result, err := srv.handleADR(context.Background(), makeReq(map[string]any{
+				"action":  "set",
+				"project": "xss-test",
+				"key":     "k_" + name,
+				"value":   payload,
+			}))
+			if err != nil {
+				t.Fatalf("ADR set: %v", err)
+			}
+			m := decode(t, result)
+			if m["error"] != nil {
+				t.Fatalf("ADR set rejected payload: %v", m["error"])
+			}
+
+			// GET — must return the payload verbatim, no server-side mangling.
+			result, _ = srv.handleADR(context.Background(), makeReq(map[string]any{
+				"action":  "get",
+				"project": "xss-test",
+				"key":     "k_" + name,
+			}))
+			m = decode(t, result)
+			if got := m["value"]; got != payload {
+				t.Errorf("round-trip: got %q, want %q", got, payload)
+			}
+		})
+	}
+}

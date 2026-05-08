@@ -607,9 +607,14 @@ function renderProjects() {
       return '<div class="proj-card'+cardCls+'" id="pcard-'+esc(id)+'">'+
         '<div class="proj-header"><div class="proj-name">'+esc(name)+'</div>'+
         '<div class="proj-actions">'+
-        '<button class="proj-btn" onclick="openDetail('+JSON.stringify(id)+','+JSON.stringify(name)+')">&#x2699; Details</button>'+
-        '<button class="proj-btn" onclick="reindex('+JSON.stringify(id)+',this)">\u27f3 Re-index</button>'+
-        '<button class="proj-btn danger" onclick="deleteProject('+JSON.stringify(id)+','+JSON.stringify(name)+')">\u2715 Remove</button>'+
+        // SECURITY: JSON.stringify makes the value safe as JS, but the
+        // resulting string lives inside an HTML attribute \u2014 bare " inside
+        // breaks out of the attribute. esc() escapes HTML special chars
+        // so the attribute value stays intact while remaining valid JS
+        // when the browser unescapes it for the onclick handler.
+        '<button class="proj-btn" onclick="openDetail('+esc(JSON.stringify(id))+','+esc(JSON.stringify(name))+')">&#x2699; Details</button>'+
+        '<button class="proj-btn" onclick="reindex('+esc(JSON.stringify(id))+',this)">\u27f3 Re-index</button>'+
+        '<button class="proj-btn danger" onclick="deleteProject('+esc(JSON.stringify(id))+','+esc(JSON.stringify(name))+')">\u2715 Remove</button>'+
         '</div></div>'+
         '<div class="proj-path'+(isEmpty||isStale?' missing':'')+'" title="'+esc(path)+'">'+esc(path)+esc(statusMsg)+'</div>'+
         '<div class="proj-stats">'+
@@ -723,7 +728,8 @@ async function doSearch() {
       '<div class="result-card">'+
       '<div class="result-header">'+
         '<div class="result-name">'+esc(r.name||'')+'</div>'+
-        (r.id?'<button class="copy-id-btn" title="Copy symbol ID" onclick="copyID('+JSON.stringify(r.id)+',this)">Copy ID</button>':'')+
+        // SECURITY: esc() around JSON.stringify — see project-card buttons.
+        (r.id?'<button class="copy-id-btn" title="Copy symbol ID" onclick="copyID('+esc(JSON.stringify(r.id))+',this)">Copy ID</button>':'')+
       '</div>'+
       '<div class="result-meta">'+
         '<span class="pill">'+esc(r.kind||'')+'</span> &nbsp;'+
@@ -796,7 +802,9 @@ async function loadADRs() {
       '<div class="adr-row">'+
       '<div class="adr-key">'+esc(e.key||'')+'</div>'+
       '<div class="adr-val">'+esc(e.value||'')+'</div>'+
-      '<button class="adr-del" title="Delete" onclick="deleteADR('+JSON.stringify(e.key||'')+')">&#x2715;</button>'+
+      // SECURITY: see openDetail/reindex/deleteProject — esc() around
+      // JSON.stringify keeps the value safe inside an HTML attribute.
+      '<button class="adr-del" title="Delete" onclick="deleteADR('+esc(JSON.stringify(e.key||''))+')">&#x2715;</button>'+
       '</div>'
     ).join('');
   } catch(e) { list.innerHTML='<div class="error">Failed to load ADRs: '+esc(e.message)+'</div>'; }
