@@ -3,6 +3,39 @@ package server
 import "strings"
 
 // renderDashboard returns the dashboard HTML with the reverse-proxy basepath
+// (e.g. "/pincher") substituted in. Pass "" for direct deployment.
+//
+// Post-#56: the dashboard's CSS and JS are served from separate endpoints
+// (/v1/dashboard.css + /v1/dashboard.js) instead of inline. This lets the
+// CSP drop 'unsafe-inline' from script-src and style-src — XSS that injects
+// inline <script> content is now blocked by the browser even if it bypasses
+// our esc() escape pipeline.
+func renderDashboard(prefix string) string {
+	return strings.ReplaceAll(dashboardTemplate, "__PINCHER_BASEPATH__", prefix)
+}
+
+// renderDashboardJS returns the dashboard JavaScript with the reverse-proxy
+// basepath substituted into the BP constant. Served from /v1/dashboard.js.
+func renderDashboardJS(prefix string) string {
+	return strings.ReplaceAll(dashboardJSTemplate, "__PINCHER_BASEPATH__", prefix)
+}
+
+// renderDashboardCSS returns the dashboard CSS. No basepath substitution
+// needed — CSS has no URL references. Served from /v1/dashboard.css.
+func renderDashboardCSS() string {
+	return dashboardCSSContent
+}
+
+// dashboardTemplate is the self-contained stats dashboard served at GET /v1/dashboard.
+// Loads CSS from /v1/dashboard.css and JS from /v1/dashboard.js; no inline blocks
+// so the CSP can enforce script-src 'self' / style-src 'self'.
+// __PINCHER_BASEPATH__ tokens are substituted at render time by renderDashboard.
+const dashboardTemplate = `
+package server
+
+import "strings"
+
+// renderDashboard returns the dashboard HTML with the reverse-proxy basepath
 // (e.g. "/pincher") substituted in. Pass "" for direct deployment. The prefix
 // flows into:
 //   - window.PINCHER_BASEPATH (read by the fetch interceptor + auth check)
@@ -14,13 +47,143 @@ func renderDashboard(prefix string) string {
 // dashboardTemplate is the self-contained stats dashboard served at GET /v1/dashboard.
 // Fetches all data live from /v1/* endpoints; no external dependencies.
 // __PINCHER_BASEPATH__ tokens are substituted at render time by renderDashboard.
-const dashboardTemplate = `<!DOCTYPE html>
+const dashboardTemplate = ` + "`" + `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>pincherMCP · Dashboard</title>
-<style>
+  <link rel="stylesheet" href="__PINCHER_BASEPATH__/v1/dashboard.css">
+</head>
+<body>
+<header>
+  <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+    <circle cx="18" cy="18" r="17" stroke="url(#hg)" stroke-width="2"/>
+    <line x1="10" y1="10" x2="26" y2="26" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="26" y1="10" x2="10" y2="26" stroke="#a371f7" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="18" cy="18" r="4" fill="#58a6ff"/>
+    <defs><linearGradient id="hg" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#58a6ff"/><stop offset="1" stop-color="#a371f7"/></linearGradient></defs>
+  </svg>
+  <div>
+    <h1>pincher<span>MCP</span> <span style="font-size:12px;font-weight:400" id="ver"></span></h1>
+    <p>Codebase intelligence · Token savings dashboard</p>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+    <span class="badge badge-green" id="health-badge">● checking…</span>
+    <span class="badge badge-blue" id="last-refresh">—</span>
+    <button class="header-btn" id="auth-btn" title="Set HTTP bearer token (required when pincher is started with --http-key)" onclick="promptForKey()">Auth</button>
+  </div>
+</header>
+
+<nav class="tab-bar">
+  <button class="tab-btn active" onclick="showTab('overview')">Overview</button>
+  <button class="tab-btn" onclick="showTab('projects')">Projects</button>
+  <button class="tab-btn" onclick="showTab('search')">Search</button>
+  <button class="tab-btn" onclick="showTab('adrs')">ADRs</button>
+  <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
+</nav>
+
+<!-- OVERVIEW -->
+<div id="tab-overview" class="tab-pane active">
+<main>
+  <div id="error-box"></div>
+  <p class="section-title" id="session-title">Session</p>
+  <div class="grid grid-4" id="session-cards"><div class="loading">Loading…</div></div>
+  <p class="section-title">All-Time ROI</p>
+  <div class="grid grid-4" id="alltime-cards"><div class="loading">Loading…</div></div>
+  <div id="projection-banner"></div>
+  <p class="section-title">Token Savings History</p>
+  <div class="sparkline-card">
+    <div class="sparkline-meta">
+      <span class="sparkline-title">Tokens saved per session</span>
+      <span class="sparkline-legend" id="sparkline-legend">—</span>
+    </div>
+    <svg id="sparkline-svg" viewBox="0 0 800 80" preserveAspectRatio="none">
+      <text x="400" y="45" text-anchor="middle" fill="#8b949e" font-size="12">Loading…</text>
+    </svg>
+  </div>
+</main>
+</div>
+
+<!-- PROJECTS -->
+<div id="tab-projects" class="tab-pane">
+<main>
+  <p class="section-title">Indexed Projects</p>
+  <div class="proj-toolbar">
+    <input class="search-input" id="proj-filter" type="text" placeholder="Filter by name or path…" oninput="renderProjects()"/>
+    <label class="toolbar-check" title="Hide projects with zero symbols and zero edges">
+      <input type="checkbox" id="proj-hide-empty" onchange="renderProjects()"/> Hide empty
+    </label>
+    <button class="btn secondary" id="proj-cleanup-btn" onclick="cleanupEmpty()">Remove all empty</button>
+    <span class="toolbar-count" id="proj-count">&nbsp;</span>
+  </div>
+  <div class="grid grid-2" id="projects-grid"><div class="loading">Loading…</div></div>
+  <div class="detail-panel" id="proj-detail-panel">
+    <div class="detail-panel-title">
+      <span id="proj-detail-name">Project Details</span>
+      <button class="detail-close" onclick="closeDetail()" title="Close">&#x2715;</button>
+    </div>
+    <div id="proj-detail-body"><div class="loading">Loading…</div></div>
+  </div>
+</main>
+</div>
+
+<!-- SEARCH -->
+<div id="tab-search" class="tab-pane">
+<main>
+  <p class="section-title">Symbol Search</p>
+  <div class="search-bar">
+    <input class="search-input" id="search-q" type="text" placeholder="Search symbols… (e.g. handleSearch, auth*, &quot;token validation&quot;)" onkeydown="if(event.key==='Enter')doSearch()"/>
+    <select class="search-select" id="search-kind">
+      <option value="">All kinds</option>
+      <option>Function</option><option>Method</option><option>Class</option>
+      <option>Interface</option><option>Type</option><option>Variable</option>
+    </select>
+    <select class="search-select" id="search-proj"><option value="">All projects</option></select>
+    <button class="search-btn" onclick="doSearch()">Search</button>
+  </div>
+  <div id="search-results"></div>
+</main>
+</div>
+
+<!-- ADRs -->
+<div id="tab-adrs" class="tab-pane">
+<main>
+  <p class="section-title">Architecture Decision Records</p>
+  <div class="adr-toolbar">
+    <select class="adr-select" id="adr-proj" onchange="onADRProjectChange()"><option value="">Select a project…</option></select>
+    <button class="btn secondary" onclick="toggleADRForm()">+ Add Entry</button>
+  </div>
+  <div class="adr-form" id="adr-form">
+    <input id="adr-key" type="text" placeholder="Key (e.g. PURPOSE, STACK, PATTERNS)"/>
+    <textarea id="adr-val" placeholder="Value…"></textarea>
+    <div class="adr-form-actions">
+      <button class="btn" onclick="saveADR()">Save</button>
+      <button class="btn secondary" onclick="toggleADRForm()">Cancel</button>
+    </div>
+  </div>
+  <div id="adr-list"><div class="empty">Select a project to view its ADRs.</div></div>
+</main>
+</div>
+
+<!-- SESSIONS -->
+<div id="tab-sessions" class="tab-pane">
+<main>
+  <p class="section-title">Session History</p>
+  <div id="sessions-table-wrap"><div class="loading">Loading…</div></div>
+</main>
+</div>
+
+<div class="footer">pincherMCP · <a href="__PINCHER_BASEPATH__/v1/openapi.json" target="_blank">OpenAPI</a> · <a href="__PINCHER_BASEPATH__/v1/health" target="_blank">Health</a></div>
+<div class="toast" id="toast"></div>
+
+<script src="__PINCHER_BASEPATH__/v1/dashboard.js" defer></script>
+</body>
+</html>` + "`" + `
+`
+
+// dashboardCSSContent is the dashboard stylesheet, served from /v1/dashboard.css.
+const dashboardCSSContent = `
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0d1117;--surface:#161b22;--border:#30363d;
@@ -198,131 +361,11 @@ main{max-width:1200px;margin:0 auto;padding:32px}
 .footer a{color:var(--accent);text-decoration:none}
 .toast{position:fixed;bottom:24px;right:24px;background:#161b22;border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:13px;color:var(--text);opacity:0;transition:opacity .3s;pointer-events:none;z-index:100}
 .toast.show{opacity:1}
-</style>
-</head>
-<body>
-<header>
-  <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-    <circle cx="18" cy="18" r="17" stroke="url(#hg)" stroke-width="2"/>
-    <line x1="10" y1="10" x2="26" y2="26" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round"/>
-    <line x1="26" y1="10" x2="10" y2="26" stroke="#a371f7" stroke-width="2.5" stroke-linecap="round"/>
-    <circle cx="18" cy="18" r="4" fill="#58a6ff"/>
-    <defs><linearGradient id="hg" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#58a6ff"/><stop offset="1" stop-color="#a371f7"/></linearGradient></defs>
-  </svg>
-  <div>
-    <h1>pincher<span>MCP</span> <span style="font-size:12px;font-weight:400" id="ver"></span></h1>
-    <p>Codebase intelligence · Token savings dashboard</p>
-  </div>
-  <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-    <span class="badge badge-green" id="health-badge">● checking…</span>
-    <span class="badge badge-blue" id="last-refresh">—</span>
-    <button class="header-btn" id="auth-btn" title="Set HTTP bearer token (required when pincher is started with --http-key)" onclick="promptForKey()">Auth</button>
-  </div>
-</header>
+`
 
-<nav class="tab-bar">
-  <button class="tab-btn active" onclick="showTab('overview')">Overview</button>
-  <button class="tab-btn" onclick="showTab('projects')">Projects</button>
-  <button class="tab-btn" onclick="showTab('search')">Search</button>
-  <button class="tab-btn" onclick="showTab('adrs')">ADRs</button>
-  <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
-</nav>
-
-<!-- OVERVIEW -->
-<div id="tab-overview" class="tab-pane active">
-<main>
-  <div id="error-box"></div>
-  <p class="section-title" id="session-title">Session</p>
-  <div class="grid grid-4" id="session-cards"><div class="loading">Loading…</div></div>
-  <p class="section-title">All-Time ROI</p>
-  <div class="grid grid-4" id="alltime-cards"><div class="loading">Loading…</div></div>
-  <div id="projection-banner"></div>
-  <p class="section-title">Token Savings History</p>
-  <div class="sparkline-card">
-    <div class="sparkline-meta">
-      <span class="sparkline-title">Tokens saved per session</span>
-      <span class="sparkline-legend" id="sparkline-legend">—</span>
-    </div>
-    <svg id="sparkline-svg" viewBox="0 0 800 80" preserveAspectRatio="none">
-      <text x="400" y="45" text-anchor="middle" fill="#8b949e" font-size="12">Loading…</text>
-    </svg>
-  </div>
-</main>
-</div>
-
-<!-- PROJECTS -->
-<div id="tab-projects" class="tab-pane">
-<main>
-  <p class="section-title">Indexed Projects</p>
-  <div class="proj-toolbar">
-    <input class="search-input" id="proj-filter" type="text" placeholder="Filter by name or path…" oninput="renderProjects()"/>
-    <label class="toolbar-check" title="Hide projects with zero symbols and zero edges">
-      <input type="checkbox" id="proj-hide-empty" onchange="renderProjects()"/> Hide empty
-    </label>
-    <button class="btn secondary" id="proj-cleanup-btn" onclick="cleanupEmpty()">Remove all empty</button>
-    <span class="toolbar-count" id="proj-count">&nbsp;</span>
-  </div>
-  <div class="grid grid-2" id="projects-grid"><div class="loading">Loading…</div></div>
-  <div class="detail-panel" id="proj-detail-panel">
-    <div class="detail-panel-title">
-      <span id="proj-detail-name">Project Details</span>
-      <button class="detail-close" onclick="closeDetail()" title="Close">&#x2715;</button>
-    </div>
-    <div id="proj-detail-body"><div class="loading">Loading…</div></div>
-  </div>
-</main>
-</div>
-
-<!-- SEARCH -->
-<div id="tab-search" class="tab-pane">
-<main>
-  <p class="section-title">Symbol Search</p>
-  <div class="search-bar">
-    <input class="search-input" id="search-q" type="text" placeholder="Search symbols… (e.g. handleSearch, auth*, &quot;token validation&quot;)" onkeydown="if(event.key==='Enter')doSearch()"/>
-    <select class="search-select" id="search-kind">
-      <option value="">All kinds</option>
-      <option>Function</option><option>Method</option><option>Class</option>
-      <option>Interface</option><option>Type</option><option>Variable</option>
-    </select>
-    <select class="search-select" id="search-proj"><option value="">All projects</option></select>
-    <button class="search-btn" onclick="doSearch()">Search</button>
-  </div>
-  <div id="search-results"></div>
-</main>
-</div>
-
-<!-- ADRs -->
-<div id="tab-adrs" class="tab-pane">
-<main>
-  <p class="section-title">Architecture Decision Records</p>
-  <div class="adr-toolbar">
-    <select class="adr-select" id="adr-proj" onchange="onADRProjectChange()"><option value="">Select a project…</option></select>
-    <button class="btn secondary" onclick="toggleADRForm()">+ Add Entry</button>
-  </div>
-  <div class="adr-form" id="adr-form">
-    <input id="adr-key" type="text" placeholder="Key (e.g. PURPOSE, STACK, PATTERNS)"/>
-    <textarea id="adr-val" placeholder="Value…"></textarea>
-    <div class="adr-form-actions">
-      <button class="btn" onclick="saveADR()">Save</button>
-      <button class="btn secondary" onclick="toggleADRForm()">Cancel</button>
-    </div>
-  </div>
-  <div id="adr-list"><div class="empty">Select a project to view its ADRs.</div></div>
-</main>
-</div>
-
-<!-- SESSIONS -->
-<div id="tab-sessions" class="tab-pane">
-<main>
-  <p class="section-title">Session History</p>
-  <div id="sessions-table-wrap"><div class="loading">Loading…</div></div>
-</main>
-</div>
-
-<div class="footer">pincherMCP · <a href="__PINCHER_BASEPATH__/v1/openapi.json" target="_blank">OpenAPI</a> · <a href="__PINCHER_BASEPATH__/v1/health" target="_blank">Health</a></div>
-<div class="toast" id="toast"></div>
-
-<script>
+// dashboardJSTemplate is the dashboard JavaScript, served from /v1/dashboard.js.
+// __PINCHER_BASEPATH__ tokens are substituted at render time by renderDashboardJS.
+const dashboardJSTemplate = `
 // ── Reverse-proxy basepath ─────────────────────────────────────────────────
 // When pincher is served behind a proxy at e.g. /pincher, the server injects
 // the prefix here. All call sites still write fetch('/v1/...') — the wrapper
@@ -963,6 +1006,4 @@ setInterval(loadProjection, 60000);
 // Restore tab from URL hash
 const hash=(location.hash||'').replace('#','');
 if(['overview','projects','search','adrs','sessions'].includes(hash)) showTab(hash);
-</script>
-</body>
-</html>`
+`
