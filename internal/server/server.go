@@ -245,13 +245,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// derivation follows. Hash-and-compare closes both side channels.
 	//
 	// SECURITY: never replace this with `==` on the raw tokens. The
-	// regression test in TestAuth_ConstantTime_FunctionalEquivalence
-	// asserts behaviour on same-length and different-length mismatches.
+	// regression test in TestAuth_ConstantTime_LengthInvariant asserts
+	// behaviour on same-length and different-length mismatches; the
+	// regression test in TestAuth_MalformedHeader_VariousShapes asserts
+	// every malformed-header rejection takes the SAME path (no body
+	// shape difference, no fast-fail before the constant-time compare).
+	//
+	// Authorization-header malformed-shape parity (#55):
+	//
+	// CutPrefix returns (tok, true) when the header starts with "Bearer "
+	// and (auth, false) otherwise. We always go through the SHA-256 +
+	// constant-time-compare path regardless of whether CutPrefix matched.
+	// On mismatch ("Bearer wrongkey"), the compare returns 1 vs the
+	// configured key. On malformed shapes ("Basic ...", empty,
+	// "bearer key" lowercase), `tok` is the full header value, the
+	// hash of which is a 32-byte non-match against the configured
+	// key's hash. ConstantTimeCompare runs to completion in both
+	// cases — same number of operations, same response body.
+	//
+	// Why this matters even after PR #44: pre-fix, a request with
+	// "Authorization: Basic abc" would produce tok="Authorization:
+	// Basic abc" (TrimPrefix is a no-op without exact match), then
+	// hash and compare. A request with no Authorization header at all
+	// would produce tok="", then hash and compare. Both rejected, but
+	// the latter takes one less SHA-256 byte to ingest. Edge-case
+	// timing distinguishability. Post-fix: identical work in both.
 	if s.httpKey != "" {
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		auth := r.Header.Get("Authorization")
+		tok, hasBearer := strings.CutPrefix(auth, "Bearer ")
 		got := sha256.Sum256([]byte(tok))
 		want := sha256.Sum256([]byte(s.httpKey))
-		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+		matches := subtle.ConstantTimeCompare(got[:], want[:]) == 1
+		if !hasBearer || !matches {
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized — set Authorization: Bearer <key>"})
 			return

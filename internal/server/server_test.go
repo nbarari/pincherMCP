@@ -2025,6 +2025,61 @@ func TestAuth_NoSidechannelOnPrefixMatch(t *testing.T) {
 	}
 }
 
+// TestAuth_MalformedHeader_VariousShapes is the #55 follow-up gate.
+// Every malformed Authorization header shape MUST produce identical
+// 401 + body — no fast-fail before the constant-time compare, no
+// distinguishable response. Catches a future "let me short-circuit
+// when there's no Bearer prefix" optimization that would re-introduce
+// timing distinguishability between malformed shapes.
+func TestAuth_MalformedHeader_VariousShapes(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.SetHTTPKey("supersecret")
+
+	cases := []struct {
+		name   string
+		header string // empty string = don't set Authorization at all
+	}{
+		{"no_auth_header", ""},
+		{"empty_value", ""},
+		{"bearer_no_space", "Bearer"},
+		{"bearer_no_token", "Bearer "},
+		{"basic_scheme", "Basic abc"},
+		{"token_scheme", "Token foo"},
+		{"lowercase_bearer", "bearer supersecret"}, // wrong case = malformed
+		{"double_space", "Bearer  supersecret"},    // 2 spaces — TrimPrefix only strips 1
+		{"wrong_token_with_bearer", "Bearer wrongkey"},
+	}
+
+	var firstBody string
+	for i, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/v1/list", strings.NewReader("{}"))
+		if c.header != "" || c.name == "empty_value" {
+			req.Header.Set("Authorization", c.header)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("case %q: got %d, want 401", c.name, w.Code)
+			continue
+		}
+
+		body := w.Body.String()
+		if i == 0 {
+			firstBody = body
+			continue
+		}
+		// All malformed-shape rejections MUST produce IDENTICAL bodies.
+		// If a future change adds "you sent: <header>" hint to the error
+		// message, this fails — and it should, because that would leak
+		// the malformed value back to the caller.
+		if body != firstBody {
+			t.Errorf("case %q: rejection body differs from first case (%q)\n  first: %q\n  this:  %q",
+				c.name, cases[0].name, firstBody, body)
+		}
+	}
+}
+
 // BenchmarkAuth_TimingProfile is a non-asserting benchmark for inspecting
 // auth latency under varying token shapes. Useful for manually verifying
 // the constant-time property post-merge by running:
