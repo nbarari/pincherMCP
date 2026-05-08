@@ -219,10 +219,49 @@ func TestExtractMarkdown_SkipLevel(t *testing.T) {
 // TestExtractMarkdown_RegisteredExtensions guards the extension list
 // from regression. Adding a new extension = update this test.
 func TestExtractMarkdown_RegisteredExtensions(t *testing.T) {
-	for _, ext := range []string{".md", ".markdown", ".mdx"} {
+	for _, ext := range []string{".md", ".markdown", ".mdx", ".mdc"} {
 		got := DetectLanguage("test" + ext)
 		if got != "Markdown" {
 			t.Errorf("DetectLanguage(test%s) = %q, want Markdown", ext, got)
 		}
+	}
+}
+
+// TestExtractMarkdown_MdcExtractsLikeMarkdown verifies that .mdc files
+// (Cursor rule files — `.cursor/rules/*.mdc`) extract heading symbols
+// using the same CommonMark grammar as .md. The .mdc convention is the
+// primary motivator for registering the extension.
+//
+// Note: real Cursor rule files often have YAML frontmatter delimited by
+// `---` lines. goldmark interprets `---` between content lines as a
+// Setext heading underline (CommonMark grammar), which can produce extra
+// Section symbols from frontmatter keys. That's a goldmark/CommonMark
+// behaviour, not specific to .mdc — this test focuses on the extension
+// registration itself, not frontmatter handling.
+func TestExtractMarkdown_MdcExtractsLikeMarkdown(t *testing.T) {
+	src := `# Style guide
+
+Body of the rule.
+
+## Naming
+
+Use camelCase.
+`
+	r := Extract([]byte(src), "Markdown", ".cursor/rules/style.mdc")
+	if r == nil {
+		t.Fatal("Extract returned nil")
+	}
+	if len(r.Symbols) != 2 {
+		t.Fatalf("got %d symbols, want 2 (Style guide + Naming)", len(r.Symbols))
+	}
+	got := make(map[string]ExtractedSymbol)
+	for _, s := range r.Symbols {
+		got[s.QualifiedName] = s
+	}
+	if _, ok := got["style_guide"]; !ok {
+		t.Errorf("missing style_guide symbol; got QNs: %v", mapKeys(got))
+	}
+	if _, ok := got["style_guide.naming"]; !ok {
+		t.Errorf("missing style_guide.naming symbol; got QNs: %v", mapKeys(got))
 	}
 }

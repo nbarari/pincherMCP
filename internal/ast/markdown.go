@@ -19,8 +19,12 @@ import (
 // Confidence is 1.0 (real CommonMark parser, not regex). Routes to the
 // docs corpus via ClassifyCorpus + the v9 trigger WHERE clauses.
 //
-// Registered for .md, .markdown, .mdx — the latter so MDX files at least
-// surface their headings even if the JSX-embedded blocks aren't extracted.
+// Registered for .md, .markdown, .mdx, .mdc:
+//   - .mdx so MDX files at least surface their headings even if the
+//     JSX-embedded blocks aren't extracted.
+//   - .mdc for Cursor rule files (`.cursor/rules/*.mdc`) — same CommonMark
+//     grammar with optional YAML frontmatter; goldmark ignores frontmatter
+//     gracefully so the heading hierarchy still extracts cleanly.
 type markdownExtractor struct{}
 
 func (m *markdownExtractor) Languages() []string { return []string{"Markdown"} }
@@ -29,6 +33,7 @@ func (m *markdownExtractor) Extensions() map[string]string {
 		".md":       "Markdown",
 		".markdown": "Markdown",
 		".mdx":      "Markdown",
+		".mdc":      "Markdown",
 	}
 }
 func (m *markdownExtractor) Confidence() float64 { return 1.0 }
