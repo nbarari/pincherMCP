@@ -423,14 +423,18 @@ The skip count is reported in the indexer's structured log line as `blocked=N` a
 
 ### Refusing obvious bloat traps
 
-`pincher index <path>` refuses to walk paths that are statically known to produce noise rather than signal — exiting non-zero before any database write. This catches the case where a SessionStart hook fires from a parent shell pointed at the wrong directory:
+`pincher index <path>` refuses two catastrophic targets in any mode — the filesystem root (`/` on Linux/macOS, `C:\` on Windows, detected as any path that is its own parent) and the user's home directory (`$HOME` / `%USERPROFILE%`, with symlinks resolved). Either mistake walks tens of GB of cache and package data and was the cause of the 70 GB WAL incident this guard addresses.
 
-- The user's home directory itself (`$HOME`)
-- Common cache locations: `~/Library/Caches/*`, `~/.cache/*`, `%LOCALAPPDATA%\Temp\*`
-- Language package roots: `~/go/pkg/*`, `~/.cargo/*`, `~/.npm/*`, `~/.gem/*`, `~/.rustup/*`
-- Top-of-volume paths: `/`, `/usr`, `/var`, `/etc`, `/tmp`, `/private/tmp`
+In **hook mode** (`pincher index --hook`), the guard tightens further: the target directory must contain at least one project marker. The hook is invoked by Claude Code's SessionStart from whatever the parent process's cwd happens to be, so a project-marker check is a reliable "is this actually a project" signal without requiring static deny-lists. Recognized markers:
 
-The MCP `index` tool goes through the same guard, so the protection applies whether `pincher index` is invoked from the CLI or via Claude Code.
+```
+.git, .hg, .svn,
+go.mod, package.json, pyproject.toml, Cargo.toml,
+Gemfile, pom.xml, build.gradle, build.gradle.kts,
+Makefile, CMakeLists.txt
+```
+
+Manual `pincher index <path>` skips the marker check — the explicit user action is treated as authoritative for any non-catastrophic path. The MCP `index` tool path goes through the same guard.
 
 ### Cross-process safety
 
@@ -725,7 +729,8 @@ Authentication: the dashboard itself requires no bearer token (it's a browser pa
 pincherMCP/
 ├── cmd/pinch/
 │   ├── main.go                  # Sole entry point: MCP server + `pincher index` CLI subcommand
-│   └── bloat_trap.go            # IsBloatTrap: refuse to index home dirs, caches, package roots
+│   └── bloat_trap.go            # isBloatTrap: refuse filesystem root + $HOME;
+│                                # hook mode also requires a project marker
 ├── internal/
 │   ├── db/db.go                 # SQLite store: schema v6, migrations, all CRUD,
 │   │                            # FTS5 ops, graph ops, BPE token counting,
