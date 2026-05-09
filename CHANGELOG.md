@@ -7,6 +7,33 @@ minors.
 
 ## [Unreleased]
 
+### Fixed
+- **`architecture` no longer over-claims `tokens_saved` by 4-6 orders
+  of magnitude** (#219, reported by @nbarari). The handler previously
+  ran `savedVsFullRead(symCount, …)` which attributed `symCount ×
+  avgFileSize / 4` per call — but `architecture` returns metadata
+  only (counts, histograms, hotspot symbol names), so there is no
+  file-read alternative an agent would have used. Cross-corpus
+  validation found this single tool dominating ~97% of the
+  cumulative session counter on real corpora. The handler now
+  returns `tokens_saved=0` (the honest baseline); `tokens_used` (the
+  response payload size) is still tracked. README's "typical per-call
+  savings" line revised to drop the prior fictional `architecture
+  ~99.99%` claim.
+- **`symbols` batch now uses real file sizes instead of a 20000-byte
+  constant** (#220, reported by @nbarari). The handler previously ran
+  `savedVsFullRead(len(results), …)` which credited every result
+  as a hypothetical 20k-byte file; on config-heavy corpora that
+  over-claimed by 5-16× (real YAML/HCL files average 1-5k tokens), on
+  Go-heavy corpora it under-claimed by ~2× (real Go files in this
+  repo average ~30k+ tokens). The handler now uses
+  `savedVsFileSizes(root, paths, …)` — real `os.Stat` sizes per file
+  path, dedup'd by file path so an N-ID batch hitting M unique files
+  attributes M file sizes, not N × per-file estimate. Mirrors what
+  `search` and `trace` already do. Document-kind symbols (fetched
+  URLs) are correctly excluded from the file-size baseline since
+  they have no on-disk file.
+
 ### Changed
 - Coverage gate restored 83% → 84% (#200). Subprocess-coverage tests
   added across `runInitCLI` / `runStatsCLI` / `runWebCLI` / `runDoctorCLI`

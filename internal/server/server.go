@@ -1538,6 +1538,13 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 	}
 
 	results := make([]map[string]any, 0, len(ids))
+	// Collect file paths for honest token-savings accounting (#220).
+	// Pre-dedup at savedVsFileSizes time, but we still gather them here
+	// so the helper sees the actual set of files an agent would otherwise
+	// have read. A 30-ID batch hitting 12 unique files credits 12 file
+	// sizes, not 30 × per-file-estimate as the prior savedVsFullRead path
+	// did.
+	filePaths := make([]string, 0, len(ids))
 	for _, id := range ids {
 		sym, ok := bySymID[id]
 		if !ok || sym == nil {
@@ -1564,6 +1571,11 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 			"signature":  sym.Signature,
 			"source":     source,
 		})
+		// Document symbols have no on-disk file; skip them in the
+		// savings baseline so we don't os.Stat a non-existent path.
+		if sym.Kind != "Document" && sym.FilePath != "" {
+			filePaths = append(filePaths, sym.FilePath)
+		}
 	}
 
 	responseJSON, _ := json.Marshal(results)
@@ -1571,7 +1583,7 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 		"symbols": results,
 		"count":   len(results),
 	}
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(results), responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(root, filePaths, responseJSON)), nil
 }
 
 func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2458,14 +2470,18 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 			"next_steps": nextSteps,
 		}
 	}
-	// Architecture replaces reading every file to orient in the codebase.
-	// Savings = all symbols in project × avgSymbolContext − this payload.
-	symCount := 0
-	if p != nil {
-		symCount = p.SymCount
-	}
-	responseJSON, _ := json.Marshal(data)
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(symCount, responseJSON)), nil
+	// Architecture is a metadata-only response — file/symbol/edge counts,
+	// language histogram, hotspot symbol names. There is no file-read
+	// alternative an agent would have used instead, so the savings
+	// baseline is 0 (#219). The prior `savedVsFullRead(symCount, …)`
+	// formula attributed `symCount × avgFileSize` per call, which on
+	// real corpora over-claimed by 4-6 orders of magnitude and
+	// dominated the cumulative session counter.
+	//
+	// `tokens_used` (the response payload size) is still tracked via
+	// jsonResultWithMeta — users see exactly what this call cost; they
+	// just no longer see fictional savings.
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
 func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

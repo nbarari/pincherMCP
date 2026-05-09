@@ -160,7 +160,7 @@ The `stats` tool renders a session summary directly in chat:
 
 **Without pincher** is the estimated baseline (whole file reads). **With pincher** is the actual BPE token count of what was returned. Savings persist in SQLite across reconnects, process restarts, and binary upgrades — the dashboard at `/v1/dashboard` shows the all-time total.
 
-Typical per-call savings: `symbol` ~95%, `context` ~90%, `search` ~98%, `architecture` ~99.99%, `trace` ~99%.
+Typical per-call savings: `symbol` ~95%, `context` ~90%, `search` ~98%, `trace` ~99%. (`architecture` returns metadata only — no file-read alternative — so its `tokens_saved` is reported as 0 rather than fabricated, see [#219](https://github.com/kwad77/pincher/issues/219).)
 
 ---
 
