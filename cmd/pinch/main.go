@@ -41,6 +41,10 @@ func main() {
 		runRebuildFTSCLI(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "self-test" {
+		runSelfTestCLI(os.Args[2:])
+		return
+	}
 
 	var (
 		showVersion = flag.Bool("version", false, "Print version and exit")
