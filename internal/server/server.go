@@ -1789,7 +1789,19 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return errRes, nil
 	}
 
-	hops, err := s.indexer.Trace(ctx, projectID, name, direction, depth, addRisk)
+	// Resolve the start symbol explicitly so we can surface ambiguity in
+	// _meta — agents that hit a same-named symbol elsewhere (common: many
+	// `Run`, `Handler`, `Open` per project) need a hint to refine. Trace's
+	// own picks-first heuristic stays the same; this just makes the choice
+	// observable.
+	starts, err := s.store.GetSymbolsByName(projectID, name, 5)
+	if err != nil {
+		return errResult(fmt.Sprintf("trace lookup: %v", err)), nil
+	}
+	if len(starts) == 0 {
+		return errResult(fmt.Sprintf("symbol %q not found in project", name)), nil
+	}
+	hops, err := s.indexer.TraceByID(ctx, projectID, starts[0].ID, direction, depth, addRisk)
 	if err != nil {
 		return errResult(fmt.Sprintf("trace error: %v", err)), nil
 	}
@@ -1849,14 +1861,34 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		tracedPaths = append(tracedPaths, h.Symbol.FilePath)
 	}
 	traceRoot, _ := s.resolveProjectRoot(projectID)
+	meta := map[string]any{
+		"confidence_distribution": confidenceDistribution(confs),
+	}
+	// Surface name-ambiguity so the agent can refine instead of trusting
+	// the first-match heuristic silently. Records up to 5 alternative
+	// matches (the GetSymbolsByName cap) with enough info to disambiguate.
+	if len(starts) > 1 {
+		alts := make([]map[string]any, 0, len(starts))
+		for _, s := range starts {
+			alts = append(alts, map[string]any{
+				"id":             s.ID,
+				"qualified_name": s.QualifiedName,
+				"kind":           s.Kind,
+				"file_path":      s.FilePath,
+			})
+		}
+		meta["ambiguous_match"] = map[string]any{
+			"resolved_to": starts[0].ID,
+			"alternatives": alts,
+			"hint":         fmt.Sprintf("name %q matched %d symbols; trace used the first (%s). Pass an exact ID via TraceByID, or call `search` with kind/language filters to narrow.", name, len(starts), starts[0].ID),
+		}
+	}
 	data := map[string]any{
 		"root":      name,
 		"direction": direction,
 		"hops":      hopsList,
 		"total":     len(hops),
-		"_meta": map[string]any{
-			"confidence_distribution": confidenceDistribution(confs),
-		},
+		"_meta":     meta,
 	}
 	if addRisk {
 		data["risk_summary"] = riskCounts

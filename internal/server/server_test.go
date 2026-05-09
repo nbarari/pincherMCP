@@ -4315,6 +4315,79 @@ func TestMeta_SavingsLine_AbsentWhenSavingsZero(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// trace name-ambiguity surfaces in _meta (iter 5 — trustworthy + explainable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestHandleTrace_AmbiguousNameSurfacesAlternatives(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "ptr-amb"
+	store.UpsertProject(db.Project{ID: "ptr-amb", Path: "/tmp/ptr-amb", Name: "ptr-amb", IndexedAt: time.Now()})
+	// Three symbols with the same short name — common shape for `Run`, `Open`.
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "ptr-amb/a.go::pkg.a.Run#Function", ProjectID: "ptr-amb",
+			FilePath: "a.go", Name: "Run", QualifiedName: "pkg.a.Run",
+			Kind: "Function", Language: "Go"},
+		{ID: "ptr-amb/b.go::pkg.b.Run#Function", ProjectID: "ptr-amb",
+			FilePath: "b.go", Name: "Run", QualifiedName: "pkg.b.Run",
+			Kind: "Function", Language: "Go"},
+		{ID: "ptr-amb/c.go::pkg.c.Run#Function", ProjectID: "ptr-amb",
+			FilePath: "c.go", Name: "Run", QualifiedName: "pkg.c.Run",
+			Kind: "Function", Language: "Go"},
+	})
+
+	result, err := srv.handleTrace(context.Background(), makeReq(map[string]any{
+		"name":    "Run",
+		"project": "ptr-amb",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleTrace: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("_meta missing")
+	}
+	amb, _ := meta["ambiguous_match"].(map[string]any)
+	if amb == nil {
+		t.Fatalf("expected _meta.ambiguous_match for 3 same-named symbols, got %v", meta)
+	}
+	alts, _ := amb["alternatives"].([]any)
+	if len(alts) != 3 {
+		t.Errorf("alternatives count = %d, want 3", len(alts))
+	}
+	if amb["resolved_to"] == "" {
+		t.Error("resolved_to should be set to the first match's ID")
+	}
+}
+
+func TestHandleTrace_UniqueNameNoAmbiguityField(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "ptr-uniq"
+	store.UpsertProject(db.Project{ID: "ptr-uniq", Path: "/tmp/ptr-uniq", Name: "ptr-uniq", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "ptr-uniq/a.go::pkg.OnlyOne#Function", ProjectID: "ptr-uniq",
+			FilePath: "a.go", Name: "OnlyOne", QualifiedName: "pkg.OnlyOne",
+			Kind: "Function", Language: "Go"},
+	})
+
+	result, err := srv.handleTrace(context.Background(), makeReq(map[string]any{
+		"name":    "OnlyOne",
+		"project": "ptr-uniq",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleTrace: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("_meta missing")
+	}
+	if _, present := meta["ambiguous_match"]; present {
+		t.Error("ambiguous_match must be ABSENT when only one symbol matches the name")
+	}
+}
+
 func TestHumanInt_FormatsThousandsSeparators(t *testing.T) {
 	cases := []struct {
 		n    int
