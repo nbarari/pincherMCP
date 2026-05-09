@@ -4,12 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>pincherMCP · Codebase intelligence for LLM agents</title>
-<meta name="description" content="Single Go binary that indexes any codebase into a byte-offset symbol store, knowledge graph, and BM25 search — exposed as 15 MCP tools or an HTTP REST API. Pure Go, no CGO, no cloud."/>
+<meta name="description" content="Single Go binary that indexes any codebase into a byte-offset symbol store, knowledge graph, and BM25 search — exposed as 16 MCP tools or an HTTP REST API. Pure Go, no CGO, no cloud."/>
 <meta name="theme-color" content="#0d1117"/>
 
 <meta property="og:type" content="website"/>
 <meta property="og:title" content="pincherMCP · Codebase intelligence for LLM agents"/>
-<meta property="og:description" content="Single Go binary. Index, graph, and full-text search a codebase. 15 MCP tools or HTTP REST."/>
+<meta property="og:description" content="Single Go binary. Index, graph, and full-text search a codebase. 16 MCP tools or HTTP REST."/>
 <meta property="og:url" content="https://kwad77.github.io/pincherMCP/"/>
 <meta property="og:image" content="https://kwad77.github.io/pincherMCP/assets/og.png"/>
 <meta property="og:image:width" content="1200"/>
@@ -127,7 +127,7 @@ footer a{color:var(--accent)}
   <img src="assets/pinchy.png" alt="Pinchy, the pincherMCP mascot — a pixel-art crab holding a copper penny" class="pixel pinchy-hero"/>
   <div class="pill">Single binary · pure Go · no cloud</div>
   <h1>Codebase intelligence<br/>for LLM agents.</h1>
-  <p class="sub">pincherMCP indexes any repo into a byte-offset symbol store, a knowledge graph, and a BM25 full-text search — all populated in one AST pass — then exposes 15 tools over MCP stdio or HTTP REST. Agents get what they need in tokens, not files.</p>
+  <p class="sub">pincherMCP indexes any repo into a byte-offset symbol store, a knowledge graph, and a BM25 full-text search — all populated in one AST pass — then exposes 16 tools over MCP stdio or HTTP REST. Agents get what they need in tokens, not files.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#install">Install</a>
     <a class="btn btn-secondary" href="https://github.com/kwad77/pincherMCP">View on GitHub →</a>
@@ -136,12 +136,12 @@ footer a{color:var(--accent)}
 
 <section>
   <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>Why it matters</h2>
-  <p class="section-sub">Every tool response carries a real BPE token count. Real numbers on this codebase (14.7k LOC, 614 symbols, 970 edges):</p>
+  <p class="section-sub">Every tool response carries a real BPE token count. Real numbers on this codebase (13 files, 618 symbols, 5,785 edges):</p>
   <div class="stats">
     <div class="stat"><div class="num green">~95%</div><div class="label">Token reduction<br/>vs reading whole files</div></div>
     <div class="stat"><div class="num blue">&lt;1ms</div><div class="label">Symbol fetch<br/>(byte-offset seek)</div></div>
     <div class="stat"><div class="num purple">&lt;5ms</div><div class="label">BFS depth 3<br/>call-graph trace</div></div>
-    <div class="stat"><div class="num orange">13 langs</div><div class="label">Go (AST) + 12 more<br/>via regex extractors</div></div>
+    <div class="stat"><div class="num orange">19 langs</div><div class="label">6 AST-backed + 13 regex<br/>extractors</div></div>
   </div>
 </section>
 
@@ -165,7 +165,7 @@ footer a{color:var(--accent)}
 </section>
 
 <section id="tools">
-  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>15 tools, one mental model</h2>
+  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>16 tools, one mental model</h2>
   <p class="section-sub">Every tool returns a <code>_meta</code> envelope with tokens used / saved / cost avoided. Pick the tool by what you're trying to do, not by the underlying index.</p>
   <div class="cards">
     <div class="card">
@@ -235,8 +235,8 @@ brew services start pincher</code></pre>
 
   <div class="install-pane" id="pane-bin">
 <pre><code># Download the matching archive from the releases page, then:
-tar -xzf pincher-v0.1.0-linux-amd64.tar.gz
-sudo mv pincher-v0.1.0-linux-amd64 /usr/local/bin/pincher
+tar -xzf pincher-v0.3.0-linux-amd64.tar.gz
+sudo mv pincher-v0.3.0-linux-amd64 /usr/local/bin/pincher
 pincher --version</code></pre>
   </div>
 

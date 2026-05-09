@@ -24,7 +24,9 @@ import (
 )
 
 // version is overridden at build time via -ldflags="-X main.version=...".
-var version = "0.1.0"
+// Default tracks the latest released tag so binaries built without -ldflags
+// from a clone at HEAD report a version that matches the GitHub release.
+var version = "0.3.0"
 
 func main() {
 	// Subcommand dispatch — must happen before flag.Parse() since the global
