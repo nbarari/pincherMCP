@@ -21,7 +21,7 @@ Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
 - [What it does](#what-it-does)
 - [Quick Start](#quick-start)
 - [Architectural Diagrams](#architectural-diagrams)
-- [15 Tools — Tested Capabilities](#15-tools--tested-capabilities)
+- [16 Tools — Tested Capabilities](#16-tools--tested-capabilities)
 - [Cypher Query Reference](#cypher-query-reference)
 - [Language Support](#language-support)
 - [HTTP REST API](#http-rest-api)
@@ -35,7 +35,7 @@ Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
 
 ## <img src="docs/assets/crab.png" width="22" alt=""/> What it does
 
-pincherMCP is a single Go binary that indexes a codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through 15 MCP tools or an HTTP REST API.
+pincherMCP is a single Go binary that indexes a codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through 16 MCP tools or an HTTP REST API.
 
 Every tool response includes a `_meta` envelope with real BPE token counts (cl100k_base — exact for Claude and OpenAI model families, approximate for Gemini/Llama), latency, and cost avoided:
 
@@ -148,7 +148,7 @@ see [`packaging/README.md`](packaging/README.md).
 ┌───────────────────────┐          ┌───────────────────────────┐
 │  pincher (MCP process)│          │  pincher --http :8080     │
 │                       │          │  (dashboard / REST)        │
-│  • 15 MCP tools       │          │                           │
+│  • 16 MCP tools       │          │                           │
 │  • idx.Watch()        │          │  • POST /v1/{tool}        │
 │  • SessionFlusher     │          │  • GET /v1/dashboard      │
 │    (flush every 10s)  │          │  • GET /v1/openapi.json   │
@@ -273,9 +273,15 @@ Project-scoped paths — `search`, `symbol`/`symbols` when `project=` is passed,
 
 ---
 
-## <img src="docs/assets/crab.png" width="22" alt=""/> 15 Tools — Tested Capabilities
+## <img src="docs/assets/crab.png" width="22" alt=""/> 16 Tools — Tested Capabilities
 
 All latencies measured on this codebase (13 files, 618 symbols, 5,785 edges). Token counts use cl100k_base BPE — the same tokenizer family as Claude.
+
+### Starter
+
+| Tool | Capability | Tested latency |
+|---|---|---|
+| `guide` | Free-form task description (`"fix login retry bug"`, `"refactor auth middleware"`, `"understand indexing"`) returns 2-3 recommended pincher tool calls with reasoning. Removes decision friction at session start — call this first instead of choosing between `search` / `context` / `trace` from scratch. Keyword-based classifier; pure heuristic, no model. | <1ms |
 
 ### Indexing & Discovery
 
@@ -452,7 +458,7 @@ Multiple pincher processes can safely share one data directory. Each `Index()` r
 
 ## <img src="docs/assets/crab.png" width="22" alt=""/> HTTP REST API
 
-All 15 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
+All 16 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
 
 ```bash
 # Start with both transports
@@ -500,7 +506,7 @@ Beyond `POST /v1/{tool}`, the HTTP server exposes:
 |---|---|---|---|
 | `/v1/health` | GET | No | Liveness probe — schema version, index staleness. Always returns 200. |
 | `/v1/dashboard` | GET | No | Self-contained HTML dashboard — stats, search, project cards, sparkline of last 90 sessions. No external dependencies. |
-| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 15 tool endpoints. Import into Postman or Cursor. |
+| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 16 tool endpoints. Import into Postman or Cursor. |
 | `/v1/stats` | GET | Yes | Current session + all-time savings summary as JSON. |
 | `/v1/sessions` | GET | Yes | Per-session history, last 90 sessions, sorted by recency. |
 | `/v1/projects` | GET | Yes | All indexed projects with file/symbol/edge counts. |
@@ -667,6 +673,15 @@ The `--hook` flag outputs a JSON envelope that Claude Code's SessionStart hook s
 }
 ```
 
+### `pincher self-test` subcommand
+
+`pincher self-test` runs an end-to-end smoke check against a temporary data directory — open the database, create a synthetic project, index a sample file, search for a known symbol, and retrieve it via byte-offset. Exits non-zero on any failure. Use it after a fresh install or upgrade to verify the binary works end-to-end before pointing it at a real project.
+
+```bash
+pincher self-test                    # 5-step smoke test, prints PASS/FAIL summary
+pincher self-test --verbose          # also prints per-step timings
+```
+
 ### `pincher rebuild-fts` subcommand
 
 `pincher rebuild-fts` is the escape hatch for FTS5 corruption. It drops every FTS5 virtual table (legacy `symbols_fts` plus the per-corpus `symbols_{code,config,docs}_fts` indexes added in schema v9) and their sync triggers, then bulk-loads them back from the canonical `symbols` table:
@@ -753,7 +768,7 @@ The story: things that require pincher to be production-ready first.
 
 The story: explicit "you can build against pincher without churn fear."
 
-- **Tool schemas frozen** — no breaking changes to the 15 tool I/O shapes after this.
+- **Tool schemas frozen** — no breaking changes to the 16 tool I/O shapes after this.
 - **Symbol-ID format frozen** — `{file_path}::{qualified_name}#{kind}` is the contract.
 - **HTTP REST surface frozen** — `POST /v1/{tool}`, basepath/trust-proxy/rate-limit/SSRF behaviours all locked.
 - **`SECURITY.md`** — documented threat model, what pincher promises, what it doesn't, how to report findings.
@@ -806,7 +821,7 @@ pincherMCP/
 │   ├── index/
 │   │   ├── indexer.go           # Index pipeline: walk → hash → extract → resolve → store → watch
 │   │   └── lockfile.go          # Cross-process project lockfile with stale-holder reclaim
-│   └── server/server.go         # 15 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
+│   └── server/server.go         # 16 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
 │                                # basepath / reverse-proxy support,
 │                                # session persistence, token savings accounting
 └── go.mod

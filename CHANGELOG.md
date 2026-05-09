@@ -29,6 +29,14 @@ minors.
   byte-offset disk read (#124).
 - `BenchmarkHandleSymbols_Batch20_GoProject` pins the batch handler cost
   for the bench-regression gate (#129).
+- `pincher self-test` subcommand — end-to-end smoke check (open db,
+  create synthetic project, index, search, byte-offset retrieve)
+  against a temporary data dir. Exits non-zero on any failure. Use after
+  install/upgrade to verify the binary works end-to-end before pointing
+  it at a real project (#151).
+- `pincher --help` now lists subcommands (`index`, `doctor`,
+  `self-test`, `rebuild-fts`) instead of dumping flag.PrintDefaults
+  alone (#152).
 - `SECURITY.md`, `CHANGELOG.md`, `RELEASING.md` (this PR).
 
 ### Changed
