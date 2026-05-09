@@ -67,20 +67,25 @@ var sqlViewRE = regexp.MustCompile(
 
 // sqlFunctionRE matches CREATE FUNCTION. Postgres allows arg lists
 // on the same line; the captured `name` stops at whitespace or the
-// opening paren.
+// opening paren. `IF NOT EXISTS` is supported by MariaDB.
 var sqlFunctionRE = regexp.MustCompile(
-	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+` +
+	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION` +
+		`(?:\s+IF\s+NOT\s+EXISTS)?\s+` +
 		`(?P<name>[` + "`" + `"\[]?[\w.]+[` + "`" + `"\]]?)`)
 
-// sqlProcedureRE matches CREATE PROCEDURE.
+// sqlProcedureRE matches CREATE PROCEDURE. `IF NOT EXISTS` works in
+// MariaDB.
 var sqlProcedureRE = regexp.MustCompile(
-	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+PROCEDURE\s+` +
+	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+PROCEDURE` +
+		`(?:\s+IF\s+NOT\s+EXISTS)?\s+` +
 		`(?P<name>[` + "`" + `"\[]?[\w.]+[` + "`" + `"\]]?)`)
 
 // sqlTriggerRE matches CREATE TRIGGER. The trigger body is multi-line
-// but only the trigger NAME is captured here.
+// but only the trigger NAME is captured here. `IF NOT EXISTS` is
+// supported by SQLite and MariaDB.
 var sqlTriggerRE = regexp.MustCompile(
-	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+TRIGGER\s+` +
+	`(?i)(?m)^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+TRIGGER` +
+		`(?:\s+IF\s+NOT\s+EXISTS)?\s+` +
 		`(?P<name>[` + "`" + `"\[]?[\w.]+[` + "`" + `"\]]?)`)
 
 // sqlExtractorPattern bundles a regex with the symbol kind to emit.

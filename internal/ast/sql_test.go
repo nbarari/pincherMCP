@@ -184,6 +184,37 @@ CREATE PROCEDURE p1() LANGUAGE sql AS 'SELECT 1';
 	}
 }
 
+// TestExtractSQL_IfNotExistsAcrossKinds pins that `IF NOT EXISTS` is
+// recognised on every CREATE keyword that supports it across the major
+// dialects: TABLE (everyone), VIEW (some), FUNCTION (MariaDB),
+// PROCEDURE (MariaDB), TRIGGER (SQLite + MariaDB). A single source
+// file mixing the form against each kind verifies the regex doesn't
+// silently drop matches when the optional modifier appears.
+func TestExtractSQL_IfNotExistsAcrossKinds(t *testing.T) {
+	src := []byte(`CREATE TABLE IF NOT EXISTS t1 (id int);
+CREATE FUNCTION IF NOT EXISTS f1() RETURNS int LANGUAGE sql AS 'SELECT 1';
+CREATE PROCEDURE IF NOT EXISTS p1() LANGUAGE sql AS 'SELECT 1';
+CREATE TRIGGER IF NOT EXISTS tr1 BEFORE INSERT ON t1 FOR EACH ROW BEGIN END;
+`)
+	r := extractSQL(src, "ifnotexists.sql")
+	got := map[string]string{}
+	for _, s := range r.Symbols {
+		got[s.Name] = s.Kind
+	}
+	wants := map[string]string{
+		"t1":  "Class",
+		"f1":  "Function",
+		"p1":  "Function",
+		"tr1": "Function",
+	}
+	for name, kind := range wants {
+		if got[name] != kind {
+			t.Errorf("CREATE … IF NOT EXISTS %s: got kind=%q, want %q (all: %v)",
+				name, got[name], kind, got)
+		}
+	}
+}
+
 // TestSQL_DetectedByExtension pins the registry detection for both
 // .sql and .ddl extensions.
 func TestSQL_DetectedByExtension(t *testing.T) {
