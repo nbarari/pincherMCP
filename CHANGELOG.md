@@ -7,6 +7,44 @@ minors.
 
 ## [Unreleased]
 
+## [v0.4.0] — 2026-05-09 — Capture-what-shipped
+
+First release under the milestone-driven cadence (#193). Closes the
+gap between v0.3.0 and the feature work that accumulated on master
+since 2026-05-08. No single "theme" — this is a tag-and-release of
+4 new CLI subcommands, a schema migration, expanded HCL edges, and
+the per-corpus snapshot harness picking up Terraform.
+
+Highlights:
+- **Schema v11** — `sessions.http_url` / `sessions.http_pid` added so
+  the HTTP dashboard process can be discovered by the MCP stdio
+  process (and vice versa) for live stats.
+- **Four new CLI subcommands**:
+  - `pincher update` — in-repo `git pull` + rebuild OR standalone
+    download from GH releases (the standalone path becomes useful
+    once #197 ships release artifacts in v0.5.0).
+  - `pincher web` — print the dashboard URL of a live HTTP server
+    (auto-start one if none exists).
+  - `pincher init` — write a marker-block-delimited pincher policy
+    section into `CLAUDE.md` (or `~/.claude/CLAUDE.md` with `--global`).
+  - `pincher stats` — persisted savings + per-project counts; supports
+    `--json` and `--reset`.
+- **HCL REFERENCES edges, complete**: var.NAME (#178) plus local /
+  module / data / resource (#188).
+- **Plugin SessionStart hook**: `pinchermcp` plugin install now runs
+  `pincher index --hook` after install to prime the index for the
+  current workspace (#138 / #187).
+- **Subprocess coverage instrumentation** (#190) — `cmd/pinch`
+  integration-style tests that exec the binary now contribute to the
+  coverage profile. Closes the dispatcher 0% gap.
+- **README split** (#184) — pitch + quickstart in README, full manual
+  in `docs/REFERENCE.md`. The README is now a 5-minute read.
+- **Terraform pinned corpus** (#189 / #195) — fifth corpus, exercises
+  all five HCL reference-edge shapes plus nested modules.
+- **Milestone-driven release process** (#196) — every PR now carries
+  a milestone at create time; releases ship when their milestone hits
+  100% closed.
+
 ### Added
 - `testdata/corpus/terraform-stack/` — fifth pinned corpus exercising
   HCL extractor coverage (#189). Closes a gap exposed by #178/#188:
