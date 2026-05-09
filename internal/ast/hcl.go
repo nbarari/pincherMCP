@@ -86,7 +86,115 @@ func (h *hclExtractor) Extract(source []byte, _, relPath string, _ ExtractOption
 	for _, blk := range hclSortedBlocks(body) {
 		result.Symbols = append(result.Symbols, hclTopLevelBlockSymbols(blk, source)...)
 	}
+
+	// Reference edges (#86 — minimum viable: var.NAME only).
+	//
+	// Walk every block's attribute expressions, detect `var.NAME`
+	// traversals, and emit one REFERENCES edge per (containing-block,
+	// referenced-variable) pair. The indexer's deferred resolution
+	// pass matches `ToName="var.NAME"` against Variable symbols whose
+	// qualified_name is `var.NAME` and writes a real edge if it
+	// resolves.
+	//
+	// Deferred to follow-ups: local.NAME (Local), data.TYPE.NAME
+	// (DataSource), module.NAME (Module), TYPE.NAME (Resource),
+	// each.value, count.index. The minimum-viable shape lets agents
+	// `trace --name=region --direction=outbound` and see which
+	// resources use a given variable, which is the dominant use case.
+	for _, blk := range hclSortedBlocks(body) {
+		result.Edges = append(result.Edges, hclCollectVarReferences(blk, "")...)
+	}
 	return result
+}
+
+// hclCollectVarReferences walks a block's body recursively, finding
+// `var.NAME` traversals in every attribute expression, and emits one
+// REFERENCES edge per (containing-block, var.NAME) pair the indexer
+// can then resolve.
+//
+// parentQN tracks the dotted-path of the closest enclosing top-level
+// block. Empty on the top-level call; populated when recursing into
+// nested blocks. References inside a nested block (e.g. a
+// `lifecycle` block within a resource) are attributed to the
+// **outermost** symbol-emitting block rather than the nested one,
+// because that's the entity an agent would `trace` against.
+func hclCollectVarReferences(blk *hclsyntax.Block, parentQN string) []ExtractedEdge {
+	if blk == nil || blk.Body == nil {
+		return nil
+	}
+
+	// Determine this block's QN. For top-level recognised types we
+	// re-derive the prefix; for nested blocks we inherit parentQN
+	// (so references in a `provisioner` block under a resource are
+	// attributed to the resource itself).
+	var qn string
+	if parentQN != "" {
+		qn = parentQN
+	} else {
+		switch blk.Type {
+		case "resource", "data":
+			if len(blk.Labels) >= 2 {
+				qn = blk.Type + "." + hclSanitizeLabel(blk.Labels[0]) + "." + hclSanitizeLabel(blk.Labels[1])
+			}
+		case "module", "variable", "output", "provider":
+			if len(blk.Labels) >= 1 {
+				ns := blk.Type
+				if blk.Type == "variable" {
+					ns = "var"
+				}
+				qn = ns + "." + hclSanitizeLabel(blk.Labels[0])
+			}
+		case "locals", "terraform":
+			// `locals` references go to per-attribute Local symbols
+			// (qn = local.NAME); skipped here because we don't have
+			// the per-attribute name from the locals block alone.
+			// `terraform` blocks usually don't reference vars.
+			return nil
+		}
+	}
+	if qn == "" {
+		return nil
+	}
+
+	var out []ExtractedEdge
+	seen := map[string]bool{}
+	for _, attr := range blk.Body.Attributes {
+		if attr.Expr == nil {
+			continue
+		}
+		for _, trav := range attr.Expr.Variables() {
+			if len(trav) < 2 {
+				continue
+			}
+			root, ok := trav[0].(hcl.TraverseRoot)
+			if !ok || root.Name != "var" {
+				continue
+			}
+			next, ok := trav[1].(hcl.TraverseAttr)
+			if !ok {
+				continue
+			}
+			toName := "var." + next.Name
+			edgeKey := qn + "->" + toName
+			if seen[edgeKey] {
+				continue
+			}
+			seen[edgeKey] = true
+			out = append(out, ExtractedEdge{
+				FromQN:     qn,
+				ToName:     toName,
+				Kind:       "REFERENCES",
+				Confidence: 1.0,
+			})
+		}
+	}
+	// Recurse into nested blocks; references inside attribute the
+	// edge to the outermost block so agents reasoning about a
+	// resource see all its var dependencies in one place.
+	for _, sub := range blk.Body.Blocks {
+		out = append(out, hclCollectVarReferences(sub, qn)...)
+	}
+	return out
 }
 
 // hclTopLevelBlockSymbols converts a top-level .tf block into one or more

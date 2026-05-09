@@ -1124,3 +1124,155 @@ func TestExtractHCL_MultiInstanceDeepNesting(t *testing.T) {
 		t.Errorf("singleton inside multi-instance parent should keep clean QN")
 	}
 }
+
+// TestExtractHCL_VarReferenceEdges pins #86 minimum-viable: when a
+// resource/data/output block references var.NAME in any attribute, an
+// edge with FromQN=blockQN, ToName="var.NAME", Kind=REFERENCES is
+// emitted. The indexer's deferred resolution pass turns the ToName
+// into a real edge against the matching Variable symbol.
+func TestExtractHCL_VarReferenceEdges(t *testing.T) {
+	src := `variable "region" {
+  type = string
+  default = "us-east-1"
+}
+
+variable "instance_type" {
+  type = string
+}
+
+resource "aws_instance" "web" {
+  ami = "ami-123"
+  instance_type = var.instance_type
+  region = var.region
+  tags = {
+    env = var.region
+  }
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  filter {
+    name = "owner-id"
+    values = [var.region]
+  }
+}
+
+output "ip" {
+  value = "${var.region}-public"
+}
+`
+	result := Extract([]byte(src), "HCL", "main.tf")
+
+	type edge struct{ from, to string }
+	got := map[edge]bool{}
+	for _, e := range result.Edges {
+		if e.Kind != "REFERENCES" {
+			continue
+		}
+		got[edge{e.FromQN, e.ToName}] = true
+	}
+
+	wants := []edge{
+		{"resource.aws_instance.web", "var.instance_type"},
+		{"resource.aws_instance.web", "var.region"},
+		{"data.aws_ami.ubuntu", "var.region"},
+		{"output.ip", "var.region"},
+	}
+	for _, w := range wants {
+		if !got[w] {
+			t.Errorf("missing edge %s -> %s; have: %v", w.from, w.to, edgesAsStrings(result.Edges))
+		}
+	}
+
+	// Edges from a single block to the same target must dedupe — no
+	// duplicate when var.region appears in `region`, `tags.env`, AND
+	// `tags.env` again.
+	resourceWebEdges := 0
+	for _, e := range result.Edges {
+		if e.Kind == "REFERENCES" && e.FromQN == "resource.aws_instance.web" {
+			resourceWebEdges++
+		}
+	}
+	// Two distinct vars referenced (instance_type, region); should
+	// produce exactly 2 edges from this block.
+	if resourceWebEdges != 2 {
+		t.Errorf("aws_instance.web should produce 2 distinct REFERENCES edges (var.instance_type, var.region), got %d",
+			resourceWebEdges)
+	}
+}
+
+// TestExtractHCL_NestedBlockReferencesAttributedToParent pins that a
+// var reference inside a nested block (e.g. provisioner inside a
+// resource) is attributed to the OUTERMOST symbol-emitting block —
+// the resource — not the nested Block symbol. Agents tracing vars
+// expect to find their dependents at the resource level.
+func TestExtractHCL_NestedBlockReferencesAttributedToParent(t *testing.T) {
+	src := `resource "aws_instance" "web" {
+  ami = "ami-1"
+  provisioner "remote-exec" {
+    inline = ["echo ${var.region}"]
+  }
+}
+`
+	result := Extract([]byte(src), "HCL", "main.tf")
+	got := map[string]bool{}
+	for _, e := range result.Edges {
+		if e.Kind == "REFERENCES" && e.ToName == "var.region" {
+			got[e.FromQN] = true
+		}
+	}
+	if !got["resource.aws_instance.web"] {
+		t.Errorf("expected REFERENCES edge from resource.aws_instance.web (parent); got from: %v", got)
+	}
+	// Should NOT be attributed to the nested provisioner block.
+	if got["resource.aws_instance.web.provisioner.remote-exec"] {
+		t.Errorf("nested-block reference should be attributed to parent, not nested block")
+	}
+}
+
+// TestExtractHCL_NoNonVarReferencesInThisIter pins that this iter's
+// scope is var.NAME only — references to local.X, data.X, module.X,
+// and TYPE.NAME (resource references) do NOT produce edges yet.
+// Filed as follow-ups to #86. This test prevents accidental scope
+// creep where a contributor adds e.g. local-edge support without the
+// symbol-side wiring.
+func TestExtractHCL_NoNonVarReferencesInThisIter(t *testing.T) {
+	src := `locals {
+  common_tags = { env = "prod" }
+}
+
+resource "aws_instance" "web" {
+  tags = local.common_tags
+  vpc_security_group_ids = [aws_security_group.web.id]
+}
+
+data "aws_ami" "ubuntu" {}
+
+resource "aws_instance" "db" {
+  ami = data.aws_ami.ubuntu.id
+}
+`
+	result := Extract([]byte(src), "HCL", "main.tf")
+	for _, e := range result.Edges {
+		if e.Kind != "REFERENCES" {
+			continue
+		}
+		// Anything not starting with "var." should not be present yet.
+		if !startsWithVarPrefix(e.ToName) {
+			t.Errorf("non-var REFERENCES edge leaked from this iter's scope: %s -> %s",
+				e.FromQN, e.ToName)
+		}
+	}
+}
+
+func edgesAsStrings(edges []ExtractedEdge) []string {
+	out := make([]string, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, e.FromQN+"->"+e.ToName+" ("+e.Kind+")")
+	}
+	return out
+}
+
+func startsWithVarPrefix(s string) bool {
+	return len(s) >= 4 && s[:4] == "var."
+}
