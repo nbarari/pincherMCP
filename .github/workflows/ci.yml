@@ -52,11 +52,11 @@ jobs:
       - name: Test with coverage
         run: go test ./... -coverprofile=cover.out -timeout 120s
 
-      - name: Check coverage threshold (83%)
+      - name: Check coverage threshold (84%)
         run: |
           TOTAL=$(go tool cover -func=cover.out | grep "^total" | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"
-          awk -v t="$TOTAL" 'BEGIN { if (t+0 < 83) { print "Coverage " t "% is below 83% threshold"; exit 1 } }'
+          awk -v t="$TOTAL" 'BEGIN { if (t+0 < 84) { print "Coverage " t "% is below 84% threshold"; exit 1 } }'
 
   # corpus-snapshot exercises the Makefile-driven snapshot pipeline (#33).
   # The Go-test gate (TestCorpusSnapshot_* in cmd/pinch/snapshot_test.go)
