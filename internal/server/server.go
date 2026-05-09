@@ -1053,7 +1053,8 @@ func (s *Server) registerTools() {
 				"language":{"type":"string","description":"Filter by language: Go|Python|TypeScript|HCL|YAML|Markdown|etc"},
 				"corpus":{"type":"string","description":"FTS5 corpus to search. Default (omitted or '') is 'code' — source-code identifiers (Function/Method/Class/etc). 'config' restricts to YAML/JSON/HCL Settings/Resources/Outputs; 'docs' to Markdown sections + fetched Documents; 'all' searches the legacy mixed index across every symbol kind (deprecated, kept for cross-corpus queries). Use a specific corpus to avoid BM25 dilution from unrelated symbol kinds."},
 				"limit":{"type":"integer","description":"Max results (default 20)"},
-				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."}
+				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."},
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Set to 0.7 to suppress low-quality symbols (lockfile keys, vendored regex matches, README headings). Inclusive: a symbol scored exactly at the threshold IS returned."}
 			}
 		}`),
 	}, s.handleSearch)
@@ -1066,7 +1067,8 @@ func (s *Server) registerTools() {
 			"type":"object","required":["cypher"],"properties":{
 				"cypher":{"type":"string","description":"Cypher query. Example: MATCH (f:Function)-[:CALLS]->(g) WHERE f.name='main' RETURN g.name LIMIT 20"},
 				"project":{"type":"string"},
-				"max_rows":{"type":"integer","description":"Max rows (default 200, max 10000)"}
+				"max_rows":{"type":"integer","description":"Max rows (default 200, max 10000)"},
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Filters rows whose query selects an extraction_confidence column; rows from queries that don't return confidence are unaffected."}
 			}
 		}`),
 	}, s.handleQuery)
@@ -1081,7 +1083,8 @@ func (s *Server) registerTools() {
 				"project":{"type":"string"},
 				"direction":{"type":"string","enum":["outbound","inbound","both"],"description":"outbound=what it calls, inbound=what calls it. Default: both"},
 				"depth":{"type":"integer","description":"BFS depth 1-5 (default 3)"},
-				"risk":{"type":"boolean","description":"Add CRITICAL/HIGH/MEDIUM/LOW risk labels (default true)"}
+				"risk":{"type":"boolean","description":"Add CRITICAL/HIGH/MEDIUM/LOW risk labels (default true)"},
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Hops whose target symbol scores below the threshold are excluded from the result."}
 			}
 		}`),
 	}, s.handleTrace)
@@ -1407,6 +1410,7 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	corpus := str(args, "corpus")
 	limit := intArg(args, "limit", 20)
 	fieldsArg := str(args, "fields")
+	minConfidence := floatArg(args, "min_confidence", 0.0)
 
 	// project=* searches all indexed projects — no project filter applied.
 	var projectID string
@@ -1418,9 +1422,31 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
-	results, err := s.store.SearchSymbolsByCorpus(projectID, query, kind, language, corpus, limit)
+	// Fetch extra rows when filtering so the post-filter result count
+	// approaches the requested limit. 4× headroom is enough for typical
+	// corpora; a min_confidence=0.7 filter on a Settings-heavy corpus
+	// might still under-deliver, but that's the right signal — the agent
+	// asked for high-precision and the corpus didn't have it.
+	fetchLimit := limit
+	if minConfidence > 0 {
+		fetchLimit = limit * 4
+	}
+	results, err := s.store.SearchSymbolsByCorpus(projectID, query, kind, language, corpus, fetchLimit)
 	if err != nil {
 		return errResult(fmt.Sprintf("search error: %v", err)), nil
+	}
+	// Apply the threshold AFTER fetch; FTS5 BM25 ordering is preserved.
+	if minConfidence > 0 {
+		filtered := results[:0]
+		for _, r := range results {
+			if r.Symbol.ExtractionConfidence >= minConfidence {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+		if len(results) > limit {
+			results = results[:limit]
+		}
 	}
 
 	// Resolve project root once for snippet reads.
@@ -1500,10 +1526,19 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	tokensSaved := savedVsFileSizes(root, filePaths, responseJSON)
 
+	// Histogram of result confidences for the response envelope.
+	confs := make([]float64, 0, len(results))
+	for _, r := range results {
+		confs = append(confs, r.Symbol.ExtractionConfidence)
+	}
+
 	data := map[string]any{
 		"results": rows,
 		"count":   len(rows),
 		"query":   query,
+		"_meta": map[string]any{
+			"confidence_distribution": confidenceDistribution(confs),
+		},
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
@@ -1516,6 +1551,7 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return errResult("cypher query is required"), nil
 	}
 	maxRows := intArg(args, "max_rows", 200)
+	minConfidence := floatArg(args, "min_confidence", 0.0)
 
 	projectID, errRes := s.mustProject(args)
 	if errRes != nil {
@@ -1537,13 +1573,61 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return errResult(fmt.Sprintf("cypher error: %v", err)), nil
 	}
 
-	responseJSON, _ := json.Marshal(result.Rows)
+	// min_confidence filters rows whose query projects an
+	// `extraction_confidence` column. Rows from queries that don't return
+	// confidence are unaffected — Cypher might project arbitrary columns.
+	rows := result.Rows
+	confs := make([]float64, 0, len(rows))
+	if minConfidence > 0 {
+		filtered := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			if c, ok := rowConfidence(row); ok {
+				if c >= minConfidence {
+					filtered = append(filtered, row)
+					confs = append(confs, c)
+				}
+			} else {
+				// No confidence column projected → pass through.
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	} else {
+		for _, row := range rows {
+			if c, ok := rowConfidence(row); ok {
+				confs = append(confs, c)
+			}
+		}
+	}
+
+	responseJSON, _ := json.Marshal(rows)
 	data := map[string]any{
 		"columns": result.Columns,
-		"rows":    result.Rows,
-		"total":   result.Total,
+		"rows":    rows,
+		"total":   len(rows),
+		"_meta": map[string]any{
+			"confidence_distribution": confidenceDistribution(confs),
+		},
 	}
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(result.Total, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(rows), responseJSON)), nil
+}
+
+// rowConfidence pulls the `extraction_confidence` column off a Cypher result
+// row if present. Cypher queries project arbitrary columns, so a row may not
+// carry confidence at all — filter logic falls back to pass-through in that
+// case rather than silently dropping the row.
+func rowConfidence(row map[string]any) (float64, bool) {
+	v, ok := row["extraction_confidence"]
+	if !ok {
+		return 0, false
+	}
+	switch f := v.(type) {
+	case float64:
+		return f, true
+	case float32:
+		return float64(f), true
+	}
+	return 0, false
 }
 
 func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1559,6 +1643,7 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	depth := intArg(args, "depth", 3)
 	addRisk := boolArgDefault(args, "risk", true)
+	minConfidence := floatArg(args, "min_confidence", 0.0)
 
 	projectID, errRes := s.mustProject(args)
 	if errRes != nil {
@@ -1568,6 +1653,25 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	hops, err := s.indexer.Trace(ctx, projectID, name, direction, depth, addRisk)
 	if err != nil {
 		return errResult(fmt.Sprintf("trace error: %v", err)), nil
+	}
+
+	// Filter by min_confidence — drop hops whose target falls below threshold.
+	// Always collect confidences for the response distribution (regardless of
+	// whether the threshold filter is active).
+	confs := make([]float64, 0, len(hops))
+	if minConfidence > 0 {
+		filtered := hops[:0]
+		for _, h := range hops {
+			if h.Symbol.ExtractionConfidence >= minConfidence {
+				filtered = append(filtered, h)
+				confs = append(confs, h.Symbol.ExtractionConfidence)
+			}
+		}
+		hops = filtered
+	} else {
+		for _, h := range hops {
+			confs = append(confs, h.Symbol.ExtractionConfidence)
+		}
 	}
 
 	// Group by depth
@@ -1611,6 +1715,9 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"direction": direction,
 		"hops":      hopsList,
 		"total":     len(hops),
+		"_meta": map[string]any{
+			"confidence_distribution": confidenceDistribution(confs),
+		},
 	}
 	if addRisk {
 		data["risk_summary"] = riskCounts
@@ -2320,12 +2427,18 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// Cost avoided by not sending tokensSaved tokens to the model
 	costAvoided := float64(tokensSaved) / 1_000_000.0 * baseCostPer1M
 
-	data["_meta"] = map[string]any{
-		"tokens_used":  tokensUsed,
-		"tokens_saved": tokensSaved,
-		"latency_ms":   latency,
-		"cost_avoided": fmt.Sprintf("$%.4f", costAvoided),
+	// Merge into any pre-existing `_meta` rather than overwriting, so handlers
+	// can attach handler-specific fields (e.g. `confidence_distribution` from
+	// #34 Phase 3) before calling.
+	meta, _ := data["_meta"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
 	}
+	meta["tokens_used"] = tokensUsed
+	meta["tokens_saved"] = tokensSaved
+	meta["latency_ms"] = latency
+	meta["cost_avoided"] = fmt.Sprintf("$%.4f", costAvoided)
+	data["_meta"] = meta
 
 	// Accumulate session stats. On the very first call, flush immediately so
 	// the dashboard sees the new session within milliseconds, not after 10s.
@@ -2454,6 +2567,28 @@ func boolArgDefault(args map[string]any, key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+// floatArg extracts a float64 from the JSON-decoded args map. JSON numbers
+// always decode to float64 in Go, so this is a thin guard against missing
+// keys / wrong-type callers (e.g. an int passed via Go-side test code).
+//
+// Used for #34 Phase 3's `min_confidence` parameter on search/query/trace.
+// Default 0.0 means "no filter" — every symbol passes through.
+func floatArg(args map[string]any, key string, def float64) float64 {
+	v, ok := args[key]
+	if !ok {
+		return def
+	}
+	switch f := v.(type) {
+	case float64:
+		return f
+	case int:
+		return float64(f)
+	case int64:
+		return float64(f)
+	}
+	return def
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

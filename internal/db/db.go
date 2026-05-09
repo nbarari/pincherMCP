@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1093,6 +1094,24 @@ type LanguageCoverage struct {
 	Parser     string  `json:"parser"`   // "AST" or "Regex"
 	Confidence float64 `json:"confidence"` // avg extraction_confidence for this language
 	Symbols    int     `json:"symbols"`
+	// ByKind breaks the language's coverage down per symbol kind so the
+	// `health` tool can surface "your YAML extractor produces low-confidence
+	// Settings" without a separate query (#34 Phase 3). Empty for projects
+	// indexed before Phase 3.
+	ByKind []KindCoverage `json:"by_kind,omitempty"`
+}
+
+// KindCoverage holds confidence statistics for one (language, kind) pair.
+// p10 / p50 are computed in Go from the per-symbol confidence column — the
+// pure-Go SQLite driver doesn't expose `percentile_cont`, so we sort the
+// per-group symbols and slice the percentiles directly. Acceptable cost
+// because health is user-triggered, not on the hot path.
+type KindCoverage struct {
+	Kind          string  `json:"kind"`
+	Symbols       int     `json:"symbols"`
+	AvgConfidence float64 `json:"avg_confidence"`
+	P10           float64 `json:"p10"`
+	P50           float64 `json:"p50"`
 }
 
 // HealthReport is the output of HealthCheck.
@@ -1154,7 +1173,118 @@ func (s *Store) HealthCheck(projectID string) (*HealthReport, error) {
 		}
 		report.Coverage = append(report.Coverage, lc)
 	}
-	return report, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Per-(language, kind) percentiles. We pull all (language, kind, conf)
+	// tuples in one query, group in Go, then sort each group to compute
+	// p10/p50. For projects with N symbols this is O(N) memory + O(N log N)
+	// time — fine for a user-triggered tool.
+	if err := s.populateKindCoverage(report, projectID); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// populateKindCoverage attaches per-kind percentile stats to each
+// LanguageCoverage entry already in report. Pulled into its own method
+// so HealthCheck stays scannable.
+func (s *Store) populateKindCoverage(report *HealthReport, projectID string) error {
+	type langKindRow struct {
+		Language string
+		Kind     string
+		Conf     float64
+	}
+	tupleRows, err := s.db.Query(`
+		SELECT language, kind, extraction_confidence
+		FROM symbols
+		WHERE project_id = ?`, projectID)
+	if err != nil {
+		return err
+	}
+	defer tupleRows.Close()
+
+	// (language, kind) → sorted confidence slice, built up incrementally.
+	groups := make(map[string]map[string][]float64)
+	for tupleRows.Next() {
+		var r langKindRow
+		if err := tupleRows.Scan(&r.Language, &r.Kind, &r.Conf); err != nil {
+			return err
+		}
+		byLang, ok := groups[r.Language]
+		if !ok {
+			byLang = make(map[string][]float64)
+			groups[r.Language] = byLang
+		}
+		byLang[r.Kind] = append(byLang[r.Kind], r.Conf)
+	}
+	if err := tupleRows.Err(); err != nil {
+		return err
+	}
+
+	// Stitch into the existing language ordering.
+	for i := range report.Coverage {
+		lang := report.Coverage[i].Language
+		byKind, ok := groups[lang]
+		if !ok {
+			continue
+		}
+		report.Coverage[i].ByKind = computeKindCoverages(byKind)
+	}
+	return nil
+}
+
+// computeKindCoverages turns the per-(kind) confidence slices into a sorted
+// list of KindCoverage records. Uses index-based percentile (no
+// interpolation) — for our N (typically 1-1000 symbols per kind) the
+// difference between linear-interpolated and index-based p10 is in the
+// fourth decimal, well below the resolution that matters for diagnostics.
+func computeKindCoverages(byKind map[string][]float64) []KindCoverage {
+	out := make([]KindCoverage, 0, len(byKind))
+	for kind, confs := range byKind {
+		sort.Float64s(confs)
+		n := len(confs)
+		if n == 0 {
+			continue
+		}
+		var sum float64
+		for _, c := range confs {
+			sum += c
+		}
+		out = append(out, KindCoverage{
+			Kind:          kind,
+			Symbols:       n,
+			AvgConfidence: sum / float64(n),
+			P10:           confs[percentileIdx(n, 10)],
+			P50:           confs[percentileIdx(n, 50)],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		// Stable, deterministic ordering by symbol count desc then kind name.
+		if out[i].Symbols != out[j].Symbols {
+			return out[i].Symbols > out[j].Symbols
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out
+}
+
+// percentileIdx returns the index into a sorted slice of length n that
+// represents the p-th percentile (p in 0..100). Conservative on the lower
+// side — at p=10 with n=1, returns index 0 (the only element).
+func percentileIdx(n, p int) int {
+	if n <= 1 {
+		return 0
+	}
+	idx := (p * (n - 1)) / 100
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	return idx
 }
 
 func formatStaleness(d time.Duration) string {
