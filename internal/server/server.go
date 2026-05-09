@@ -1842,11 +1842,15 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 		changedSymbols = append(changedSymbols, syms...)
 	}
 
-	// BFS trace for blast radius
+	// BFS trace for blast radius. Use TraceByID so a changed `Run` /
+	// `Handler` / `Open` resolves to the *exact* symbol that changed,
+	// not whichever same-named symbol the name-based lookup picks first
+	// (#5). The previous Trace(name, ...) path computed blast radius
+	// from a sibling symbol when one name had multiple definitions.
 	var impacted []map[string]any
 	seen := make(map[string]bool)
 	for _, sym := range changedSymbols {
-		hops, err := s.indexer.Trace(ctx, projectID, sym.Name, "inbound", depth, true)
+		hops, err := s.indexer.TraceByID(ctx, sym.ID, "inbound", depth, true)
 		if err != nil {
 			continue
 		}
@@ -2701,6 +2705,33 @@ func runGitDiff(root, scope string) (string, error) {
 		args = append(args, "HEAD")
 	}
 	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	// `git diff` only reports tracked changes. `unstaged` and `all` are
+	// the user's "what's not yet committed?" queries; an untracked new
+	// source file (a brand-new test file, a fresh handler, a new docs
+	// page) is uncommitted by definition and belongs in pre-commit
+	// safety analysis (#6). `staged` deliberately doesn't include
+	// untracked files — by definition they're not staged yet.
+	if scope == "" || scope == "unstaged" || scope == "all" {
+		untracked, lsErr := runGitLsUntracked(root)
+		if lsErr == nil && untracked != "" {
+			return string(out) + untracked, nil
+		}
+	}
+	return string(out), nil
+}
+
+// runGitLsUntracked returns one untracked, non-ignored path per line —
+// the same format as `git diff --name-only`, so the result can be
+// concatenated with a diff output without a separate parser. Errors are
+// returned to the caller; runGitDiff treats them as soft (best-effort)
+// since pre-commit analysis without untracked files is still useful.
+func runGitLsUntracked(root string) (string, error) {
+	cmd := exec.Command("git", "ls-files", "--others", "--exclude-standard")
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

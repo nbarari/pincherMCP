@@ -1572,6 +1572,84 @@ func TestRunGitDiff_NonGitDir(t *testing.T) {
 	}
 }
 
+// TestRunGitDiff_IncludesUntrackedForUnstagedAndAll pins #6: a brand-new
+// untracked file is "uncommitted" by definition and belongs in
+// pre-commit safety analysis. `git diff` alone misses it.
+func TestRunGitDiff_IncludesUntrackedForUnstagedAndAll(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	gitInit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitInit("init", "-b", "main")
+	gitInit("config", "user.email", "t@t")
+	gitInit("config", "user.name", "t")
+	gitInit("commit", "--allow-empty", "-m", "init")
+
+	// Drop one tracked file (modify it after staging), one untracked
+	// file (never staged), one staged-but-not-committed file. The
+	// scenarios test each scope independently.
+	if err := os.WriteFile(dir+"/tracked.txt", []byte("tracked v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInit("add", "tracked.txt")
+	gitInit("commit", "-m", "add tracked")
+	if err := os.WriteFile(dir+"/tracked.txt", []byte("tracked v2"), 0o644); err != nil {
+		t.Fatal(err)
+	} // unstaged modification
+	if err := os.WriteFile(dir+"/untracked-new.txt", []byte("brand new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/staged-new.txt", []byte("staged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInit("add", "staged-new.txt")
+
+	cases := []struct {
+		scope          string
+		wantTracked    bool // tracked.txt (modified) must appear
+		wantUntracked  bool // untracked-new.txt must appear
+		wantStagedFile bool // staged-new.txt must appear
+	}{
+		{"unstaged", true, true, false},  // unstaged mods + untracked
+		{"all", true, true, true},        // every uncommitted thing
+		{"staged", false, false, true},   // only staged; untracked excluded by design
+	}
+	for _, c := range cases {
+		t.Run(c.scope, func(t *testing.T) {
+			out, err := runGitDiff(dir, c.scope)
+			if err != nil {
+				t.Fatalf("runGitDiff(%q): %v", c.scope, err)
+			}
+			files := parseGitDiffFiles(out)
+			has := func(name string) bool {
+				for _, f := range files {
+					if f == name {
+						return true
+					}
+				}
+				return false
+			}
+			if has("tracked.txt") != c.wantTracked {
+				t.Errorf("scope=%q tracked.txt: got=%v want=%v (files=%v)", c.scope, has("tracked.txt"), c.wantTracked, files)
+			}
+			if has("untracked-new.txt") != c.wantUntracked {
+				t.Errorf("scope=%q untracked-new.txt: got=%v want=%v (files=%v)", c.scope, has("untracked-new.txt"), c.wantUntracked, files)
+			}
+			if has("staged-new.txt") != c.wantStagedFile {
+				t.Errorf("scope=%q staged-new.txt: got=%v want=%v (files=%v)", c.scope, has("staged-new.txt"), c.wantStagedFile, files)
+			}
+		})
+	}
+}
+
 func TestParseGitDiffFiles_Basic(t *testing.T) {
 	diff := "internal/server/server.go\ninternal/db/db.go\n"
 	files := parseGitDiffFiles(diff)

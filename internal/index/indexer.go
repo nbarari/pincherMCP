@@ -671,11 +671,13 @@ type Hop struct {
 // recursive CTE queries regardless of graph size, replacing the old approach
 // that issued O(nodes × depth × 2) individual SQL round trips.
 func (idx *Indexer) Trace(ctx context.Context, projectID, name string, direction string, maxDepth int, addRisk bool) ([]Hop, error) {
-	if maxDepth <= 0 || maxDepth > 5 {
-		maxDepth = 3
-	}
-
-	// Find start symbol
+	// Find start symbol by short name. When multiple symbols share the
+	// name (common: many `Run`, `Handler`, `Open` in one project), this
+	// picks the first match — same documented heuristic the search tool
+	// uses when no qualifier is provided. Callers that have an exact ID
+	// (e.g. `changes` already knows which symbol it walked over) should
+	// use `TraceByID` instead so blast radius is computed for the exact
+	// symbol, not whichever same-named one resolves first (#5).
 	starts, err := idx.store.GetSymbolsByName(projectID, name, 5)
 	if err != nil {
 		return nil, err
@@ -683,12 +685,23 @@ func (idx *Indexer) Trace(ctx context.Context, projectID, name string, direction
 	if len(starts) == 0 {
 		return nil, fmt.Errorf("symbol %q not found in project", name)
 	}
-	start := starts[0]
+	return idx.TraceByID(ctx, starts[0].ID, direction, maxDepth, addRisk)
+}
+
+// TraceByID is Trace with the start-symbol disambiguation step skipped:
+// the caller already has an exact symbol ID (typically from a previous
+// `search`, `symbol`, or `changes` call), so resolving by name would be
+// wrong when multiple symbols share that name. Use this whenever you
+// have an ID; the name-based `Trace` is for tools that take a name.
+func (idx *Indexer) TraceByID(ctx context.Context, symbolID, direction string, maxDepth int, addRisk bool) ([]Hop, error) {
+	if maxDepth <= 0 || maxDepth > 5 {
+		maxDepth = 3
+	}
 
 	edgeKinds := []string{"CALLS", "HTTP_CALLS", "ASYNC_CALLS"}
 
 	// Single CTE traversal per direction (max 2 SQL calls total for "both").
-	traceResults, err := idx.store.TraceViaCTE(start.ID, direction, edgeKinds, maxDepth)
+	traceResults, err := idx.store.TraceViaCTE(symbolID, direction, edgeKinds, maxDepth)
 	if err != nil {
 		return nil, err
 	}
