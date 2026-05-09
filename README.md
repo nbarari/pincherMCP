@@ -7,7 +7,7 @@
 [![CI](https://github.com/kwad77/pincher/actions/workflows/ci.yml/badge.svg)](https://github.com/kwad77/pincher/actions/workflows/ci.yml)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-84.3%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-83%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
 
 **Codebase intelligence server for LLM agents.**
 Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
@@ -44,19 +44,23 @@ Token savings accumulate in SQLite across sessions — every reconnect adds to a
 ## Quick Start
 
 ```bash
-# 1. Build (Go 1.25+, pure Go — no CGO, no C compiler)
-git clone https://github.com/kwad77/pincher && cd pincherMCP
-go build -o pincher ./cmd/pinch/         # or pincher.exe on Windows
+# 1. Install
+go install github.com/kwad77/pincher/cmd/pinch@latest      # if Go 1.25+ on PATH
+# or download a release binary:
+#   https://github.com/kwad77/pincher/releases/latest
+# or build from source:
+#   git clone https://github.com/kwad77/pincher && cd pincher
+#   go build -o pincher ./cmd/pinch/      # or pincher.exe on Windows
 
 # 2. Drop the policy block into your project's CLAUDE.md (one-time)
-./pincher init                           # writes ./CLAUDE.md
-./pincher init --global                  # writes ~/.claude/CLAUDE.md
+pincher init                             # writes ./CLAUDE.md
+pincher init --global                    # writes ~/.claude/CLAUDE.md
 
 # 3. Index your project
-./pincher index /path/to/your/project
+pincher index /path/to/your/project
 
 # 4. Point your MCP client at the binary (Claude Code / Cursor / Zed examples below)
-#    Or open the dashboard: ./pincher web
+#    Or open the dashboard: pincher web
 ```
 
 ### Client configuration
@@ -178,25 +182,26 @@ Other CLI subcommands ([`pincher index`](docs/REFERENCE.md#pincher-index), [`pin
 
 ## Roadmap
 
-| Tier | Theme | Status |
+| Release | Theme | Status |
 |---|---|---|
 | **v0.2** | Index quality at scale (Bash, HCL, Markdown, Jinja2 extractors; per-corpus FTS5 split; pinned-corpus snapshot tests) | ✅ shipped |
 | **v0.3** | Trust + observability (security audit, `pincher doctor`, dashboard CSP tightening, FTS5 escape hatch, per-symbol confidence) | ✅ shipped |
-| **v0.4** | Performance under load (pinned-corpus benchmarks, reader pool, sessions schema for HTTP discovery, `pincher web` / `init` / `update`) | 🚧 in flight |
-| **v0.5** | Polish + extension surface (struct field extraction, cross-project query, webhook re-index, VS Code extension, `.pincher.yml` config) | planned |
-| **v1.0** | Stable API (tool schemas frozen, symbol-ID format frozen, HTTP REST surface frozen, SECURITY.md) | planned |
+| **v0.4** | Capture-what-shipped (schema v11, four new CLI subcommands `update`/`web`/`init`/`stats`, HCL REFERENCES edges, plugin SessionStart hook, README split, Terraform pinned corpus) | ✅ shipped |
+| **v0.5** | Trustworthy single-binary release (`go install` fix, default-deny remote HTTP, legacy `symbols_fts` removed, case-insensitive `project_id` fix, release artifact pipeline) | 🚧 in flight |
+| **v0.6** | Multi-client adoption (`pincher init` for Cursor / Windsurf / Aider / Continue, three end-to-end tutorials, `pincher project rm` CLI) | planned |
+| **v0.7** | Language + polish (HTML / XML extractors, stats reconciliation, Cypher polish vs rename, bench gate verdict) | planned |
+| **v1.0** | Freeze + announce (tool schemas frozen, schema attestation, migration guide, public launch) | planned |
 
-Issues + PR tracker: <https://github.com/kwad77/pincher/issues>. Per-tier detail in [REFERENCE.md → Roadmap](docs/REFERENCE.md#roadmap).
+Live milestone burndown: <https://github.com/kwad77/pincher/milestones>. Full punch lists per release: [#193](https://github.com/kwad77/pincher/issues/193).
 
 ---
 
 ## Known limitations
 
-- **`go install` is not yet supported.** The `go.mod` module path (`github.com/kwad77/pincher`) doesn't match the GitHub URL (`kwad77/pincher`); `go install github.com/...@latest` fails until that's reconciled. Clone + `go build` works today; `pincher update` from a checkout pulls + rebuilds in place.
-- **Pre-built release binaries** are not yet attached to GitHub release tags. The asset-fetching path in `pincher update` is ready for them and will activate once the release workflow uploads artifacts.
-- **Sequence-rename ID instability in YAML.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0` → `tasks.1`). Move detection catches some cases but not deterministically.
-- **Single-user SQLite.** Cross-process indexing is safe (filesystem lockfile). Team/enterprise shared indexes need a server mode that's not built yet.
+- **Sequence-rename ID instability in YAML.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0` → `tasks.1`). Move detection catches some cases but not deterministically. Verdict (fix vs document-as-won't-fix) tracked at [#205](https://github.com/kwad77/pincher/issues/205) for v0.7.
+- **Single-user SQLite.** Cross-process indexing is safe (filesystem lockfile). Team / enterprise shared indexes need a server mode — explicitly out of v1.0 scope.
 - **~7 languages without extractors.** Scala, Lua, Zig, Elixir, Haskell, Dart, R are detected as source but emit zero symbols. Adding any of them = implement one Go interface.
+- **HTML / XML extractors not yet shipped.** Markup-heavy projects (component libraries, .NET csproj, Maven pom.xml) currently fall through to no extraction. Both planned for [v0.7](https://github.com/kwad77/pincher/milestone/5) ([#100](https://github.com/kwad77/pincher/issues/100), [#101](https://github.com/kwad77/pincher/issues/101)).
 
 Full known-limitations list, with severity and tracking issue: [REFERENCE.md → Known Limitations](docs/REFERENCE.md#known-limitations).
 
