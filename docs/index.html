@@ -203,6 +203,10 @@ footer a{color:var(--accent)}
 cd pincherMCP
 go build -o pincher ./cmd/pinch/
 
+# Drop the pincher policy block into your project's CLAUDE.md
+./pincher init                # ./CLAUDE.md
+./pincher init --global       # ~/.claude/CLAUDE.md
+
 # Run the HTTP dashboard alongside your MCP client
 ./pincher --http :8080
 
