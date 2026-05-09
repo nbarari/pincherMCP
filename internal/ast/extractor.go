@@ -35,6 +35,7 @@ package ast
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -81,6 +82,15 @@ type FileResult struct {
 	Symbols []ExtractedSymbol
 	Edges   []ExtractedEdge
 	Module  string // module/package name
+
+	// QNCollisions maps a (qualified-name × kind) tuple that the regex
+	// extractor produced more than once in this file → the original
+	// occurrence count. Populated by `disambiguateDuplicates`. A non-empty
+	// map means the extractor saw scope-blind duplicates (Python nested
+	// `def`, TS function shadows, Rust #[cfg]-gated overloads) and made
+	// the QNs unique by appending `~<line>` to the 2nd+ occurrences;
+	// callers that want to track the underlying issue read this map.
+	QNCollisions map[string]int
 }
 
 // Extract dispatches to the registered Extractor for the given language.
@@ -105,6 +115,13 @@ func ExtractWithModule(source []byte, language, relPath, modulePath string) *Fil
 	if result == nil {
 		return &FileResult{}
 	}
+	// #115 safety net: every extractor gets duplicate-QN disambiguation,
+	// regardless of whether it's regex/AST/goldmark/HCL. Scope-blind
+	// regex passes (Python/TS/Rust/C) are the dominant source, but
+	// Markdown sibling-heading collisions and YAML byte-range bugs hit
+	// the same code path. Centralising here means a new extractor can't
+	// forget to call disambiguateDuplicates.
+	disambiguateDuplicates(result)
 	conf := e.Confidence()
 	for i := range result.Symbols {
 		// Per-symbol composition (#34). In Phase 1 every signal contributes
@@ -732,6 +749,62 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 	return result
 }
 
+// disambiguateDuplicates makes the (QN, kind) keys in result.Symbols unique
+// by appending `~<startLine>` to the 2nd+ occurrence of any duplicate.
+//
+// Why: the regex extractors are scope-blind. A file with multiple
+// `def helper():` inside different test functions, or several
+// `function jsx(...)` polymorphic variants, or `#[cfg(...)]`-gated Rust
+// `fn` overloads will produce ExtractedSymbol entries that all share the
+// same QualifiedName. Pre-fix, those symbols collapsed at
+// `BulkUpsertSymbols` (last-write-wins via `MakeSymbolID`) and N-1
+// occurrences were silently lost (#115). Disambiguation by line keeps
+// every symbol addressable while preserving the canonical first
+// occurrence for callers that already search the un-suffixed QN.
+//
+// The pre-disambiguation collision count is recorded in
+// `result.QNCollisions` so the existing #42 extraction-failure heuristic
+// (`recordExtractionHeuristics`) can still surface the underlying
+// regex-scope blindness — disambiguation hides the symbol-loss symptom,
+// it doesn't pretend the regex extractor became smarter.
+//
+// Order-preserving: scans symbols in their original emission order, so
+// the first occurrence keeps its plain QN. Determinism: same input
+// always produces the same suffixed QNs because line numbers are stable.
+func disambiguateDuplicates(result *FileResult) {
+	if len(result.Symbols) <= 1 {
+		return
+	}
+	type key struct{ qn, kind string }
+	count := make(map[key]int, len(result.Symbols))
+	for _, s := range result.Symbols {
+		count[key{s.QualifiedName, s.Kind}]++
+	}
+	collisions := make(map[string]int)
+	for k, n := range count {
+		if n > 1 {
+			collisions[k.qn] = n
+		}
+	}
+	if len(collisions) == 0 {
+		return
+	}
+	seen := make(map[key]int, len(collisions))
+	for i := range result.Symbols {
+		s := &result.Symbols[i]
+		k := key{s.QualifiedName, s.Kind}
+		if count[k] <= 1 {
+			continue
+		}
+		seen[k]++
+		if seen[k] == 1 {
+			continue // first occurrence keeps the plain QN
+		}
+		s.QualifiedName = fmt.Sprintf("%s~%d", s.QualifiedName, s.StartLine)
+	}
+	result.QNCollisions = collisions
+}
+
 type extractOpts struct {
 	modSep     string
 	blockChar  byte
@@ -882,7 +955,7 @@ var cMacroRE = regexp.MustCompile(
 	`(?m)^[ \t]*(?:static\s+)?(?P<macro>[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\s*\(\s*(?P<arg>[A-Za-z_][A-Za-z0-9_]*)`)
 
 // extractC runs the regex extractor over a C source file, then applies
-// four post-processing passes that the regex alone can't handle:
+// three post-processing passes that the regex alone can't handle:
 //
 //  1. rewriteCMacroSymbols (#69/#73): SCREAM_CASE_MACRO(arg, ...) — name
 //     the symbol after `arg`, not the macro.
@@ -892,25 +965,25 @@ var cMacroRE = regexp.MustCompile(
 //  3. extractCBareMacros (#74): emit Function symbols for column-0
 //     bare-prefix macros (EXPORT_SYMBOL, MODULE_PARM_DESC) that funcRE
 //     can't match because they have no preceding word.
-//  4. dedupCSymbolsByQN (#79 part 2): when #ifdef / #else branches both
-//     define the same function, keep the first symbol and drop the
-//     duplicates. Preserves the user's experience that a single QN
-//     resolves to a single symbol — which-variant-is-active needs
-//     preprocessor awareness we don't have.
+//
+// (#79 part 2's `dedupCSymbolsByQN` step has been retired: the centralised
+// `disambiguateDuplicates` call in `ExtractWithModule` now handles
+// `#ifdef`/`#else` branch collisions by suffixing the 2nd+ occurrence
+// with `~<line>`, so both variants survive instead of one being dropped.
+// dedupCSymbolsByQN is kept around for the per-extractor unit tests
+// that drive it directly.)
 //
 // Each pass is independently testable; the order matters because:
-//   - rewriteCMacro must run BEFORE dedup so DEVICE_ATTR and friends get
-//     their proper per-instance names rather than colliding on the
-//     macro name.
+//   - rewriteCMacro must run BEFORE the central disambiguator so
+//     DEVICE_ATTR and friends get their proper per-instance names
+//     rather than colliding on the macro name.
 //   - extractCBareMacros must run AFTER dropForwardDecls so the bare
 //     macro pass doesn't re-emit names just removed.
-//   - dedup must run LAST so all upstream renames have settled.
 func extractC(source []byte, relPath string) *FileResult {
 	result := cRE.extract(source, relPath, "C", simpleOpts("::", '{'))
 	rewriteCMacroSymbols(result, source, relPath)
 	result.Symbols = dropCForwardDecls(result.Symbols, source)
 	result.Symbols = append(result.Symbols, extractCBareMacros(source, relPath, result.Symbols)...)
-	result.Symbols = dedupCSymbolsByQN(result.Symbols)
 	return result
 }
 

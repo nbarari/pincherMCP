@@ -292,7 +292,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			//     the dotted-path builder produced a duplicate (PR #39's
 			//     YAML-byte-range bug used to do this when sequences were
 			//     re-indexed).
-			recordExtractionHeuristics(idx, projectID, lang, relPath, result.Symbols)
+			recordExtractionHeuristics(idx, projectID, lang, relPath, result)
 
 			// Convert to DB types
 			syms := make([]db.Symbol, 0, len(result.Symbols))
@@ -793,9 +793,8 @@ func safeExtractWithModule(idx *Indexer, projectID, lang, relPath string, conten
 // these heuristics).
 //
 // #42 part 1 — diagnostic surface.
-func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, syms []ast.ExtractedSymbol) {
-	seen := make(map[string]int, len(syms))
-	for _, s := range syms {
+func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, result *ast.FileResult) {
+	for _, s := range result.Symbols {
 		// byte_range_negative
 		if s.EndByte <= s.StartByte {
 			details := fmt.Sprintf("symbol %q (%s): end_byte=%d <= start_byte=%d",
@@ -804,24 +803,29 @@ func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, s
 				slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
 			}
 		}
-		seen[s.QualifiedName]++
 	}
 	// qualified_name_collision — record once per file even if multiple QNs
-	// collide; details lists the worst offender plus the count.
+	// collide; details lists the worst offender plus the count. The
+	// pre-disambiguation count is carried on FileResult.QNCollisions
+	// (#115): the regex extractor produced duplicates, then
+	// disambiguateDuplicates suffixed them with `~<line>` so all symbols
+	// survive — but the underlying scope-blindness still merits the
+	// diagnostic so reviewers see when a new collision pattern appears.
+	if len(result.QNCollisions) == 0 {
+		return
+	}
 	var worst string
-	worstCount := 1
-	for qn, n := range seen {
+	worstCount := 0
+	for qn, n := range result.QNCollisions {
 		if n > worstCount {
 			worst = qn
 			worstCount = n
 		}
 	}
-	if worstCount > 1 {
-		details := fmt.Sprintf("qualified_name %q appears %d times (extractor produced duplicates)",
-			worst, worstCount)
-		if err := idx.store.RecordExtractionFailure(projectID, relPath, lang, "qualified_name_collision", details); err != nil {
-			slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
-		}
+	details := fmt.Sprintf("qualified_name %q appears %d times (extractor produced duplicates)",
+		worst, worstCount)
+	if err := idx.store.RecordExtractionFailure(projectID, relPath, lang, "qualified_name_collision", details); err != nil {
+		slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
 	}
 }
 

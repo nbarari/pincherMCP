@@ -494,24 +494,51 @@ module "foo_bar" { source = "./b" }
 `)
 	result := Extract(src, "HCL", "main.tf")
 
-	// Both modules MUST appear in the extractor output as distinct
-	// ExtractedSymbols. The symbol struct is keyed by struct identity (slice
-	// position), not by ID. Dedup is the indexer's responsibility.
-	matched := 0
+	// Both modules MUST survive — pre-#115 they shared a QN and the DB
+	// layer would silently drop one via last-write-wins. Now the central
+	// disambiguator suffixes the 2nd occurrence with `~<line>`, so both
+	// stay individually addressable. The test asserts: (a) both Module
+	// symbols are present, (b) one keeps the canonical QN, (c) the other
+	// has a `~<line>` suffix derived from its start line, (d) they're at
+	// different source positions, (e) FileResult.QNCollisions records
+	// the original collision so the #42 diagnostic still fires.
+	var byName []ExtractedSymbol
 	for _, s := range result.Symbols {
-		if s.QualifiedName == "module.foo_bar" {
-			matched++
+		if s.Name == "foo_bar" || s.Name == "foo.bar" {
+			byName = append(byName, s)
 		}
 	}
-	if matched != 2 {
-		t.Errorf("expected 2 ExtractedSymbols sharing qualified_name=module.foo_bar (one per source block); got %d. All symbols: %v",
-			matched, allQNs(result.Symbols))
+	if len(byName) != 2 {
+		t.Fatalf("expected 2 module symbols (one per source block); got %d. All symbols: %v",
+			len(byName), allQNs(result.Symbols))
+	}
+
+	// One canonical QN, one disambiguated.
+	plainQN := "module.foo_bar"
+	hasPlain, hasSuffixed := false, false
+	for _, s := range result.Symbols {
+		if s.QualifiedName == plainQN {
+			hasPlain = true
+		} else if strings.HasPrefix(s.QualifiedName, plainQN+"~") {
+			hasSuffixed = true
+		}
+	}
+	if !hasPlain {
+		t.Errorf("expected first occurrence to keep plain QN %q; symbols: %v", plainQN, allQNs(result.Symbols))
+	}
+	if !hasSuffixed {
+		t.Errorf("expected second occurrence to have disambiguated QN with ~<line> suffix; symbols: %v", allQNs(result.Symbols))
+	}
+
+	// QNCollisions must record the underlying issue.
+	if n := result.QNCollisions[plainQN]; n != 2 {
+		t.Errorf("QNCollisions[%q] = %d, want 2 (#42 diagnostic must surface the original collision)", plainQN, n)
 	}
 
 	// And the byte ranges must differ — they're at different source positions.
 	var ranges []int
 	for _, s := range result.Symbols {
-		if s.QualifiedName == "module.foo_bar" {
+		if s.Name == "foo_bar" || s.Name == "foo.bar" {
 			ranges = append(ranges, s.StartByte)
 		}
 	}

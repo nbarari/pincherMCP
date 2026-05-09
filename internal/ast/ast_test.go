@@ -842,29 +842,55 @@ static void gpio_keys_syscore_resume(void) {}
 #endif
 `
 
-// TestExtractC_IfdefVariantsDeduped pins the regression gate for #79
-// part 2: when the same function is defined in both `#ifdef` and `#else`
-// branches, the extractor MUST emit exactly one symbol (first wins).
+// TestExtractC_IfdefVariantsDisambiguated pins #115 disambiguation
+// semantics for the C-style `#ifdef` / `#else` branch case.
 //
-// The user-visible failure pre-fix: BulkUpsertSymbols' last-write-wins
-// would silently pick whichever branch happened to be parsed last,
-// hiding the other variant entirely. Post-fix the user gets the FIRST
-// variant — still a heuristic, but now a documented and stable one.
-func TestExtractC_IfdefVariantsDeduped(t *testing.T) {
+// Pre-#79: BulkUpsertSymbols' last-write-wins silently picked whichever
+// branch parsed last; one variant disappeared.
+// Post-#79: dedupCSymbolsByQN dropped all but the first occurrence;
+// the other variants disappeared but deterministically.
+// Post-#115: the generic regex disambiguator suffixes the 2nd+ QN with
+// `~<line>` so BOTH variants survive and remain searchable. The first
+// occurrence keeps the plain QN (back-compat for callers that already
+// search the un-suffixed name).
+func TestExtractC_IfdefVariantsDisambiguated(t *testing.T) {
 	result := Extract([]byte(cIfdefSrc), "C", "drivers/y.c")
 	if result == nil {
 		t.Fatal("nil result")
 	}
 
-	// Exactly one symbol named gpio_keys_syscore_resume.
+	// BOTH variants must be emitted (no silent loss).
 	count := 0
 	for _, s := range result.Symbols {
 		if s.Name == "gpio_keys_syscore_resume" {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Errorf("got %d gpio_keys_syscore_resume symbols, want 1 (#ifdef dedup failed)", count)
+	if count != 2 {
+		t.Errorf("got %d gpio_keys_syscore_resume symbols, want 2 (#ifdef variants must survive disambiguation)", count)
+	}
+
+	// QNs must be unique. First occurrence keeps the plain QN; second
+	// gets a `~<line>` suffix.
+	qns := map[string]int{}
+	for _, s := range result.Symbols {
+		if s.Name == "gpio_keys_syscore_resume" {
+			qns[s.QualifiedName]++
+		}
+	}
+	if len(qns) != 2 {
+		t.Errorf("expected 2 distinct QNs for the two variants, got %d: %v", len(qns), qns)
+	}
+	for qn, n := range qns {
+		if n != 1 {
+			t.Errorf("QN %q has %d occurrences, want 1 (each variant must be uniquely addressable)", qn, n)
+		}
+	}
+
+	// FileResult.QNCollisions must record the original collision so the
+	// extraction-failure heuristic still fires (#42 diagnostic surface).
+	if len(result.QNCollisions) == 0 {
+		t.Error("QNCollisions is empty; the underlying #ifdef collision should still be tracked for the diagnostic")
 	}
 }
 

@@ -166,6 +166,10 @@ func (m *markdownExtractor) Extract(source []byte, _, relPath string, _ ExtractO
 		})
 	}
 
+	// #115 disambiguation happens centrally in ExtractWithModule —
+	// goldmark gives us tree-aware paths, but identical heading text in
+	// different sections still collides (`installation_from_source.windows`
+	// in docs/source.md was the canonical case).
 	return result
 }
 
