@@ -20,7 +20,7 @@ func TestPrintHelpBanner_ListsAllSubcommands(t *testing.T) {
 	printHelpBanner(&out)
 	body := out.String()
 
-	for _, sub := range []string{"index", "doctor", "self-test", "rebuild-fts", "stats", "--version", "--http"} {
+	for _, sub := range []string{"index", "doctor", "self-test", "rebuild-fts", "stats", "init", "project", "--version", "--http"} {
 		if !strings.Contains(body, sub) {
 			t.Errorf("banner missing subcommand mention %q:\n%s", sub, body)
 		}

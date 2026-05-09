@@ -29,6 +29,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
   - [`pincher update`](#pincher-update)
   - [`pincher web`](#pincher-web)
   - [`pincher init`](#pincher-init)
+  - [`pincher project`](#pincher-project)
 - [CLI flags](#cli-flags)
 - [Environment variables](#environment-variables)
 - [Data directory](#data-directory)
@@ -492,15 +493,38 @@ The dashboard URL is `<base>/v1/dashboard` (honors `--basepath` reverse-proxy pr
 
 ### `pincher init`
 
-Inject the pincher usage policy block into CLAUDE.md. Wraps the policy in `<!-- pincher:start --> ... <!-- pincher:end -->` markers so re-running replaces the block in place — idempotent, no duplicates.
+Inject the pincher usage policy block into an editor or agent's rules file. Wraps the policy in `<!-- pincher:start --> ... <!-- pincher:end -->` markers (or `// pincher:start` line markers for JSON-based targets like Continue) so re-running replaces the block in place — idempotent, no duplicates.
 
 ```bash
-pincher init                         # write to ./CLAUDE.md
-pincher init --global                # write to ~/.claude/CLAUDE.md
-pincher init --dry-run               # print what would be written
+pincher init                              # default: ./CLAUDE.md
+pincher init --global                     # claude global: ~/.claude/CLAUDE.md
+pincher init --target=cursor              # ./.cursor/rules/pincher.mdc (with frontmatter)
+pincher init --target=cursor-legacy       # ./.cursorrules
+pincher init --target=windsurf            # ./.windsurfrules
+pincher init --target=aider               # ./CONVENTIONS.md
+pincher init --target=continue            # ~/.continue/config.json (merges into systemMessage)
+pincher init --target=detect              # write only to editors whose marker file exists under cwd
+pincher init --target=all                 # write every project-scoped target
+pincher init --dry-run                    # print what would be written; do not modify
 ```
 
+The cursor target preserves any user-edited YAML frontmatter (`description`, `globs`, `alwaysApply`) on re-runs — only the marker block in the body is replaced. The continue target preserves all unknown JSON keys; only the `systemMessage` field is touched.
+
 After writing, prints a short next-steps recipe + the URL of any running pincher HTTP dashboard discovered via the v11 sessions table.
+
+### `pincher project`
+
+Surface the HTTP `DELETE /v1/projects` and the `list` MCP tool as CLI verbs so users on the stdio binary don't need a SQL or curl one-liner.
+
+```bash
+pincher project list                      # human-readable table (alias: ls)
+pincher project list --json               # machine-readable JSON
+pincher project rm <name>                 # interactive Y/n confirmation (alias: remove, delete)
+pincher project rm <name> --force         # skip confirmation
+pincher project rm <name> --json --force  # JSON receipt; --force required in JSON mode
+```
+
+`<name>` resolves in this order: full project id → exact name (case-insensitive) → substring on name or path. A substring that matches multiple projects errors with a disambiguation list rather than picking one. JSON mode requires `--force` (no interactive prompt is possible in a scripted workflow).
 
 ---
 
