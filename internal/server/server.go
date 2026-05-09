@@ -897,6 +897,25 @@ func (s *Server) ListenAndServeHTTP(ctx context.Context, addr string) error {
 	}()
 	slog.Info("pincher.http.listen", "addr", actualAddr)
 	fmt.Fprintf(os.Stderr, "pincherMCP: HTTP listening on http://%s%s\n", displayAddr(actualAddr), s.basePath)
+
+	// Trust gate: warn loudly if the HTTP API is exposed without a bearer
+	// token AND the bind isn't loopback-only. The combination is a real
+	// risk — a non-loopback bind without auth means anyone who can reach
+	// the host can hit /v1/* with no credentials. We don't refuse the
+	// configuration (some users legitimately front pincher with a reverse
+	// proxy that does its own auth), but the log + stderr line make the
+	// state observable so operators can fix it before traffic arrives.
+	if s.httpKey == "" && !isLoopbackBind(actualAddr) {
+		slog.Warn("pincher.http.no_auth_open_bind",
+			"addr", actualAddr,
+			"hint", "set --http-key <token> (or PINCHER_HTTP_KEY env) to require Bearer auth, or bind to 127.0.0.1: for loopback-only access")
+		fmt.Fprintf(os.Stderr,
+			"\n  WARNING: HTTP server is bound on %s without --http-key — anyone who can reach this host can call pincher tools.\n"+
+				"  To require auth: pass --http-key <token> (or set PINCHER_HTTP_KEY).\n"+
+				"  To restrict to local: bind 127.0.0.1:<port> instead of :<port>.\n\n",
+			actualAddr)
+	}
+
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -922,6 +941,29 @@ func displayAddr(addr string) string {
 		host = "localhost"
 	}
 	return net.JoinHostPort(host, port)
+}
+
+// isLoopbackBind reports whether `addr` (host:port form) binds only to
+// loopback. Used by the trust gate so we don't warn-spam users who
+// deliberately bind 127.0.0.1: or [::1]: for local-only access.
+//
+// Treats unspecified hosts ("", "::", "0.0.0.0") as NON-loopback because
+// they accept traffic from any reachable interface.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostname like "localhost" — resolve isn't worth doing here;
+		// treat as loopback only if it's literally "localhost".
+		return strings.EqualFold(host, "localhost")
+	}
+	return ip.IsLoopback()
 }
 
 func parseFileURI(uri string) (string, bool) {

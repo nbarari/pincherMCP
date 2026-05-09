@@ -4400,6 +4400,41 @@ func TestHandleTrace_UniqueNameNoAmbiguityField(t *testing.T) {
 // architecture _meta.next_steps (iter 8 — dead simple)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// isLoopbackBind: HTTP no-auth warn gate (iter 9 — trustworthy)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestIsLoopbackBind_Cases(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		// Loopback IPs.
+		{"127.0.0.1:8080", true},
+		{"[::1]:8080", true},
+		{"127.0.0.5:9999", true},
+		// Loopback hostname.
+		{"localhost:8080", true},
+		{"LOCALHOST:8080", true},
+		// Non-loopback — explicit interface.
+		{"192.168.1.10:8080", false},
+		{"10.0.0.1:8080", false},
+		// Unspecified addresses accept from any interface — treat as non-loopback.
+		{":8080", false},
+		{"0.0.0.0:8080", false},
+		{"[::]:8080", false},
+		// Malformed.
+		{"not-an-addr", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		got := isLoopbackBind(c.addr)
+		if got != c.want {
+			t.Errorf("isLoopbackBind(%q) = %v, want %v", c.addr, got, c.want)
+		}
+	}
+}
+
 func TestHandleArchitecture_NextStepsFromHotspot(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	srv.sessionID = "arch-ns"
