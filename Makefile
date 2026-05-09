@@ -27,7 +27,7 @@ SNAPSHOT_NOISE_FIELDS := db_size_kb,duration_ms
 # Equivalent to: del(.db_size_kb, .duration_ms)
 JQ_STRIP := 'del(.$(shell echo "$(SNAPSHOT_NOISE_FIELDS)" | sed "s/,/, ./g"))'
 
-.PHONY: build test corpus-test corpus-snapshot-update bench bench-index bench-server
+.PHONY: build test corpus-test corpus-snapshot-update bench bench-index bench-server corpus-bench corpus-bench-update
 
 build:
 	$(GO) build -o $(PINCHER_BIN) ./cmd/pinch/
@@ -77,15 +77,18 @@ corpus-snapshot-update: build
 	@echo "Snapshots regenerated. Review the git diff before committing."
 
 # Benchmarks (#50). Run against the pinned corpora so latency numbers can
-# be correlated to known-good symbol counts. These do NOT yet have CI gating
-# or committed baselines — that's a follow-up PR. For now they're a
-# developer-side substrate.
+# be correlated to known-good symbol counts.
 #
-# Quick-run (1s per benchmark, fast feedback):
-#   make bench
-# Full-run (3s per benchmark, more stable numbers):
-#   make bench BENCHTIME=3s
+# Two flows:
+#   make bench                  Quick local feedback (no comparison gate)
+#   make corpus-bench           Run benchmarks AND fail on regression vs baseline
+#   make corpus-bench-update    Regenerate the committed baseline (intentional)
+#
+# CORPUS_BENCHTIME is separate from BENCHTIME so the regression gate can run
+# at a longer/more-stable benchtime than ad-hoc `make bench` invocations.
 BENCHTIME ?= 1s
+CORPUS_BENCHTIME ?= 2s
+BENCH_DIR := testdata/bench
 
 bench: bench-index bench-server
 
@@ -96,3 +99,37 @@ bench-index:
 bench-server:
 	@echo "==> internal/server"
 	$(GO) test ./internal/server/ -run=^$$ -bench=. -benchtime=$(BENCHTIME) -benchmem
+
+# corpus-bench: run benchmarks and gate on regression vs the committed
+# baseline under testdata/bench/. Mirrors corpus-test's diff-or-fail shape.
+#
+# Thresholds (cmd/benchcmp/main.go):
+#   - ns/op increase > 20%   → fail
+#   - allocs/op increase > 30% → fail
+#   - new benchmarks without baseline → fail (forces baseline update)
+corpus-bench:
+	@set -e; \
+	tmpdir=$$(mktemp -d); \
+	echo "==> internal/index (baseline gate)"; \
+	$(GO) test ./internal/index/ -run=^$$ -bench=. -benchtime=$(CORPUS_BENCHTIME) -benchmem > $$tmpdir/index.txt; \
+	$(GO) run ./cmd/benchcmp $(BENCH_DIR)/index.bench.txt $$tmpdir/index.txt; \
+	echo ""; \
+	echo "==> internal/server (baseline gate)"; \
+	$(GO) test ./internal/server/ -run=^$$ -bench=. -benchtime=$(CORPUS_BENCHTIME) -benchmem > $$tmpdir/server.txt; \
+	$(GO) run ./cmd/benchcmp $(BENCH_DIR)/server.bench.txt $$tmpdir/server.txt; \
+	rm -rf $$tmpdir; \
+	echo ""; \
+	echo "Bench regression gate passed."
+
+# corpus-bench-update: regenerate committed baselines under testdata/bench/.
+# ONLY run when an intentional perf-affecting change requires it; the diff
+# in your PR IS the rationale.
+corpus-bench-update:
+	@set -e; \
+	mkdir -p $(BENCH_DIR); \
+	echo "==> regenerating internal/index baseline"; \
+	$(GO) test ./internal/index/ -run=^$$ -bench=. -benchtime=$(CORPUS_BENCHTIME) -benchmem > $(BENCH_DIR)/index.bench.txt; \
+	echo "==> regenerating internal/server baseline"; \
+	$(GO) test ./internal/server/ -run=^$$ -bench=. -benchtime=$(CORPUS_BENCHTIME) -benchmem > $(BENCH_DIR)/server.bench.txt; \
+	echo ""; \
+	echo "Baselines regenerated. Review the git diff before committing."

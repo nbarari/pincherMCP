@@ -1,0 +1,19 @@
+goos: linux
+goarch: amd64
+pkg: github.com/pincherMCP/pincher/internal/server
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkHandleSymbol_GoProject-4                	    4586	    453977 ns/op	   83550 B/op	    1229 allocs/op
+BenchmarkHandleSearch_BM25_GoProject-4           	    2295	    993725 ns/op	  191710 B/op	    2850 allocs/op
+BenchmarkHandleSearch_BM25_K8sOps-4              	   12217	    203634 ns/op	   14392 B/op	     272 allocs/op
+BenchmarkHandleQuery_NodeScan_GoProject-4        	    7176	    290125 ns/op	   41974 B/op	     792 allocs/op
+BenchmarkHandleQuery_SingleHopJoin_GoProject-4   	    4659	    441803 ns/op	   65637 B/op	    1125 allocs/op
+BenchmarkHandleSearch_Parallel_GoProject-4       	    5413	    400821 ns/op	  191612 B/op	    2849 allocs/op
+BenchmarkHandleArchitecture_GoProject-4          	    2054	   1097111 ns/op	  191991 B/op	    3024 allocs/op
+BenchmarkAuth_TimingProfile/correct-4            	   40958	     56557 ns/op	   14177 B/op	     150 allocs/op
+BenchmarkAuth_TimingProfile/wrong_same_length-4  	  372589	      6450 ns/op	    7066 B/op	      30 allocs/op
+BenchmarkAuth_TimingProfile/wrong_first_byte-4   	  337544	      6939 ns/op	    7066 B/op	      30 allocs/op
+BenchmarkAuth_TimingProfile/wrong_last_byte-4    	  370748	      6368 ns/op	    7066 B/op	      30 allocs/op
+BenchmarkAuth_TimingProfile/wrong_short-4        	  337994	      7015 ns/op	    7042 B/op	      30 allocs/op
+BenchmarkAuth_TimingProfile/wrong_long_prefix_match-4         	  213014	     11369 ns/op	    9211 B/op	      31 allocs/op
+PASS
+ok  	github.com/pincherMCP/pincher/internal/server	36.068s

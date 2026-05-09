@@ -81,10 +81,7 @@ jobs:
         run: make corpus-test
 
   # bench-smoke runs the #50 benchmark harness at a small benchtime to
-  # prove benchmarks stay COMPILABLE and don't crash. This isn't a perf-
-  # regression gate (CI runner variance makes wall-clock numbers flaky)
-  # — it's a "the harness still works" gate. A future PR can add baseline
-  # + tolerance bands once we settle on a runner profile.
+  # prove benchmarks stay COMPILABLE and don't crash. Always required.
   bench-smoke:
     name: Benchmark smoke
     runs-on: ubuntu-latest
@@ -100,3 +97,38 @@ jobs:
         run: |
           go test ./internal/index/ -run=^$ -bench=. -benchtime=100ms -benchmem
           go test ./internal/server/ -run=^$ -bench=. -benchtime=100ms -benchmem
+
+  # bench-regression gates ns/op + allocs/op against the committed
+  # baselines under testdata/bench/ (#50). Thresholds: +20% ns, +30% allocs.
+  #
+  # `continue-on-error: true` is intentional during phase 1: baselines were
+  # captured on a developer machine and may differ from GitHub-hosted
+  # runner hardware by more than the 20% noise floor for some benchmarks.
+  # The job surfaces deltas in the action log; an advisory failure here is
+  # NOT a hard merge gate yet. To tighten:
+  #   1. Observe several CI runs to characterise runner variance
+  #   2. Either re-baseline via `make corpus-bench-update` on a CI run, OR
+  #      widen thresholds in cmd/benchcmp/main.go
+  #   3. Remove `continue-on-error: true` here.
+  bench-regression:
+    name: Benchmark regression (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run regression gate
+        run: make corpus-bench
+
+      - name: Upload actual numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-actual-${{ github.run_id }}
+          path: testdata/bench/
+          retention-days: 14

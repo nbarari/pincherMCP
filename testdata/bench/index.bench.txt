@@ -1,0 +1,13 @@
+goos: linux
+goarch: amd64
+pkg: github.com/pincherMCP/pincher/internal/index
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkIndex_Cold_GoProject-4                      	     134	  17087552 ns/op	  147025 B/op	    2523 allocs/op
+BenchmarkIndex_Cold_K8sOps-4                         	     100	  25072093 ns/op	  275462 B/op	    3366 allocs/op
+BenchmarkIndex_Cold_NodeMonorepo-4                   	     129	  18484028 ns/op	  179317 B/op	    2018 allocs/op
+BenchmarkIndex_Incremental_NoChange_GoProject-4      	     750	   3515028 ns/op	   17881 B/op	     325 allocs/op
+BenchmarkIndex_Incremental_NoChange_K8sOps-4         	     582	   4433756 ns/op	   17145 B/op	     299 allocs/op
+BenchmarkIndex_Incremental_NoChange_NodeMonorepo-4   	     543	   4817990 ns/op	   19566 B/op	     319 allocs/op
+BenchmarkIndex_Force_GoProject-4                     	     175	  14902387 ns/op	  145406 B/op	    2581 allocs/op
+PASS
+ok  	github.com/pincherMCP/pincher/internal/index	34.272s
