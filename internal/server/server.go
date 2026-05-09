@@ -2599,6 +2599,15 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	meta["tokens_saved"] = tokensSaved
 	meta["latency_ms"] = latency
 	meta["cost_avoided"] = fmt.Sprintf("$%.4f", costAvoided)
+	// Human-readable savings line. Trains agents + users that pincher is
+	// cheaper than reading files; a one-liner per response is the most
+	// effective place to surface it (per #138/#139/#140 adoption thread).
+	// Suppressed when nothing was saved (admin tools like list/health/stats
+	// where the comparison "vs reading files" doesn't apply).
+	if tokensSaved > 0 {
+		meta["savings"] = fmt.Sprintf("saved ~%s tokens vs reading files (used %s, %dms, %s)",
+			humanInt(tokensSaved), humanInt(tokensUsed), latency, meta["cost_avoided"])
+	}
 	data["_meta"] = meta
 
 	// Accumulate session stats. On the very first call, flush immediately so
@@ -2643,6 +2652,18 @@ func (s *Server) textResultWithMeta(text string, start time.Time, tool string, a
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: full}},
 	}
+}
+
+// humanInt formats an int with thousands separators ("14200" -> "14,200").
+// Cheaper than pulling in golang.org/x/text/language for this one use site.
+func humanInt(n int) string {
+	if n < 0 {
+		return "-" + humanInt(-n)
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return humanInt(n/1000) + "," + fmt.Sprintf("%03d", n%1000)
 }
 
 func errResult(msg string) *mcp.CallToolResult {

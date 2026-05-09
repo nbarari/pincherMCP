@@ -4264,6 +4264,78 @@ func TestSlowQuery_SecretRedaction(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// _meta.savings line — human-readable adoption-feedback line per friend's note
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestMeta_SavingsLine_PresentWhenSavingsPositive(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	store.UpsertProject(db.Project{ID: "savpr", Path: "/tmp/savpr", Name: "savpr", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "sv1", ProjectID: "savpr", FilePath: "a.go", Name: "Foo",
+			QualifiedName: "pkg.Foo", Kind: "Function", Language: "Go",
+			Signature:            "func Foo()",
+			ExtractionConfidence: 1.0},
+	})
+
+	result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query":   "Foo",
+		"project": "savpr",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleSearch: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("_meta missing")
+	}
+	savings, _ := meta["savings"].(string)
+	if savings == "" {
+		t.Errorf("expected _meta.savings line, got %v", meta)
+	}
+	if !strings.Contains(savings, "tokens vs reading files") {
+		t.Errorf("savings line shape unexpected: %q", savings)
+	}
+}
+
+func TestMeta_SavingsLine_AbsentWhenSavingsZero(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	// list returns 0 tokens_saved (admin tool — no file-read comparison).
+	result, err := srv.handleList(context.Background(), makeReq(nil))
+	if err != nil || result.IsError {
+		t.Fatalf("handleList: err=%v isErr=%v", err, result.IsError)
+	}
+	m := decode(t, result)
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("_meta missing")
+	}
+	if _, present := meta["savings"]; present {
+		t.Errorf("savings line should be absent when tokens_saved is 0; got %v", meta["savings"])
+	}
+}
+
+func TestHumanInt_FormatsThousandsSeparators(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{42, "42"},
+		{999, "999"},
+		{1000, "1,000"},
+		{14200, "14,200"},
+		{1234567, "1,234,567"},
+		{-1500, "-1,500"},
+	}
+	for _, c := range cases {
+		if got := humanInt(c.n); got != c.want {
+			t.Errorf("humanInt(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // handleSymbol: fields projection (#9)
 // ─────────────────────────────────────────────────────────────────────────────
 
