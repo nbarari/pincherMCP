@@ -1227,7 +1227,37 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"symbols":    result.Symbols,
 		"edges":      result.Edges,
 		"skipped":    result.Skipped,
+		"blocked":    result.Blocked,
 		"duration_ms": result.DurationMS,
+	}
+	// When the index produces zero symbols, surface *why* in _meta so the
+	// agent doesn't guess "is it broken?" — the answer is usually obvious
+	// from the counts (no source files vs all blocked vs all unchanged).
+	// Trustworthy + explainable: the user gets a clear diagnostic instead
+	// of a silent zero. Skipped on healthy non-zero runs.
+	if result.Symbols == 0 {
+		switch {
+		case result.Files == 0 && result.Blocked == 0 && result.Skipped == 0:
+			data["_meta"] = map[string]any{
+				"diagnosis": "no indexable source files found at this path",
+				"hint":      "verify the path is a project root (contains code in a recognised language) or check `pincher health` for indexing failures",
+			}
+		case result.Files == 0 && result.Blocked > 0:
+			data["_meta"] = map[string]any{
+				"diagnosis": fmt.Sprintf("all %d files were blocked by ast.ShouldSkip (lockfiles, minified bundles, source maps)", result.Blocked),
+				"hint":      "expected for vendor-only or build-artifact-only directories; index a parent directory if your sources are nested elsewhere",
+			}
+		case result.Files == 0 && result.Skipped > 0 && !force:
+			data["_meta"] = map[string]any{
+				"diagnosis": fmt.Sprintf("incremental index — all %d files unchanged since last run", result.Skipped),
+				"hint":      "this is the expected fast path. Pass `force=true` if you suspect index corruption.",
+			}
+		default:
+			data["_meta"] = map[string]any{
+				"diagnosis": "files were processed but no symbols extracted",
+				"hint":      "language detection may be missing extension support; check `pincher health` per-language coverage",
+			}
+		}
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }

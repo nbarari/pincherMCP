@@ -4392,6 +4392,57 @@ func TestHandleTrace_UniqueNameNoAmbiguityField(t *testing.T) {
 // _meta.next_steps suggestions for search results (iter 6 — dead simple)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// handleIndex zero-symbol diagnosis (iter 7 — trustworthy + explainable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestHandleIndex_ZeroSymbolsSurfacesDiagnosis(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	emptyDir := t.TempDir() // no source files at all
+	result, err := srv.handleIndex(context.Background(), makeReq(map[string]any{
+		"path": emptyDir,
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleIndex: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	if int(m["symbols"].(float64)) != 0 {
+		t.Fatalf("expected 0 symbols, got %v", m["symbols"])
+	}
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("_meta missing")
+	}
+	if diag, _ := meta["diagnosis"].(string); diag == "" {
+		t.Errorf("diagnosis missing for empty-dir zero-symbol result: %v", meta)
+	}
+	if hint, _ := meta["hint"].(string); hint == "" {
+		t.Errorf("hint missing for empty-dir zero-symbol result: %v", meta)
+	}
+}
+
+func TestHandleIndex_NonZeroNoUnnecessaryDiagnosis(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc Main() {}\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	result, err := srv.handleIndex(context.Background(), makeReq(map[string]any{"path": dir}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleIndex: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	if int(m["symbols"].(float64)) == 0 {
+		t.Fatal("expected non-zero symbols on a real Go file")
+	}
+	meta, _ := m["_meta"].(map[string]any)
+	if meta != nil {
+		if _, present := meta["diagnosis"]; present {
+			t.Errorf("diagnosis must be ABSENT when index found symbols; got %v", meta["diagnosis"])
+		}
+	}
+}
+
 func TestSuggestNextSteps_FunctionRecommendsContextAndTrace(t *testing.T) {
 	suggestions := suggestNextSteps(db.Symbol{
 		ID: "a.go::pkg.F#Function", Name: "F", Kind: "Function",
