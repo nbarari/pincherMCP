@@ -46,6 +46,46 @@ func benchSetup(b *testing.B, corpusName string) (*Server, *db.Store, string) {
 	return srv, store, projectID
 }
 
+// BenchmarkHandleSymbols_Batch20_GoProject measures the cost of a 20-ID
+// batch lookup. Pre-#125, this was 20 round trips to SQLite; post-fix, it
+// should be one IN-clause query plus the per-symbol byte-offset reads.
+//
+// The setup phase walks the project to collect 20 real symbol IDs so the
+// benchmark exercises a realistic batch shape (mixed kinds + locations,
+// not just N copies of one ID).
+func BenchmarkHandleSymbols_Batch20_GoProject(b *testing.B) {
+	srv, store, projectID := benchSetup(b, "go-project")
+
+	syms, err := store.GetSymbolsByName(projectID, "Open", 20)
+	if err != nil {
+		b.Fatalf("GetSymbolsByName: %v", err)
+	}
+	// Pad with whatever the corpus has if Open didn't yield 20.
+	if len(syms) < 20 {
+		more, _ := store.GetSymbolsByName(projectID, "New", 20-len(syms))
+		syms = append(syms, more...)
+	}
+	if len(syms) == 0 {
+		b.Skip("no symbols available for batch benchmark on this corpus")
+	}
+	ids := make([]string, len(syms))
+	for i := range syms {
+		ids[i] = syms[i].ID
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := srv.handleSymbols(context.Background(), makeReq(map[string]any{
+			"ids":     ids,
+			"project": projectID,
+		}))
+		if err != nil {
+			b.Fatalf("handleSymbols: %v", err)
+		}
+	}
+}
+
 // BenchmarkHandleSymbol — single byte-offset retrieval. The README claim
 // is "<1ms"; this measures it.
 func BenchmarkHandleSymbol_GoProject(b *testing.B) {

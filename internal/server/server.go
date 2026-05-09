@@ -1387,18 +1387,20 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 		}
 	}
 
-	var results []map[string]any
+	// One round trip to SQLite for the whole batch. Was N round trips
+	// (loop over GetSymbol) — for a 100-ID batch that's the dominant
+	// component of handler latency on a cached corpus. Project-scoped
+	// (#2) when the caller passed `project`, so a colliding ID can't
+	// surface a row from a different repo.
+	bySymID, err := s.store.GetSymbolsByIDs(resolvedProjectID, ids)
+	if err != nil {
+		return errResult(fmt.Sprintf("db error: %v", err)), nil
+	}
+
+	results := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		// Project-scoped lookup (#2) when the caller passed `project`,
-		// so a colliding ID can't surface a row from a different repo.
-		var sym *db.Symbol
-		var err error
-		if resolvedProjectID != "" {
-			sym, err = s.store.GetSymbolScoped(resolvedProjectID, id)
-		} else {
-			sym, err = s.store.GetSymbol(id)
-		}
-		if err != nil || sym == nil {
+		sym, ok := bySymID[id]
+		if !ok || sym == nil {
 			results = append(results, map[string]any{"id": id, "error": "not found"})
 			continue
 		}

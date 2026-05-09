@@ -41,6 +41,104 @@ func TestPercentileIdx_AllBranches(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GetSymbolsByIDs: batch lookup powering the MCP `symbols` tool (1 round
+// trip per batch instead of N). Covers ordering-independence, project
+// scoping, and the empty-batch fast path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestGetSymbolsByIDs_BatchLookup(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpsertProject(testProject("batch-proj")); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	if err := s.BulkUpsertSymbols([]Symbol{
+		{ID: "b1", ProjectID: "batch-proj", FilePath: "a.go", Name: "F1",
+			QualifiedName: "pkg.F1", Kind: "Function", Language: "Go"},
+		{ID: "b2", ProjectID: "batch-proj", FilePath: "a.go", Name: "F2",
+			QualifiedName: "pkg.F2", Kind: "Function", Language: "Go"},
+		{ID: "b3", ProjectID: "batch-proj", FilePath: "b.go", Name: "F3",
+			QualifiedName: "pkg.F3", Kind: "Function", Language: "Go"},
+	}); err != nil {
+		t.Fatalf("BulkUpsertSymbols: %v", err)
+	}
+
+	// Mixed: existing IDs + one missing ID. The missing one simply
+	// doesn't appear in the result map.
+	got, err := s.GetSymbolsByIDs("", []string{"b3", "b1", "missing", "b2"})
+	if err != nil {
+		t.Fatalf("GetSymbolsByIDs: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("len = %d, want 3 (3 found, 1 missing)", len(got))
+	}
+	for _, want := range []string{"b1", "b2", "b3"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %q from result map", want)
+		}
+	}
+	if _, ok := got["missing"]; ok {
+		t.Error("nonexistent ID should not appear in result")
+	}
+}
+
+func TestGetSymbolsByIDs_EmptyBatchFastPath(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.GetSymbolsByIDs("any-project", nil)
+	if err != nil {
+		t.Fatalf("GetSymbolsByIDs(nil): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty batch should return empty map, got %v", got)
+	}
+}
+
+func TestGetSymbolsByIDs_ProjectScoped(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpsertProject(testProject("p-a")); err != nil {
+		t.Fatalf("UpsertProject A: %v", err)
+	}
+	if err := s.UpsertProject(testProject("p-b")); err != nil {
+		t.Fatalf("UpsertProject B: %v", err)
+	}
+	// Same ID in two projects (the collision shape #2 guards against).
+	if err := s.BulkUpsertSymbols([]Symbol{
+		{ID: "shared-id", ProjectID: "p-a", FilePath: "a.go", Name: "F",
+			QualifiedName: "pkg.F", Kind: "Function", Language: "Go"},
+	}); err != nil {
+		t.Fatalf("Bulk A: %v", err)
+	}
+	// (Inserting the second clobbers via primary key — that's the bug
+	// #92 fixes structurally; for this test we just want to confirm
+	// the projectID filter narrows the query, so insert into p-b
+	// after using a different ID.)
+	if err := s.BulkUpsertSymbols([]Symbol{
+		{ID: "b-only", ProjectID: "p-b", FilePath: "x.go", Name: "G",
+			QualifiedName: "pkg.G", Kind: "Function", Language: "Go"},
+	}); err != nil {
+		t.Fatalf("Bulk B: %v", err)
+	}
+
+	// Asking for "shared-id" scoped to p-b should return nothing — the
+	// row is in p-a, not p-b. This is the #2 defence path.
+	got, err := s.GetSymbolsByIDs("p-b", []string{"shared-id"})
+	if err != nil {
+		t.Fatalf("GetSymbolsByIDs scoped: %v", err)
+	}
+	if _, ok := got["shared-id"]; ok {
+		t.Error("project-scoped batch should not return cross-project rows")
+	}
+
+	// And the same ID without scoping returns the row.
+	got, err = s.GetSymbolsByIDs("", []string{"shared-id"})
+	if err != nil {
+		t.Fatalf("GetSymbolsByIDs unscoped: %v", err)
+	}
+	if _, ok := got["shared-id"]; !ok {
+		t.Error("unscoped batch should return the row regardless of project")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AvgConfidenceByKind: untested helper used by health diagnostics
 // ─────────────────────────────────────────────────────────────────────────────
 

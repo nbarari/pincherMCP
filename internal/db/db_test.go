@@ -377,6 +377,7 @@ func TestStore_SetReaderPoolSize_RuntimeAdjust(t *testing.T) {
 var readerRoutedStoreMethods = map[string]bool{
 	// Pure SELECTs (use s.ro).
 	"GetSymbol":               true,
+	"GetSymbolsByIDs":         true,
 	"GetSymbolsByName":        true,
 	"GetSymbolsByQN":          true,
 	"GetSymbolsForFile":       true,

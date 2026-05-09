@@ -1548,6 +1548,44 @@ func (s *Store) GetSymbolScoped(projectID, id string) (*Symbol, error) {
 	return scanOneSymbol(row)
 }
 
+// GetSymbolsByIDs returns rows for a batch of IDs in a single SQL round
+// trip. When projectID is non-empty, also filters on project_id (the same
+// defence-in-depth guard as GetSymbolScoped — an ID collision between two
+// repos can't surface the wrong row). Returns a map keyed by ID; missing
+// IDs simply don't appear in the result. Empty ids slice → empty map.
+//
+// Replaces the per-ID loop the MCP `symbols` batch handler used to do (one
+// SELECT per ID) — for a 100-ID batch that's 100 round trips collapsed to 1,
+// which dominates handler latency on cached corpora.
+func (s *Store) GetSymbolsByIDs(projectID string, ids []string) (map[string]*Symbol, error) {
+	out := make(map[string]*Symbol, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	// Build `WHERE id IN (?, ?, …)` with one placeholder per ID. SQLite's
+	// default expr-tree depth limit is 1000, so a few-hundred-ID batch is
+	// well within bounds; the MCP layer additionally caps at 100 (#10).
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	q := symSelectFrom + ` WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	if projectID != "" {
+		q += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	syms, err := s.querySymbols(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	for i := range syms {
+		out[syms[i].ID] = &syms[i]
+	}
+	return out, nil
+}
+
 // GetSymbolsByName finds symbols by short name across a project.
 func (s *Store) GetSymbolsByName(projectID, name string, limit int) ([]Symbol, error) {
 	return s.querySymbols(symSelectFrom+` WHERE project_id=? AND name=? LIMIT ?`, projectID, name, limit)
