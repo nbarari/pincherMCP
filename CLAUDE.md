@@ -40,6 +40,22 @@ For bug-fix work, skip `architecture` if the area is familiar; otherwise start t
 
 If you're about to read a file end-to-end with `Read`, ask yourself: would `context` (symbol + its imports) answer my question with fewer tokens? Usually yes.
 
+## Release process
+
+See **issue #193** for the live roadmap. Versioning policy:
+
+- **Minor** (`0.X.0`) — features, schema migrations, new CLI surface. Cut when a coherent batch is ready.
+- **Patch** (`0.X.Y`) — bug fixes only. No features, no schema changes. Cut on demand.
+- **Major** — reserved for 1.0+.
+
+**Every PR must be assigned to a milestone at PR-create time.** Milestones live at https://github.com/kwad77/pincherMCP/milestones — pick the one whose scope matches the change. If unsure, default to the next milestone (currently `v0.5.0`); don't leave a PR unassigned. The milestone page is the live release burndown — a release ships when its milestone hits 100% closed.
+
+```bash
+gh pr create --milestone v0.5.0 ...
+# Or after the fact:
+gh issue edit <PR#> --milestone v0.5.0
+```
+
 ## Build & Test Commands
 
 ```bash
