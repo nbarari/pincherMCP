@@ -1072,7 +1072,7 @@ func (s *Server) registerTools() {
 				"corpus":{"type":"string","enum":["","code","config","docs"],"description":"FTS5 corpus to search. Default (omitted or '') is 'code' — source-code identifiers (Function/Method/Class/etc). 'config' restricts to YAML/JSON/HCL/TOML Settings/Resources/Outputs; 'docs' to Markdown sections + fetched Documents. Use a specific corpus to avoid BM25 dilution from unrelated symbol kinds. (The legacy 'all' value is deprecated — call once per corpus instead; the schema-level removal is tracked at #106.)"},
 				"limit":{"type":"integer","description":"Max results (default 20)"},
 				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."},
-				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.7 — filters low-quality symbols (lockfile keys, vendored regex matches, README headings) by default. Set to 0.0 to disable filtering and surface every symbol the index contains. Inclusive: a symbol scored exactly at the threshold IS returned."}
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.71 — filters the lowest-scored symbols (README/CHANGELOG/CONTRIBUTING H1 sections that bottom out at exactly 0.70 on real corpora). Set to 0.0 to disable filtering and surface every symbol the index contains. Inclusive: a symbol scored at or above the threshold IS returned."}
 			}
 		}`),
 	}, s.handleSearch)
@@ -1511,10 +1511,16 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	limit := intArg(args, "limit", 20)
 	fieldsArg := str(args, "fields")
-	// #34 Phase 4: default min_confidence is 0.7. Suppresses low-quality
-	// symbols (lockfile keys, vendored regex matches, README headings) by
-	// default. Callers explicitly pass 0.0 to surface every symbol.
-	minConfidence := floatArg(args, "min_confidence", 0.7)
+	// #34 Phase 4 + #112 calibration: default min_confidence is 0.71.
+	// Per the variance characterization in #112, real corpora produce a
+	// confidence floor at exactly 0.70 (README/CHANGELOG/CONTRIBUTING H1
+	// sections under the Markdown extractor: kindBaseline 0.80 averaged
+	// with BaseExtractor 1.00 = 0.90, minus PathPenalty -0.20 = 0.70).
+	// A 0.71 cutoff filters those bottom-floor cases (~3.6% of symbols
+	// on typical mixed corpora) without clipping the next tier (.pb.go
+	// generated code lands at 0.75). Callers pass 0.0 explicitly to
+	// surface every symbol.
+	minConfidence := floatArg(args, "min_confidence", 0.71)
 
 	// project=* searches all indexed projects — no project filter applied.
 	var projectID string

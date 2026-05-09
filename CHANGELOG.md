@@ -26,6 +26,13 @@ minors.
 - `SECURITY.md`, `CHANGELOG.md`, `RELEASING.md` (this PR).
 
 ### Changed
+- `min_confidence` default on `search` bumped from 0.7 to 0.71 to address
+  #112. Real corpora produced a confidence floor at exactly 0.70 (README
+  H1 sections under the Markdown extractor: kindBaseline 0.80 averaged
+  with BaseExtractor 1.00 minus PathPenalty -0.20 = 0.70 exactly), so the
+  former 0.7 default was a no-op. The 0.71 threshold filters those
+  bottom-floor cases (~3.6% of symbols on typical mixed corpora) without
+  clipping the next tier (`.pb.go` generated code lands at 0.75).
 - `corpus=all` on the MCP `search` tool is **deprecated** (#106 / #130).
   No longer in the public InputSchema enum; the handler soft-redirects
   to `code` and emits a deprecation warning. Schema-level removal of

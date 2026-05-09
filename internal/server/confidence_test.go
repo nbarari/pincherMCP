@@ -149,8 +149,11 @@ func TestHandleSearch_MinConfidenceFilter(t *testing.T) {
 		minConfidence any // any so we can omit it via nil to test default
 		wantCount     int
 	}{
-		// Phase 4 default is 0.7. A symbol at 0.4 is filtered out by default.
-		{"no parameter (default 0.7)", nil, 3},
+		// Phase 4 + #112 calibration: default is 0.71 (was 0.7). The symbol
+		// at exactly 0.7 (formerly counted) is now filtered, so the default
+		// returns 2 (0.9 + 1.0), not 3. Explicit 0.7 still includes the
+		// boundary because the comparison is `>=`.
+		{"no parameter (default 0.71)", nil, 2},
 		// Explicit 0.0 is the escape hatch — surfaces every symbol.
 		{"explicit 0.0", 0.0, 4},
 		{"0.7 includes the boundary", 0.7, 3},
@@ -176,8 +179,9 @@ func TestHandleSearch_MinConfidenceFilter(t *testing.T) {
 				t.Errorf("got %d results, want %d", len(rows), c.wantCount)
 			}
 			// Verify every returned row meets the threshold (the EFFECTIVE
-			// threshold — Phase 4 default is 0.7 when caller omits the param).
-			minConf := 0.7
+			// threshold — default is 0.71 since #112 calibration; when the
+			// caller omits the param we filter at 0.71).
+			minConf := 0.71
 			if c.minConfidence != nil {
 				minConf, _ = c.minConfidence.(float64)
 			}
