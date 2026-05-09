@@ -63,6 +63,27 @@ minors.
   flags. Defaults unchanged so local `make corpus-bench` keeps the
   tight gate; CI sets wider values to absorb runner-to-runner
   variance (#157).
+- `pincher doctor` reports `binary_version` next to `schema_version`
+  (#164). Surfaces in support paste-ins without a separate
+  `pincher --version` invocation; suppressed when blank so a
+  directly-built binary doesn't print an empty `v`.
+- `_meta.diagnosis` + `_meta.next_steps` on **search** zero-result
+  responses (#165). Mirrors the handleIndex empty-state pattern —
+  agents no longer get a bare `count: 0`; they get a best-guess
+  cause (most-specific filter first: min_confidence beats kind
+  beats language beats non-default corpus) and concrete recovery
+  tool calls (drop the filter, lower the threshold, try wildcard,
+  always-`list` fallback).
+- `_meta.diagnosis` + `_meta.next_steps` on **list** empty
+  responses (#167). First-contact agents on a fresh install see
+  "no projects indexed yet" with a concrete `index` next-step,
+  instead of silent `count: 0`.
+- New manual GH Actions workflow `.github/workflows/bench-variance.yml`
+  for characterising bench variance on CI hardware (#166).
+  workflow_dispatch-only — does not run on PRs / push. The
+  prerequisite for re-promoting bench-regression to required: pull
+  the artifact, set thresholds from observed CV, then drop
+  continue-on-error.
 - `SECURITY.md`, `CHANGELOG.md`, `RELEASING.md` (this PR).
 
 ### Changed
