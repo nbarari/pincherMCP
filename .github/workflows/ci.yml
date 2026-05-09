@@ -104,13 +104,19 @@ jobs:
   # Baselines captured on ubuntu-latest (AMD EPYC 7763, 4-core runner)
   # via the bench-ci-actual artifact from a green run.
   #
+  # CI variance characterised at testdata/bench/variance-ci-2026-05-09.md
+  # — 10-iteration manual run (workflow_dispatch from #166): 20 of 21
+  # benchmarks at <10% CV, 1 noisy outlier at 21.5%
+  # (`Index_Incremental_NoChange_GoProject`, I/O-bound). Confirms the
+  # 0.30/0.45 threshold range is roughly right for the typical case;
+  # re-promotion to required gate still waits on a second multi-run
+  # confirmation that the outlier doesn't repeat.
+  #
   # Reverted to advisory after #160's promotion immediately blocked a
   # docs-only PR (#161): Index_Cold_NodeMonorepo +109% and
   # Incremental_NoChange_K8sOps +276% in a single outlier run that no
   # source change could plausibly explain. CI runner variance is wider
-  # than three green runs let us measure. Re-promotion waits on a real
-  # multi-run variance characterisation on CI hardware (open issue
-  # tracking — see commit message of this revert), not just observation.
+  # than three green runs let us measure.
   #
   # The job uploads the CI-actual bench output as a separate artifact
   # (`bench-ci-actual-*`) so any green run's numbers can become the
