@@ -22,6 +22,7 @@ var corpora = []string{
 	"k8s-ops",
 	"node-monorepo",
 	"docs-site",
+	"terraform-stack",
 }
 
 // TestCorpusSnapshot pins the snapshot round-trip end-to-end without

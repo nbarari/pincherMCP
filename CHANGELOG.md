@@ -8,6 +8,14 @@ minors.
 ## [Unreleased]
 
 ### Added
+- `testdata/corpus/terraform-stack/` — fifth pinned corpus exercising
+  HCL extractor coverage (#189). Closes a gap exposed by #178/#188:
+  both reference-edge PRs shipped with all gates green even though
+  they materially change graph shape on real Terraform, because none
+  of the pre-existing corpora contained `.tf`/`.tfvars` files. The
+  new corpus pins all five reference shapes (var/local/module/data/
+  resource), .tfvars Settings, multi-file resolution, nested blocks,
+  and a nested module.
 - New `guide` MCP tool (#139). Takes a free-form task description
   ("fix login retry bug", "refactor auth middleware", "understand
   indexing"), returns 2-3 recommended pincher tool calls with reasoning.

@@ -1,0 +1,54 @@
+{
+  "avg_confidence_by_kind": {
+    "Block": 0.975,
+    "DataSource": 0.975,
+    "Local": 1,
+    "Module": 1,
+    "Output": 1,
+    "Provider": 1,
+    "Resource": 0.975,
+    "Section": 0.925,
+    "Setting": 1,
+    "Variable": 1
+  },
+  "edge_count_by_kind": {
+    "REFERENCES": 15
+  },
+  "extraction_failures_by_reason": {},
+  "files_blocked": 0,
+  "files_indexed": 7,
+  "files_seen": 7,
+  "schema_version": 11,
+  "search_relevance": [
+    {
+      "corpus": "config",
+      "query": "stack_name",
+      "top_hit_kind": "Setting",
+      "top_hit_qn": "stack_name"
+    },
+    {
+      "corpus": "config",
+      "query": "aws_security_group",
+      "top_hit_kind": "Resource",
+      "top_hit_qn": "resource.aws_security_group.web_sg"
+    },
+    {
+      "corpus": "config",
+      "query": "network",
+      "top_hit_kind": "Module",
+      "top_hit_qn": "module.network"
+    }
+  ],
+  "symbol_count_by_kind": {
+    "Block": 4,
+    "DataSource": 2,
+    "Local": 5,
+    "Module": 1,
+    "Output": 6,
+    "Provider": 1,
+    "Resource": 6,
+    "Section": 4,
+    "Setting": 3,
+    "Variable": 7
+  }
+}

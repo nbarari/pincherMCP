@@ -467,6 +467,16 @@ var searchRelevanceQueries = map[string][]searchRelevanceQuery{
 		{Query: "Installation", Corpus: db.CorpusDocs},     // getting_started.installation
 		{Query: "Endpoints", Corpus: db.CorpusDocs},        // api_reference.endpoints
 	},
+	"terraform-stack": {
+		// Config corpus — HCL block/attribute symbols (#189).
+		// Each query targets a representative symbol kind from the
+		// HCL extractor: Variable, Resource, Module. Single-token
+		// queries — FTS5 treats `.` as an operator, so dotted
+		// identifiers like `aws_instance.web` don't match cleanly.
+		{Query: "stack_name", Corpus: db.CorpusConfig},     // Variable in variables.tf
+		{Query: "aws_security_group", Corpus: db.CorpusConfig}, // Resource in main.tf
+		{Query: "network", Corpus: db.CorpusConfig},        // Module call in main.tf
+	},
 }
 
 // SearchRelevanceHit is the per-query record persisted to the snapshot.
