@@ -84,6 +84,27 @@ minors.
   prerequisite for re-promoting bench-regression to required: pull
   the artifact, set thresholds from observed CV, then drop
   continue-on-error.
+- **Makefile extractor** (#170, closes #103). Regex-tier at confidence
+  0.85. Rule targets at column 0 → Function symbols; `.PHONY:` lists
+  mark targets `IsExported=true`; `=` / `:=` / `::=` / `?=` / `+=`
+  variable assignments → Setting symbols. Detected by both extension
+  (`.mk`, `.mak`) and filename (`Makefile`, `GNUmakefile`,
+  case-insensitive `makefile`). Skips pattern rules (`%.o: %.c`),
+  variable-expanded names, and recipe content.
+- **SQL extractor** (#171, closes #102). Regex-tier at confidence 0.85
+  across all major dialects (MySQL / Postgres / SQLite / MSSQL /
+  Oracle). `CREATE TABLE` / `CREATE [MATERIALIZED] VIEW` → Class;
+  `CREATE FUNCTION` / `CREATE PROCEDURE` / `CREATE TRIGGER` →
+  Function. Schema prefix splits into `qualified_name` (`auth.users`)
+  with bare `name` (`users`). Dialect-aware quoting (backticks,
+  double-quotes, square brackets stripped). Comment-aware: `--` line
+  and `/* */` block comments don't emit phantom symbols. DML / ALTER /
+  DROP / CREATE INDEX deliberately out of scope. Covers `.sql`,
+  `.ddl`.
+- New `FilenameExtractor` interface (#170) — optional extension to
+  `Extractor` for filename-based detection (`Makefile`, future
+  `Dockerfile`). The registry stores both basenames and extensions;
+  filename matches take precedence. Existing extractors unaffected.
 - `SECURITY.md`, `CHANGELOG.md`, `RELEASING.md` (this PR).
 
 ### Changed

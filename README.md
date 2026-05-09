@@ -412,6 +412,8 @@ RETURN f.name, f.file_path LIMIT 50
 | JavaScript / JSX | Regex | 0.85 | Functions, Classes, Methods |
 | Rust | Regex | 0.85 | Functions, Structs, Traits, Impls |
 | Java | Regex | 0.85 | Classes, Methods, Interfaces |
+| Makefile | Regex | 0.85 | Rule targets → Function (`.PHONY` → `IsExported=true`), variable assignments → Setting. Detected by filename (`Makefile`, `GNUmakefile`, lowercase `makefile`) and extension (`.mk`, `.mak`). |
+| SQL | Regex | 0.85 | `CREATE TABLE`/`VIEW` → Class, `CREATE FUNCTION`/`PROCEDURE`/`TRIGGER` → Function. Schema prefix split into `qualified_name` (`auth.users`) with bare `name` (`users`). Dialect-aware quoting (backticks/quotes/brackets). Comment-aware. Covers `.sql`, `.ddl`. |
 | Ruby | Regex | 0.70 | Functions, Classes, Methods |
 | PHP | Regex | 0.70 | Functions, Classes, Methods |
 | C / C++ | Regex | 0.70 | Functions, Structs, Classes |
