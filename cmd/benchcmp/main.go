@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -100,6 +101,52 @@ func percentDelta(baseline, actual float64) float64 {
 	return (actual - baseline) / baseline
 }
 
+// compare runs the diff/gate logic against two pre-parsed result sets.
+// Returns the count of (regressions, missing-in-actual, new-without-baseline)
+// so callers can decide their own exit code. Output is written to w in the
+// same human-readable table format the CLI emits.
+//
+// Extracted from main() so the orchestration is testable directly without
+// shelling out — covers the iteration, regression-flag formatting, and
+// missing-benchmark paths that flag.Parse + os.Exit hide.
+func compare(baseline, actual map[string]benchResult, w io.Writer) (regressions, missingActual, missingBaseline int) {
+	fmt.Fprintf(w, "%-60s  %12s  %12s  %8s  %8s\n",
+		"benchmark", "baseline ns", "actual ns", "Δns", "Δallocs")
+	fmt.Fprintln(w, strings.Repeat("-", 110))
+
+	for name, base := range baseline {
+		act, ok := actual[name]
+		if !ok {
+			fmt.Fprintf(w, "MISSING IN ACTUAL: %s\n", name)
+			missingActual++
+			continue
+		}
+		nsDelta := percentDelta(base.NsPerOp, act.NsPerOp)
+		allocsDelta := percentDelta(base.AllocsPerOp, act.AllocsPerOp)
+
+		flagStr := ""
+		if nsDelta > nsRegressionThreshold {
+			flagStr += " [NS-REGRESSION]"
+			regressions++
+		}
+		if allocsDelta > allocsRegressionThreshold {
+			flagStr += " [ALLOCS-REGRESSION]"
+			regressions++
+		}
+		fmt.Fprintf(w, "%-60s  %12.0f  %12.0f  %+7.1f%%  %+7.1f%%%s\n",
+			name, base.NsPerOp, act.NsPerOp,
+			nsDelta*100, allocsDelta*100, flagStr)
+	}
+
+	for name := range actual {
+		if _, ok := baseline[name]; !ok {
+			fmt.Fprintf(w, "NEW IN ACTUAL (no baseline): %s\n", name)
+			missingBaseline++
+		}
+	}
+	return regressions, missingActual, missingBaseline
+}
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: benchcmp <baseline.txt> <actual.txt>")
@@ -129,54 +176,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	regressions := 0
-	missingFromActual := 0
-	missingFromBaseline := 0
-
-	fmt.Printf("%-60s  %12s  %12s  %8s  %8s\n",
-		"benchmark", "baseline ns", "actual ns", "Δns", "Δallocs")
-	fmt.Println(strings.Repeat("-", 110))
-
-	for name, base := range baseline {
-		act, ok := actual[name]
-		if !ok {
-			fmt.Printf("MISSING IN ACTUAL: %s\n", name)
-			missingFromActual++
-			continue
-		}
-		nsDelta := percentDelta(base.NsPerOp, act.NsPerOp)
-		allocsDelta := percentDelta(base.AllocsPerOp, act.AllocsPerOp)
-
-		flag := ""
-		if nsDelta > nsRegressionThreshold {
-			flag += " [NS-REGRESSION]"
-			regressions++
-		}
-		if allocsDelta > allocsRegressionThreshold {
-			flag += " [ALLOCS-REGRESSION]"
-			regressions++
-		}
-		fmt.Printf("%-60s  %12.0f  %12.0f  %+7.1f%%  %+7.1f%%%s\n",
-			name, base.NsPerOp, act.NsPerOp,
-			nsDelta*100, allocsDelta*100, flag)
-	}
-
-	for name := range actual {
-		if _, ok := baseline[name]; !ok {
-			fmt.Printf("NEW IN ACTUAL (no baseline): %s\n", name)
-			missingFromBaseline++
-		}
-	}
+	regressions, missingActual, missingBaseline := compare(baseline, actual, os.Stdout)
 
 	fmt.Println()
-	if regressions == 0 && missingFromActual == 0 && missingFromBaseline == 0 {
+	if regressions == 0 && missingActual == 0 && missingBaseline == 0 {
 		fmt.Printf("benchcmp: OK — %d benchmarks, no regressions.\n", len(baseline))
 		return
 	}
 
 	fmt.Printf("benchcmp: FAIL — %d regression(s), %d missing in actual, %d new without baseline\n",
-		regressions, missingFromActual, missingFromBaseline)
-	if missingFromBaseline > 0 {
+		regressions, missingActual, missingBaseline)
+	if missingBaseline > 0 {
 		fmt.Println("  → run `make corpus-bench-update` to add baselines for new benchmarks.")
 	}
 	os.Exit(1)

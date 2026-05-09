@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +96,96 @@ func TestNoiseFloor_15PercentDoesNotFail(t *testing.T) {
 	if got > nsRegressionThreshold {
 		t.Errorf("delta %v should NOT exceed nsRegressionThreshold %v "+
 			"— 15%% must be within noise floor", got, nsRegressionThreshold)
+	}
+}
+
+// TestCompare_NoRegression — happy path: identical sets produce zero
+// regressions, zero missing entries, and a populated table.
+func TestCompare_NoRegression(t *testing.T) {
+	set := map[string]benchResult{
+		"BenchmarkA": {NsPerOp: 1000, AllocsPerOp: 10},
+		"BenchmarkB": {NsPerOp: 2000, AllocsPerOp: 20},
+	}
+	var buf bytes.Buffer
+	regressions, missingActual, missingBaseline := compare(set, set, &buf)
+	if regressions != 0 || missingActual != 0 || missingBaseline != 0 {
+		t.Errorf("identical sets: regressions=%d, missingActual=%d, missingBaseline=%d, want all 0",
+			regressions, missingActual, missingBaseline)
+	}
+	if !strings.Contains(buf.String(), "BenchmarkA") {
+		t.Errorf("expected output to include BenchmarkA row, got:\n%s", buf.String())
+	}
+}
+
+// TestCompare_NsRegressionFlagged — the wall-clock gate fires when ns/op
+// jumps beyond the 20% threshold.
+func TestCompare_NsRegressionFlagged(t *testing.T) {
+	baseline := map[string]benchResult{
+		"BenchmarkSlow": {NsPerOp: 1000, AllocsPerOp: 10},
+	}
+	actual := map[string]benchResult{
+		"BenchmarkSlow": {NsPerOp: 1500, AllocsPerOp: 10}, // +50%
+	}
+	var buf bytes.Buffer
+	regressions, _, _ := compare(baseline, actual, &buf)
+	if regressions != 1 {
+		t.Errorf("expected 1 ns regression, got %d", regressions)
+	}
+	if !strings.Contains(buf.String(), "[NS-REGRESSION]") {
+		t.Errorf("expected NS-REGRESSION flag in output, got:\n%s", buf.String())
+	}
+}
+
+// TestCompare_AllocsRegressionFlagged — the alloc-count gate fires
+// independently of ns/op.
+func TestCompare_AllocsRegressionFlagged(t *testing.T) {
+	baseline := map[string]benchResult{
+		"BenchmarkAlloc": {NsPerOp: 1000, AllocsPerOp: 10},
+	}
+	actual := map[string]benchResult{
+		"BenchmarkAlloc": {NsPerOp: 1000, AllocsPerOp: 14}, // +40%
+	}
+	var buf bytes.Buffer
+	regressions, _, _ := compare(baseline, actual, &buf)
+	if regressions != 1 {
+		t.Errorf("expected 1 allocs regression, got %d", regressions)
+	}
+	if !strings.Contains(buf.String(), "[ALLOCS-REGRESSION]") {
+		t.Errorf("expected ALLOCS-REGRESSION flag in output, got:\n%s", buf.String())
+	}
+}
+
+// TestCompare_MissingInActual — a benchmark that disappeared between
+// baseline and actual must be surfaced.
+func TestCompare_MissingInActual(t *testing.T) {
+	baseline := map[string]benchResult{
+		"BenchmarkGone": {NsPerOp: 1000, AllocsPerOp: 10},
+	}
+	actual := map[string]benchResult{}
+	var buf bytes.Buffer
+	_, missingActual, _ := compare(baseline, actual, &buf)
+	if missingActual != 1 {
+		t.Errorf("expected 1 missing-in-actual, got %d", missingActual)
+	}
+	if !strings.Contains(buf.String(), "MISSING IN ACTUAL") {
+		t.Errorf("expected MISSING IN ACTUAL line, got:\n%s", buf.String())
+	}
+}
+
+// TestCompare_NewWithoutBaseline — a benchmark in actual that has no
+// baseline forces an explicit baseline-update step.
+func TestCompare_NewWithoutBaseline(t *testing.T) {
+	baseline := map[string]benchResult{}
+	actual := map[string]benchResult{
+		"BenchmarkNew": {NsPerOp: 1000, AllocsPerOp: 10},
+	}
+	var buf bytes.Buffer
+	_, _, missingBaseline := compare(baseline, actual, &buf)
+	if missingBaseline != 1 {
+		t.Errorf("expected 1 new-without-baseline, got %d", missingBaseline)
+	}
+	if !strings.Contains(buf.String(), "NEW IN ACTUAL") {
+		t.Errorf("expected NEW IN ACTUAL line, got:\n%s", buf.String())
 	}
 }
 
