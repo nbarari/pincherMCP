@@ -1438,6 +1438,31 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if err != nil {
 		return errResult(fmt.Sprintf("search error: %v", err)), nil
 	}
+
+	// #113 corpus fallthrough: when the user did NOT pass an explicit corpus,
+	// the default routes to `code`. Pure-config (Terraform, Ansible) and
+	// pure-docs projects have zero symbols in the code corpus, so a default
+	// search would always return 0 even when the data exists in `config`
+	// or `docs`. Retry with the next-most-specific corpus, surfacing the
+	// fallthrough chain in `_meta` so the agent can see what happened.
+	//
+	// Skipped when the user explicitly set corpus (any value, including
+	// "code") — empty results are then a deliberate scope choice.
+	fellthroughTo := ""
+	if corpus == "" && len(results) == 0 {
+		for _, fb := range []string{db.CorpusConfig, db.CorpusDocs} {
+			fbResults, fbErr := s.store.SearchSymbolsByCorpus(projectID, query, kind, language, fb, fetchLimit)
+			if fbErr != nil {
+				return errResult(fmt.Sprintf("search error (fallthrough %s): %v", fb, fbErr)), nil
+			}
+			if len(fbResults) > 0 {
+				results = fbResults
+				fellthroughTo = fb
+				break
+			}
+		}
+	}
+
 	// Apply the threshold AFTER fetch; FTS5 BM25 ordering is preserved.
 	if minConfidence > 0 {
 		filtered := results[:0]
@@ -1535,13 +1560,17 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		confs = append(confs, r.Symbol.ExtractionConfidence)
 	}
 
+	meta := map[string]any{
+		"confidence_distribution": confidenceDistribution(confs),
+	}
+	if fellthroughTo != "" {
+		meta["fellthrough_to"] = fellthroughTo
+	}
 	data := map[string]any{
 		"results": rows,
 		"count":   len(rows),
 		"query":   query,
-		"_meta": map[string]any{
-			"confidence_distribution": confidenceDistribution(confs),
-		},
+		"_meta":   meta,
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }

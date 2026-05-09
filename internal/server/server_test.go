@@ -458,6 +458,97 @@ func TestHandleSearch_CorpusParameter(t *testing.T) {
 	}
 }
 
+// TestHandleSearch_CorpusFallthrough pins the #113 behaviour: when the
+// user does NOT pass an explicit corpus and the default `code` corpus
+// returns zero results, the handler retries `config` and then `docs`,
+// surfacing the chain in `_meta.fellthrough_to`. Pure-config (Terraform,
+// Ansible) and pure-docs projects would otherwise return 0 for every
+// reasonable query.
+func TestHandleSearch_CorpusFallthrough(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "pft"
+	store.UpsertProject(db.Project{ID: "pft", Path: "/tmp/pft", Name: "pft", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		// Config-corpus symbol — no code-corpus siblings for ZZFTOnly.
+		{ID: "c1", ProjectID: "pft", FilePath: "main.tf", Name: "ZZFTOnly",
+			QualifiedName: "module.ZZFTOnly", Kind: "Resource", Language: "HCL"},
+		// Docs-corpus symbol — only docs-corpus carrier of ZZDocsOnly.
+		{ID: "d1", ProjectID: "pft", FilePath: "README.md", Name: "ZZDocsOnly",
+			QualifiedName: "Section.ZZDocsOnly", Kind: "Section", Language: "Markdown"},
+	})
+
+	// Default search (no corpus) → code is empty, falls through to config,
+	// returns the HCL Resource and tags fellthrough_to.
+	result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": "ZZFTOnly", "min_confidence": 0.0,
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("default fallthrough to config: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m := decode(t, result)
+	if int(m["count"].(float64)) != 1 {
+		t.Errorf("default fallthrough: count=%v, want 1 (HCL Resource)", m["count"])
+	}
+	meta, _ := m["_meta"].(map[string]any)
+	if got, want := meta["fellthrough_to"], "config"; got != want {
+		t.Errorf("fellthrough_to=%v, want %v (code was empty, config matched)", got, want)
+	}
+
+	// Default search where only docs has a hit → falls through code → config → docs.
+	result, err = srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": "ZZDocsOnly", "min_confidence": 0.0,
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("default fallthrough to docs: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m = decode(t, result)
+	if int(m["count"].(float64)) != 1 {
+		t.Errorf("docs fallthrough: count=%v, want 1 (Markdown Section)", m["count"])
+	}
+	meta, _ = m["_meta"].(map[string]any)
+	if got, want := meta["fellthrough_to"], "docs"; got != want {
+		t.Errorf("fellthrough_to=%v, want %v (code+config empty, docs matched)", got, want)
+	}
+
+	// Explicit corpus=code MUST NOT fall through — empty result is a
+	// deliberate scope choice, not a missing-routing surprise.
+	result, err = srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": "ZZFTOnly", "corpus": "code", "min_confidence": 0.0,
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("explicit corpus=code: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m = decode(t, result)
+	if int(m["count"].(float64)) != 0 {
+		t.Errorf("explicit corpus=code: count=%v, want 0 (no fallthrough)", m["count"])
+	}
+	meta, _ = m["_meta"].(map[string]any)
+	if _, has := meta["fellthrough_to"]; has {
+		t.Errorf("explicit corpus=code MUST NOT include fellthrough_to in _meta; got %v", meta)
+	}
+
+	// Default search that DOES find code results — no fallthrough triggered,
+	// no fellthrough_to in _meta.
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "co1", ProjectID: "pft", FilePath: "main.go", Name: "ZZFTBoth",
+			QualifiedName: "pkg.ZZFTBoth", Kind: "Function", Language: "Go"},
+	})
+	result, err = srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": "ZZFTBoth", "min_confidence": 0.0,
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("code-only hit: err=%v isErr=%v body=%v", err, result.IsError, decode(t, result))
+	}
+	m = decode(t, result)
+	if int(m["count"].(float64)) != 1 {
+		t.Errorf("code-only hit: count=%v, want 1", m["count"])
+	}
+	meta, _ = m["_meta"].(map[string]any)
+	if _, has := meta["fellthrough_to"]; has {
+		t.Errorf("code-corpus hit MUST NOT include fellthrough_to; got %v", meta)
+	}
+}
+
 // TestHandleSearch_CorpusInvalidErrors guards against typos silently
 // falling through to legacy. The handler must surface the underlying
 // store error rather than swallow it.
