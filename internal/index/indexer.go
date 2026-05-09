@@ -33,20 +33,48 @@ type IndexProgress struct {
 	FilesTotal atomic.Int64
 }
 
+// DefaultMaxFileSize bounds per-file memory during indexing. Real source
+// files are well under 200 KB; 4 MB leaves headroom for hand-written test
+// corpora and large generated TypeScript declarations while preventing a
+// single pathological input (e.g. a 100 MB JSON dump) from stalling the
+// indexer or exhausting memory (#111).
+const DefaultMaxFileSize int64 = 4 * 1024 * 1024
+
 // Indexer manages repository indexing for pincherMCP.
 type Indexer struct {
 	store    *db.Store
 	mu       sync.Mutex
 	active   map[string]bool         // projectID → indexing in progress
 	progress sync.Map                // projectID → *IndexProgress
+
+	// maxFileSize is the per-file byte ceiling. Files larger than this are
+	// recorded as "file_too_large" extraction failures and skipped without
+	// being read into memory. Zero or negative means "no cap".
+	maxFileSize int64
 }
 
-// New creates a new Indexer.
+// New creates a new Indexer with the default per-file size cap.
 func New(store *db.Store) *Indexer {
 	return &Indexer{
-		store:  store,
-		active: make(map[string]bool),
+		store:       store,
+		active:      make(map[string]bool),
+		maxFileSize: DefaultMaxFileSize,
 	}
+}
+
+// SetMaxFileSize overrides the per-file size cap. Pass 0 (or negative) to
+// disable the cap entirely. Settings are honoured on the next Index() call.
+func (idx *Indexer) SetMaxFileSize(bytes int64) {
+	idx.mu.Lock()
+	idx.maxFileSize = bytes
+	idx.mu.Unlock()
+}
+
+// MaxFileSize returns the current per-file size cap in bytes (0 = no cap).
+func (idx *Indexer) MaxFileSize() int64 {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.maxFileSize
 }
 
 // GetProgress returns current file progress for the given project ID.
@@ -175,6 +203,30 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		}
 		if !ast.IsSourceFile(path) {
 			continue
+		}
+
+		// Per-file size cap (#111): stat before read so a 100 MB JSON dump
+		// doesn't allocate 100 MB of process memory just to be rejected.
+		// Failure is persisted so `pincher doctor` surfaces it; counted as
+		// blocked so the IndexResult still reflects "files refused upstream
+		// of extraction".
+		if cap := idx.maxFileSize; cap > 0 {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				slog.Debug("pincher.index.stat.skip", "path", path, "err", statErr)
+				continue
+			}
+			if info.Size() > cap {
+				totalBlocked++
+				relPath, _ := filepath.Rel(absPath, path)
+				relPath = filepath.ToSlash(relPath)
+				details := fmt.Sprintf("size=%d bytes (cap=%d bytes)", info.Size(), cap)
+				if err := idx.store.RecordExtractionFailure(projectID, relPath, ast.DetectLanguage(path), "file_too_large", details); err != nil {
+					slog.Warn("pincher.index.record_failure.err", "err", err, "file", relPath, "reason", "file_too_large")
+				}
+				slog.Debug("pincher.index.too_large", "path", path, "size", info.Size(), "cap", cap)
+				continue
+			}
 		}
 
 		// Read file

@@ -53,6 +53,7 @@ func main() {
 		trustProxy  = flag.Bool("trust-proxy", false, "Honor X-Forwarded-Prefix / X-Forwarded-Proto / X-Forwarded-Host headers. Only enable when behind a trusted proxy. Falls back to $PINCHER_TRUST_PROXY=1.")
 		slowQueryMS = flag.Int64("slow-query-ms", 0, "Persist tool calls slower than N ms to the slow_queries table for `pincher doctor` to surface (#42). 0 = disabled (zero overhead).")
 		dbReaders   = flag.Int("db-readers", db.DefaultReaderPoolSize, "Maximum concurrent SQLite read connections. Higher = more parallel tool calls behind a busy server; capped at 32. Falls back to $PINCHER_DB_READERS.")
+		maxFileMB   = flag.Int("max-file-size-mb", int(index.DefaultMaxFileSize/(1024*1024)), "Per-file size cap during indexing (MB). Files larger than this are recorded as `file_too_large` failures and skipped without being read into memory (#111). 0 disables the cap. Falls back to $PINCHER_MAX_FILE_SIZE_MB.")
 	)
 	flag.Parse()
 
@@ -100,6 +101,15 @@ func main() {
 		}
 	}
 
+	// Env fallback for --max-file-size-mb (#111). Default-comparison gate
+	// matches the --db-readers pattern: env only wins when the flag is at
+	// its built-in default, so an explicit `--max-file-size-mb 0` survives.
+	if env := os.Getenv("PINCHER_MAX_FILE_SIZE_MB"); env != "" && *maxFileMB == int(index.DefaultMaxFileSize/(1024*1024)) {
+		if v, parseErr := strconv.Atoi(env); parseErr == nil && v >= 0 {
+			*maxFileMB = v
+		}
+	}
+
 	// Open SQLite store with the configured reader pool size.
 	store, err := db.OpenWithReaders(dir, *dbReaders)
 	if err != nil {
@@ -107,8 +117,9 @@ func main() {
 	}
 	defer store.Close()
 
-	// Build indexer
+	// Build indexer with the configured per-file cap (#111).
 	idx := index.New(store)
+	idx.SetMaxFileSize(int64(*maxFileMB) * 1024 * 1024)
 
 	// Build MCP server with all 15 tools
 	srv := server.New(store, idx, version)
@@ -173,12 +184,18 @@ func runIndexCLI(args []string) {
 	force := fs.Bool("force", false, "Re-parse all files regardless of content hash")
 	hookMode := fs.Bool("hook", false, "Output Claude Code SessionStart hook JSON instead of plain text")
 	jsonSummary := fs.Bool("json-summary", false, "Emit a structured snapshot JSON to stdout (used by corpus-snapshot tooling, #33)")
+	maxFileMB := fs.Int("max-file-size-mb", int(index.DefaultMaxFileSize/(1024*1024)), "Per-file size cap during indexing (MB). 0 disables the cap. Falls back to $PINCHER_MAX_FILE_SIZE_MB. (#111)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: pincher index [--force] [--hook] [--json-summary] [--data-dir DIR] [PATH]")
+		fmt.Fprintln(os.Stderr, "usage: pincher index [--force] [--hook] [--json-summary] [--max-file-size-mb MB] [--data-dir DIR] [PATH]")
 		fmt.Fprintln(os.Stderr, "  Indexes PATH (default: current directory) into the pincher knowledge graph.")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+	if env := os.Getenv("PINCHER_MAX_FILE_SIZE_MB"); env != "" && *maxFileMB == int(index.DefaultMaxFileSize/(1024*1024)) {
+		if v, parseErr := strconv.Atoi(env); parseErr == nil && v >= 0 {
+			*maxFileMB = v
+		}
+	}
 
 	path := fs.Arg(0)
 	if path == "" {
@@ -221,6 +238,7 @@ func runIndexCLI(args []string) {
 	defer store.Close()
 
 	idx := index.New(store)
+	idx.SetMaxFileSize(int64(*maxFileMB) * 1024 * 1024)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

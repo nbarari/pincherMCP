@@ -1857,6 +1857,9 @@ func (s *Store) AvgConfidenceByKind(projectID string) (map[string]float64, error
 //   - "extractor_panicked"    — the extractor panicked; recover() caught it
 //   - "byte_range_negative"   — sanity heuristic: a symbol's end_byte <= start_byte
 //   - "qualified_name_collision" — sanity heuristic: same QN twice in a file
+//   - "file_too_large"        — file size exceeds the indexer's per-file cap (#111).
+//                                Skipped before read so memory stays bounded; details
+//                                holds the size in bytes and the configured cap.
 //
 // New reasons can be added by future PRs (e.g. "byte_range_oversized" once
 // parent-tracking lands, "confidence_outlier" once #34 ships).
