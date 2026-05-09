@@ -7,7 +7,7 @@
 [![CI](https://github.com/kwad77/pincher/actions/workflows/ci.yml/badge.svg)](https://github.com/kwad77/pincher/actions/workflows/ci.yml)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-83%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-84%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
 
 **Codebase intelligence server for LLM agents.**
 Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST

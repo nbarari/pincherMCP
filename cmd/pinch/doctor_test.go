@@ -390,6 +390,28 @@ func TestDoctorCLI_Binary_JSON(t *testing.T) {
 	}
 }
 
+// TestDoctorCLI_Binary_TopFlag covers the --top argument plumbing.
+// The default is 10; we set --top 3 to exercise the non-default path
+// through the dispatch wrapper.
+func TestDoctorCLI_Binary_TopFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	dataDir := t.TempDir()
+	cmd := exec.Command(bin, "doctor", "--data-dir", dataDir, "--top", "3", "--json")
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pincher doctor --top 3: %v\n%s", err, out)
+	}
+	var report DoctorReport
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+}
+
 func TestDoctorCLI_Binary_LookbackFlag(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI binary build in -short mode")

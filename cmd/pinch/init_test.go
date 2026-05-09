@@ -260,3 +260,119 @@ func TestInitCLI_Binary_PreservesExistingContent(t *testing.T) {
 		t.Error("pincher block missing")
 	}
 }
+
+// ── --target dispatch via the binary ─────────────────────────────────────────
+
+// TestInitCLI_Binary_TargetCursor walks the runInitCLI → resolveTargets
+// → runInitTarget(cursor) path through the cover-instrumented binary so
+// the dispatch wrapper picks up coverage credit.
+func TestInitCLI_Binary_TargetCursor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	workdir := t.TempDir()
+	cmd := exec.Command(bin, "init", "--target", "cursor", "--data-dir", t.TempDir())
+	cmd.Dir = workdir
+	cmd.Env = pincherCoverEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pincher init --target=cursor: %v\n%s", err, out)
+	}
+	want := filepath.Join(workdir, ".cursor", "rules", "pincher.mdc")
+	got, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("expected %s to exist: %v", want, err)
+	}
+	if !strings.HasPrefix(string(got), "---\n") {
+		t.Errorf("cursor target should start with frontmatter delimiter; got: %s", got[:50])
+	}
+}
+
+// TestInitCLI_Binary_TargetAll asserts --target=all writes every
+// project-scoped target in one invocation.
+func TestInitCLI_Binary_TargetAll(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	workdir := t.TempDir()
+	homeDir := t.TempDir()
+	cmd := exec.Command(bin, "init", "--target", "all", "--data-dir", t.TempDir())
+	cmd.Dir = workdir
+	env := pincherCoverEnv()
+	env = append(env, "HOME="+homeDir, "USERPROFILE="+homeDir)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pincher init --target=all: %v\n%s", err, out)
+	}
+	for _, sub := range []string{
+		filepath.Join(workdir, "CLAUDE.md"),
+		filepath.Join(workdir, ".cursor", "rules", "pincher.mdc"),
+		filepath.Join(workdir, ".cursorrules"),
+		filepath.Join(workdir, ".windsurfrules"),
+		filepath.Join(workdir, "CONVENTIONS.md"),
+		filepath.Join(homeDir, ".continue", "config.json"),
+	} {
+		if _, err := os.Stat(sub); err != nil {
+			t.Errorf("expected %s to exist after --target=all: %v", sub, err)
+		}
+	}
+}
+
+// TestInitCLI_Binary_TargetDetect verifies the --target=detect path
+// exits cleanly and writes only to detected targets.
+func TestInitCLI_Binary_TargetDetect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	workdir := t.TempDir()
+	homeDir := t.TempDir()
+	// Seed only the windsurf marker so detection should pick exactly that.
+	if err := os.WriteFile(filepath.Join(workdir, ".windsurfrules"), []byte("# old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "init", "--target", "detect", "--data-dir", t.TempDir())
+	cmd.Dir = workdir
+	env := pincherCoverEnv()
+	env = append(env, "HOME="+homeDir, "USERPROFILE="+homeDir)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pincher init --target=detect: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(workdir, ".windsurfrules"))
+	if err != nil {
+		t.Fatalf("windsurfrules should exist: %v", err)
+	}
+	if !strings.Contains(string(got), pincherInitMarkerStart) {
+		t.Error("expected pincher block in .windsurfrules")
+	}
+	// CLAUDE.md should NOT be written (not detected).
+	if _, err := os.Stat(filepath.Join(workdir, "CLAUDE.md")); err == nil {
+		t.Error("CLAUDE.md should not be written when only windsurf was detected")
+	}
+}
+
+// TestInitCLI_Binary_UnknownTargetExits asserts an unknown --target
+// value produces a non-zero exit and a useful error.
+func TestInitCLI_Binary_UnknownTargetExits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	cmd := exec.Command(bin, "init", "--target", "vim", "--dry-run")
+	cmd.Dir = t.TempDir()
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit on unknown --target; got output: %s", out)
+	}
+	if !strings.Contains(string(out), "unknown --target") {
+		t.Errorf("expected 'unknown --target' message; got: %s", out)
+	}
+}

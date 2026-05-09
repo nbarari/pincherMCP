@@ -110,6 +110,97 @@ func TestIndexCLI_Binary_JSONSummary(t *testing.T) {
 	}
 }
 
+// TestIndexCLI_Binary_Force exercises the --force code path through the
+// dispatch wrapper so runIndexCLI's force=true branch in idx.Index gets
+// coverage credit.
+func TestIndexCLI_Binary_Force(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	dataDir := t.TempDir()
+	projDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projDir, "go.mod"), []byte("module test\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "x.go"), []byte("package test\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatalf("write x.go: %v", err)
+	}
+
+	// First run seeds the DB; second run with --force re-parses.
+	for _, args := range [][]string{
+		{"index", "--data-dir", dataDir, projDir},
+		{"index", "--force", "--data-dir", dataDir, projDir},
+	} {
+		cmd := exec.Command(bin, args...)
+		cmd.Env = pincherCoverEnv()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("pincher %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestIndexCLI_Binary_BloatTrapManual asserts non-hook mode exits with a
+// loud error (not 0) when refusing to index $HOME. Distinct from
+// TestIndexCLI_Binary_BloatTrap which covers hook mode silent-exit.
+func TestIndexCLI_Binary_BloatTrapManual(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	cmd := exec.Command(bin, "index", "--data-dir", dataDir, homeDir)
+	env := pincherCoverEnv()
+	env = append(env, "HOME="+homeDir, "USERPROFILE="+homeDir)
+	cmd.Env = env
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit indexing $HOME; output: %s", out)
+	}
+	if !strings.Contains(string(out), "refusing to index") {
+		t.Errorf("expected 'refusing to index' in stderr, got: %s", out)
+	}
+}
+
+// TestVersionFlag exercises --version through the binary.
+func TestVersionFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	cmd := exec.Command(bin, "--version")
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pincher --version: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "pincherMCP v") {
+		t.Errorf("expected 'pincherMCP v...' in --version output, got: %s", out)
+	}
+}
+
+// TestHelpFlag exercises the --help dispatch through the binary so the
+// flag.Usage hook + os.Exit path get coverage credit. The banner content
+// is pinned by TestPrintHelpBanner_ListsAllSubcommands above.
+func TestHelpFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	cmd := exec.Command(bin, "--help")
+	cmd.Env = pincherCoverEnv()
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "pincherMCP") {
+		t.Errorf("expected banner in --help output, got: %s", out)
+	}
+}
+
 // TestIndexCLI_Binary_BloatTrap asserts the bloat trap fires when
 // indexing a directory whose absolute parent matches itself (Windows
 // drive root). We can't easily test the actual root from a test, but

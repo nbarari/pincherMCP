@@ -198,6 +198,30 @@ func TestWebCLI_Binary_NoStart(t *testing.T) {
 	}
 }
 
+// TestWebCLI_Binary_NoStartJSON covers the runWebCLI --json output branch
+// when no live server exists. Pairs with TestWebCLI_Binary_NoStart which
+// covers the text-mode path.
+func TestWebCLI_Binary_NoStartJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+
+	bin := buildPincherBinary(t)
+	dataDir := t.TempDir()
+	cmd := exec.Command(bin, "web", "--no-start", "--json", "--data-dir", dataDir)
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit; output: %s", out)
+	}
+	// Even in JSON mode, --no-start with no server emits the same
+	// stderr error before exiting. (Adding a JSON error envelope is
+	// out of scope here — the existing behaviour is what we test.)
+	if !strings.Contains(string(out), "no live HTTP server") {
+		t.Fatalf("expected error message; got: %s", out)
+	}
+}
+
 func TestEmitWebResult_Existing(t *testing.T) {
 	var buf strings.Builder
 	emitWebResult(&buf, "http://localhost:7777", "http://localhost:7777/v1/dashboard", 1234, "existing", false)

@@ -69,23 +69,24 @@ jobs:
           mkdir -p covdata
           go test ./... -coverprofile=cover.out -timeout 180s
 
-      # Coverage gate temporarily lowered 84% → 83% to land the v0.5.0 P0
-      # bug fix (#84 / #92 — case-insensitive project_id duplicate rows).
-      # The patch adds 700+ lines and lands at 83.9% on Linux CI; pushing
-      # past 84% requires SQL-error mocking infrastructure that doesn't
-      # exist in this codebase yet. The dip is bounded:
+      # Coverage gate restored 83% → 84% in v0.6.0 (#200). The original
+      # pre-#92 floor was 84%; v0.5.0 dipped to 83% to land the P0 bug
+      # fix without scope creep. The v0.6.0 push (#215, #216, #218) added
+      # subprocess-coverage tests for runInitCLI / runStatsCLI / runWebCLI
+      # / runDoctorCLI / runIndexCLI dispatch paths and brought the
+      # number to 84.3% on Linux CI.
       #
-      #   - v0.5.0/#200 will restore the gate, raising it 83% → 85% as
-      #     part of the "trustworthy single-binary release" milestone.
-      #   - The 83% number is honest — it's what the codebase actually
-      #     tests today. Restoration happens together with adding the
-      #     missing test infrastructure, not by squeezing the same code
-      #     harder.
-      - name: Check coverage threshold (83% — temporary, see comment)
+      # The remaining gap to 85%+ is concentrated in main()'s
+      # HTTP/MCP server bootstrap and the network-bound update paths
+      # (downloadAndSwap, runGoInstall) — both genuinely hard to test
+      # without restructuring main() to make the bootstrap testable as
+      # a unit, and without mocking github releases. Tracked separately;
+      # not blocking the v0.6.0 cut.
+      - name: Check coverage threshold (84%)
         run: |
           TOTAL=$(go tool cover -func=cover.out | grep "^total" | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"
-          awk -v t="$TOTAL" 'BEGIN { if (t+0 < 83) { print "Coverage " t "% is below 83% threshold"; exit 1 } }'
+          awk -v t="$TOTAL" 'BEGIN { if (t+0 < 84) { print "Coverage " t "% is below 84% threshold"; exit 1 } }'
 
   # corpus-snapshot exercises the Makefile-driven snapshot pipeline (#33).
   # The Go-test gate (TestCorpusSnapshot_* in cmd/pinch/snapshot_test.go)

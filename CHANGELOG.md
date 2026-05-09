@@ -7,6 +7,16 @@ minors.
 
 ## [Unreleased]
 
+### Changed
+- Coverage gate restored 83% → 84% (#200). Subprocess-coverage tests
+  added across `runInitCLI` / `runStatsCLI` / `runWebCLI` / `runDoctorCLI`
+  / `runIndexCLI` dispatch paths brought the floor from the temporary
+  v0.5.0 dip back up to 84.3% on Linux CI. The remaining gap to 85%+
+  lives in `main()`'s HTTP/MCP server bootstrap and the network-bound
+  update paths (`downloadAndSwap`, `runGoInstall`) — both deferred to a
+  follow-up that restructures `main()` for unit testability. README
+  badge bumped from 83% → 84%.
+
 ### Added
 - Three end-to-end tutorials under `docs/tutorials/` (#201) —
   `claude-code.md`, `cursor.md`, `http-dashboard.md`. Each is ~10
