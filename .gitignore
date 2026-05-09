@@ -24,3 +24,7 @@ cover*.html
 
 # Corpus-snapshot scratch directory (#33).
 testdata/corpus/.snapshot-data/
+
+# Bench variance scratch directory (B.1 / #98 follow-up).
+scripts/.bench-variance/
+scripts/.bench-variance.log
