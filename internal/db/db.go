@@ -2365,6 +2365,28 @@ func (s *Store) GetAllTimeSavings() (calls, tokensUsed, tokensSaved int64, costA
 	return
 }
 
+// ResetSessions wipes every row from the sessions table and returns the
+// number of rows deleted. Used by `pincher stats --reset` to clear the
+// adoption-priming counters (cost avoided, tokens saved, call counts)
+// without touching symbol / edge / project data.
+//
+// The running pincher process retains its in-memory atomic counters and
+// will re-flush them on the next 10s tick — so subsequent stats won't
+// stay at zero, but the historical sessions are gone permanently. There
+// is no automatic backup; callers who want to preserve totals should
+// snapshot via `pincher stats --json > backup.json` before calling.
+func (s *Store) ResetSessions() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sessions`)
+	if err != nil {
+		return 0, fmt.Errorf("delete sessions: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return rows, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scan helpers
 // ─────────────────────────────────────────────────────────────────────────────

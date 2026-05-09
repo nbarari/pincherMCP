@@ -424,6 +424,7 @@ var writerRoutedStoreMethods = map[string]bool{
 	"SetADR":                   true,
 	"DeleteADR":                true,
 	"RecordSession":            true,
+	"ResetSessions":            true,
 	"RecordExtractionFailure":  true,
 	"ClearExtractionFailures":  true,
 	"RecordSlowQuery":          true,
