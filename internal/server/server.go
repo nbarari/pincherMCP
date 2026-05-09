@@ -1783,6 +1783,13 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// concrete top-1 result.
 	if len(results) > 0 {
 		meta["next_steps"] = suggestNextSteps(results[0].Symbol)
+	} else {
+		// Zero results, even after corpus fallthrough. Surface a
+		// best-guess diagnosis + concrete recovery suggestions so the
+		// agent doesn't have to guess from a bare `count: 0`. Mirrors
+		// handleIndex's empty-state diagnosis (#147).
+		meta["diagnosis"] = diagnoseEmptySearch(query, kind, language, corpus, minConfidence)
+		meta["next_steps"] = suggestEmptySearchNextSteps(query, kind, language, minConfidence)
 	}
 	data := map[string]any{
 		"results": rows,
@@ -1791,6 +1798,70 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"_meta":   meta,
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
+}
+
+// diagnoseEmptySearch returns a one-line explanation of the most likely
+// cause of zero results. Ordered most-specific first: min_confidence
+// is checked before filter args, because a numeric threshold is the
+// least-obvious filter to remember when debugging.
+func diagnoseEmptySearch(query, kind, language, corpus string, minConfidence float64) string {
+	switch {
+	case minConfidence > 0:
+		return fmt.Sprintf("no matches at min_confidence ≥ %.2f — bottom-floor symbols (lockfile keys, README headings) need min_confidence=0.0 to surface", minConfidence)
+	case kind != "":
+		return fmt.Sprintf("no matches with kind=%q — try without the kind filter to see all matching symbols", kind)
+	case language != "":
+		return fmt.Sprintf("no matches in language=%q — try without the language filter or check the project's actual language mix via `architecture`", language)
+	case corpus != "" && corpus != "code":
+		return fmt.Sprintf("no matches in corpus=%q — try corpus=code (the default for source identifiers) or omit corpus", corpus)
+	case !strings.ContainsAny(query, "*\""):
+		return fmt.Sprintf("no exact-term matches for %q — wildcards (`%s*`) or phrase queries (`\"%s\"`) often surface partial-name hits FTS5 BM25 misses", query, query, query)
+	default:
+		return "no matches across code/config/docs corpora — check spelling, or `list` to confirm the project is indexed and pick a different `project=`"
+	}
+}
+
+// suggestEmptySearchNextSteps returns concrete tool calls the agent
+// can run as recovery moves. Ordered: drop the most-specific filter
+// first so agents converge on the right call quickly. Always includes
+// a `list` suggestion as the universal fallback (catches "wrong
+// project" mistakes that no in-query tweak fixes).
+func suggestEmptySearchNextSteps(query, kind, language string, minConfidence float64) []map[string]string {
+	steps := []map[string]string{}
+	if minConfidence > 0 {
+		steps = append(steps, map[string]string{
+			"tool": "search",
+			"args": fmt.Sprintf(`{"query":"%s","min_confidence":0.0}`, query),
+			"why":  "drop the confidence threshold to surface bottom-floor matches",
+		})
+	}
+	if kind != "" {
+		steps = append(steps, map[string]string{
+			"tool": "search",
+			"args": fmt.Sprintf(`{"query":"%s"}`, query),
+			"why":  "retry without the kind filter to widen the result set",
+		})
+	}
+	if language != "" {
+		steps = append(steps, map[string]string{
+			"tool": "search",
+			"args": fmt.Sprintf(`{"query":"%s"}`, query),
+			"why":  "retry without the language filter",
+		})
+	}
+	if !strings.ContainsAny(query, "*\"") {
+		steps = append(steps, map[string]string{
+			"tool": "search",
+			"args": fmt.Sprintf(`{"query":"%s*"}`, query),
+			"why":  "wildcard match catches partial-name hits BM25 ranking can miss",
+		})
+	}
+	steps = append(steps, map[string]string{
+		"tool": "list",
+		"args": `{}`,
+		"why":  "confirm the right project is indexed — wrong project = no matches no matter the query",
+	})
+	return steps
 }
 
 // suggestNextSteps returns 1-2 follow-up tool suggestions tailored to the

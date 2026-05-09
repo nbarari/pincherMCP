@@ -4851,7 +4851,12 @@ func TestHandleSearch_NextStepsInMeta(t *testing.T) {
 	}
 }
 
-func TestHandleSearch_NextStepsAbsentOnZeroResults(t *testing.T) {
+// TestHandleSearch_ZeroResultsAttachesDiagnosisAndRecoverySteps pins
+// that an empty search result is no longer a dead-end response: it
+// carries `_meta.diagnosis` (best-guess cause) and `_meta.next_steps`
+// (concrete recovery tool calls). Mirrors handleIndex's empty-state
+// pattern; agents shouldn't have to guess from a bare `count: 0`.
+func TestHandleSearch_ZeroResultsAttachesDiagnosisAndRecoverySteps(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	srv.sessionID = "nsz"
 	store.UpsertProject(db.Project{ID: "nsz", Path: "/tmp/nsz", Name: "nsz", IndexedAt: time.Now()})
@@ -4863,9 +4868,98 @@ func TestHandleSearch_NextStepsAbsentOnZeroResults(t *testing.T) {
 	}
 	m := decode(t, result)
 	meta, _ := m["_meta"].(map[string]any)
-	if _, present := meta["next_steps"]; present {
-		t.Error("next_steps must be ABSENT when no results found")
+	if meta == nil {
+		t.Fatal("_meta missing on zero-result response")
 	}
+	if _, hasDiag := meta["diagnosis"]; !hasDiag {
+		t.Errorf("expected _meta.diagnosis on zero results, got: %v", meta)
+	}
+	steps, _ := meta["next_steps"].([]any)
+	if len(steps) == 0 {
+		t.Errorf("expected _meta.next_steps recovery suggestions on zero results, got: %v", meta)
+	}
+	// `list` should always be in the recovery set as the universal fallback.
+	foundList := false
+	for _, s := range steps {
+		if step, _ := s.(map[string]any); step["tool"] == "list" {
+			foundList = true
+		}
+	}
+	if !foundList {
+		t.Errorf("expected `list` in recovery next_steps as universal fallback, got: %v", steps)
+	}
+}
+
+// TestDiagnoseEmptySearch_PrioritiesMostSpecificFilter pins the
+// diagnosis ordering. min_confidence is checked first because it's
+// the least-obvious filter to remember; explicit kind/language/corpus
+// next; finally a generic "wildcards" hint when no filters narrow
+// the search but the query has no wildcard already.
+func TestDiagnoseEmptySearch_PrioritiesMostSpecificFilter(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		kind       string
+		language   string
+		corpus     string
+		minConf    float64
+		wantSubstr string
+	}{
+		{"min_confidence beats kind", "Foo", "Function", "", "", 0.71, "min_confidence ≥"},
+		{"kind beats language", "Foo", "Function", "Go", "", 0.0, `kind="Function"`},
+		{"language beats non-default corpus", "Foo", "", "Go", "config", 0.0, `language="Go"`},
+		{"non-default corpus surfaced when no other filter", "Foo", "", "", "config", 0.0, `corpus="config"`},
+		{"default corpus does not show in diagnosis", "Foo", "", "", "code", 0.0, "wildcards"},
+		{"plain query suggests wildcard", "Foo", "", "", "", 0.0, "Foo*"},
+		{"wildcard query falls through to generic", "Foo*", "", "", "", 0.0, "code/config/docs corpora"},
+	}
+	for _, tc := range cases {
+		got := diagnoseEmptySearch(tc.query, tc.kind, tc.language, tc.corpus, tc.minConf)
+		if !strings.Contains(got, tc.wantSubstr) {
+			t.Errorf("%s: diagnosis=%q, want substring %q", tc.name, got, tc.wantSubstr)
+		}
+	}
+}
+
+// TestSuggestEmptySearchNextSteps_RecoveryActionsMatchFilters pins
+// that recovery suggestions actually correspond to the active filter
+// — drop min_confidence when one is set, drop kind when set, etc.
+// The `list` fallback is always present (universal "wrong project"
+// recovery).
+func TestSuggestEmptySearchNextSteps_RecoveryActionsMatchFilters(t *testing.T) {
+	t.Run("min_confidence > 0 suggests dropping it", func(t *testing.T) {
+		steps := suggestEmptySearchNextSteps("Foo", "", "", 0.71)
+		if len(steps) < 2 {
+			t.Fatalf("expected min_confidence drop + list fallback, got %d", len(steps))
+		}
+		if !strings.Contains(steps[0]["args"], `"min_confidence":0.0`) {
+			t.Errorf("first suggestion should drop min_confidence, got: %v", steps[0])
+		}
+	})
+	t.Run("list always present as universal fallback", func(t *testing.T) {
+		steps := suggestEmptySearchNextSteps("Foo*", "", "", 0.0)
+		hasList := false
+		for _, s := range steps {
+			if s["tool"] == "list" {
+				hasList = true
+			}
+		}
+		if !hasList {
+			t.Errorf("`list` should always be in next_steps, got: %v", steps)
+		}
+	})
+	t.Run("plain query suggests wildcard variant", func(t *testing.T) {
+		steps := suggestEmptySearchNextSteps("Foo", "", "", 0.0)
+		hasWildcard := false
+		for _, s := range steps {
+			if strings.Contains(s["args"], `"Foo*"`) {
+				hasWildcard = true
+			}
+		}
+		if !hasWildcard {
+			t.Errorf("plain query should get wildcard variant suggestion, got: %v", steps)
+		}
+	})
 }
 
 func TestHumanInt_FormatsThousandsSeparators(t *testing.T) {
