@@ -1567,8 +1567,27 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 		"symbol":  map[string]any{"id": sym.ID, "name": sym.Name, "kind": sym.Kind, "source": source},
 		"imports": imports,
 	}
+	// Context returns the symbol + its callees (the outbound direction). The
+	// natural next move is the inbound direction — find the symbol's callers
+	// before changing it. For non-callable kinds (Setting, Section), no
+	// suggestion is offered: there's nothing further to chase.
+	if next := suggestContextNextSteps(*sym); len(next) > 0 {
+		data["_meta"] = map[string]any{"next_steps": next}
+	}
 	responseJSON, _ := json.Marshal(data)
 	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(root, allPaths, responseJSON)), nil
+}
+
+func suggestContextNextSteps(sym db.Symbol) []map[string]string {
+	switch sym.Kind {
+	case "Function", "Method", "Class", "Interface", "Type", "Struct", "Trait":
+		return []map[string]string{
+			{"tool": "trace", "args": fmt.Sprintf(`{"name":"%s","direction":"inbound"}`, sym.Name),
+				"why": "find callers — context already showed callees, inbound is the missing half before a behaviour change"},
+		}
+	default:
+		return nil
+	}
 }
 
 func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

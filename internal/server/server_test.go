@@ -1262,6 +1262,80 @@ func TestHandleContext_WithSymbol(t *testing.T) {
 	}
 }
 
+// TestHandleContext_NextStepsForFunction pins that handleContext attaches
+// `_meta.next_steps` suggesting `trace direction=inbound` for callable kinds.
+// Context returns callees inline; the missing half is callers, and surfacing
+// the exact tool call removes a decision the agent would otherwise make from
+// scratch.
+func TestHandleContext_NextStepsForFunction(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	repoDir := t.TempDir()
+	writeGoFile(t, repoDir, "pkg/service.go", simpleGoSrc)
+
+	store.UpsertProject(db.Project{ID: repoDir, Path: repoDir, Name: "test", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "fn-sym", ProjectID: repoDir, FilePath: "pkg/service.go",
+			Name: "Compute", QualifiedName: "mypkg.Compute",
+			Kind: "Function", Language: "Go", StartByte: 14, EndByte: 60,
+			StartLine: 3, EndLine: 3},
+	})
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{"id": "fn-sym"}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleContext: err=%v isError=%v", err, result.IsError)
+	}
+	m := decode(t, result)
+	meta, _ := m["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatalf("expected _meta in response")
+	}
+	steps, _ := meta["next_steps"].([]any)
+	if len(steps) == 0 {
+		t.Fatalf("expected next_steps for Function kind, got none")
+	}
+	first, _ := steps[0].(map[string]any)
+	if first["tool"] != "trace" {
+		t.Errorf("first next_step tool = %v, want trace", first["tool"])
+	}
+	args, _ := first["args"].(string)
+	if !strings.Contains(args, `"direction":"inbound"`) {
+		t.Errorf("expected inbound direction in trace args, got %q", args)
+	}
+	if !strings.Contains(args, `"name":"Compute"`) {
+		t.Errorf("expected name=Compute in trace args, got %q", args)
+	}
+}
+
+// TestHandleContext_NoNextStepsForSetting pins the inverse: non-callable kinds
+// (Setting, Section) get no next_steps because there's nothing further to
+// chase — context already returned the value plus its imports.
+func TestHandleContext_NoNextStepsForSetting(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "config.yaml"), []byte("key: value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store.UpsertProject(db.Project{ID: repoDir, Path: repoDir, Name: "test", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "setting-sym", ProjectID: repoDir, FilePath: "config.yaml",
+			Name: "key", QualifiedName: "key",
+			Kind: "Setting", Language: "YAML", StartByte: 0, EndByte: 10,
+			StartLine: 1, EndLine: 1},
+	})
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{"id": "setting-sym"}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleContext: err=%v isError=%v", err, result.IsError)
+	}
+	m := decode(t, result)
+	if meta, ok := m["_meta"].(map[string]any); ok {
+		if _, hasNext := meta["next_steps"]; hasNext {
+			t.Errorf("Setting kind should not get next_steps suggestions, got: %v", meta["next_steps"])
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // handleChanges with git repo
 // ─────────────────────────────────────────────────────────────────────────────
