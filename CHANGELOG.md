@@ -172,19 +172,28 @@ minors.
   snapshot gate (#108).
 - HTTP `unknown-tool` test asserts `fetch` appears in the available list
   (caught the pre-existing drift) (#124).
-- Bench-regression CI gate **re-baselined and tightened**
-  (still advisory). Path: characterised dev-machine variance
-  (#134) → re-baselined on CI hardware (#158) → tightened
-  thresholds to 0.30 ns / 0.45 allocs against the CI-calibrated
-  baselines (#157, #158, #159). Previously the gate was dragged
-  below trust by dev-vs-CI hardware mismatch (HandleQuery_NodeScan
-  landed +192% on CI vs the dev baseline); re-baselining absorbed
-  all of that. A short-lived promotion to required (#160) was
-  reverted in #162 after a single outlier run hit
-  Index_Cold_NodeMonorepo +109% / Incremental_K8sOps +276% —
-  three green-run samples weren't enough to characterise CI
-  variance; promotion is gated on a real multi-run characterisation
-  on CI hardware, not just observation.
+- Bench-regression CI gate **calibrated and stabilised**
+  (still advisory; ready for re-promotion pending green-run
+  accumulation). Final shape:
+  - Re-baselined on CI hardware (#158) so deltas reflect
+    runner variance, not dev-vs-CI hardware mismatch.
+  - Thresholds 0.30 ns / 0.45 allocs against CI baselines (#157).
+  - `--exclude` flag (#174) skips two benchmark families that
+    don't fit a percentage-based gate: Index_Incremental_NoChange_GoProject
+    (21.5% within-run CV per #173, I/O-bound) and
+    Auth_TimingProfile/* (sub-100µs absolute ns shifts 2x across
+    CI runner-pool reallocations regardless of <1% within-run CV).
+    Excluded benches still appear in CI output with `[EXCLUDED]`
+    marker so a real regression remains visible.
+  - CI variance harness landed (#166) and run committed to
+    `testdata/bench/variance-ci-2026-05-09.md` (#173). 20 of 21
+    benchmarks at <10% CV on CI; the 1 outlier is in the
+    exclude list.
+  Failed-promotion path documented inline: short-lived
+  required-gate promotion (#160) reverted in #162 after a single
+  outlier (Cold_NodeMonorepo +109% / Incremental_K8sOps +276%);
+  three green runs weren't a sufficient sample. Re-promotion now
+  awaits accumulation, not characterisation.
 - Bench warmup pass on the noisy server-package benchmarks dropped
   per-bench coefficient of variation from 36% → ~3% (#141).
 
