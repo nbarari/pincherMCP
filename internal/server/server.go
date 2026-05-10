@@ -394,7 +394,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := strings.TrimPrefix(r.URL.Path, "/v1/")
 	if path == "health" {
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": s.version})
+		// auth_required surfaces whether --http-key is set. The dashboard
+		// reads it to decide whether to show a "no auth in place" notice
+		// (#203). Server-side enforcement is unchanged — this is purely
+		// metadata so clients can render appropriate UX.
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":            true,
+			"version":       s.version,
+			"auth_required": s.httpKey != "",
+		})
 		return
 	}
 	if path == "openapi.json" {

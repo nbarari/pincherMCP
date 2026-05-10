@@ -63,12 +63,15 @@ pincher web --json
 # {"url":"http://localhost:7777/v1/dashboard","base":"http://localhost:7777","pid":12345,"started_by":"manual"}
 ```
 
-The dashboard panels:
+The dashboard panels (5 tabs):
 
-- **Sessions** — live MCP stdio + HTTP token-savings totals (flushed from the `sessions` table every 10 s).
-- **Projects** — every indexed project with file / symbol / edge counts.
-- **Tools** — every MCP tool with its OpenAPI-shaped input schema, plus a "try it" form.
-- **Health** — schema version, index staleness, per-language extraction coverage (the same data `pincher doctor --json` returns).
+- **Overview** — current-session and all-time token-savings cards plus a sparkline of tokens-saved-per-session history.
+- **Projects** — every indexed project with file / symbol / edge counts. Filter by name, hide-empty toggle, click a card to expand its languages / hotspots / entry-points panel.
+- **Search** — symbol-search form (kind + project filters); results link to project context.
+- **ADRs** — Architecture Decision Records, browsable per project; add new entries inline.
+- **Sessions** — historical session table with running totals; pulls from the shared `sessions` table that both the MCP stdio process and the HTTP server flush to (so totals reflect every pincher process touching the same data dir).
+
+Header badges show health, last-refresh time, and an Auth button (only required when pincher was started with `--http-key`). The footer links to the OpenAPI spec at `/v1/openapi.json` — for an API explorer beyond the Search tab, that JSON is what you'd point a Postman / Bruno / Insomnia at.
 
 ## 4. Hit the REST API directly
 

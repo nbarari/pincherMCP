@@ -58,6 +58,17 @@ const dashboardTemplate = `<!DOCTYPE html>
   </div>
 </header>
 
+<div id="auth-notice" class="auth-notice" role="status">
+  <span class="auth-notice-icon">🔓</span>
+  <div class="auth-notice-body">
+    <strong>No HTTP auth in place.</strong>
+    Pincher is bound without <code>--http-key</code> — fine for localhost,
+    but bind a bearer token if you ever expose this beyond loopback.
+    <a href="https://github.com/kwad77/pincher/blob/master/docs/REFERENCE.md#http-rest-api" target="_blank" rel="noopener">Reference</a>.
+  </div>
+  <button class="auth-notice-dismiss" data-action="dismissAuthNotice" title="Dismiss">&#x2715;</button>
+</div>
+
 <nav class="tab-bar">
   <button class="tab-btn active" data-action="showTab" data-args='["overview"]'>Overview</button>
   <button class="tab-btn" data-action="showTab" data-args='["projects"]'>Projects</button>
@@ -343,6 +354,46 @@ main{max-width:1200px;margin:0 auto;padding:32px}
 .footer a{color:var(--accent);text-decoration:none}
 .toast{position:fixed;bottom:24px;right:24px;background:#161b22;border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:13px;color:var(--text);opacity:0;transition:opacity .3s;pointer-events:none;z-index:100}
 .toast.show{opacity:1}
+
+/* ── Auth notice banner (#203) ─────────────────────────────────────────── */
+/* Shown once per browser when /v1/health reports auth_required=false.
+   Dismissed via localStorage so it never re-shows on reload until the
+   user clears site data or starts pincher with --http-key. */
+.auth-notice{display:none;align-items:flex-start;gap:12px;background:rgba(240,136,62,.08);border-bottom:1px solid rgba(240,136,62,.25);padding:10px 32px;font-size:12px;color:var(--text)}
+.auth-notice.show{display:flex}
+.auth-notice-icon{font-size:14px;line-height:1.3;flex-shrink:0}
+.auth-notice-body{flex:1;line-height:1.5;color:var(--muted)}
+.auth-notice-body strong{color:var(--text);font-weight:600}
+.auth-notice-body code{background:var(--surface);padding:1px 5px;border-radius:3px;font-size:11px}
+.auth-notice-body a{color:var(--accent);text-decoration:none}
+.auth-notice-body a:hover{text-decoration:underline}
+.auth-notice-dismiss{background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:2px 6px;line-height:1;border-radius:3px;flex-shrink:0}
+.auth-notice-dismiss:hover{color:var(--text);background:rgba(255,255,255,.04)}
+
+/* ── Narrow viewport (#203) ────────────────────────────────────────────── */
+/* Phone widths: collapse the header (logo+title can wrap, badges go to a
+   second line), drop the page padding, force grids to single column,
+   stack the project toolbar so the search input doesn't get crushed. */
+@media (max-width:720px){
+  header{padding:14px 16px;flex-wrap:wrap}
+  header h1{font-size:18px}
+  header > div:last-child{margin-left:0;width:100%;justify-content:flex-start;flex-wrap:wrap}
+  .tab-bar{padding:0 8px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .tab-btn{padding:10px 12px;font-size:12px;flex-shrink:0}
+  main{padding:16px}
+  .grid-2,.grid-4{grid-template-columns:1fr !important}
+  .auth-notice{padding:10px 16px}
+  .proj-toolbar{flex-wrap:wrap}
+  .proj-toolbar .search-input{flex-basis:100%;min-width:0}
+  .search-bar{flex-wrap:wrap}
+  .search-bar input,.search-bar select,.search-bar button{flex-basis:100%}
+  .adr-toolbar{flex-direction:column;align-items:stretch}
+  .adr-select{max-width:none}
+  .adr-form{flex-direction:column}
+  .adr-key{min-width:0}
+  table{font-size:11px}
+  .footer{padding:16px;font-size:11px}
+}
 `
 
 // dashboardJSTemplate is the dashboard JavaScript, served from /v1/dashboard.js.
@@ -413,6 +464,12 @@ function updateAuthBadge() {
   const has = !!localStorage.getItem(AUTH_KEY_STORAGE);
   btn.textContent = has ? 'Auth ✓' : 'Auth';
   btn.classList.toggle('authed', has);
+}
+
+function dismissAuthNotice() {
+  const banner = document.getElementById('auth-notice');
+  if (banner) banner.classList.remove('show');
+  localStorage.setItem('pincher.auth-notice.dismissed', '1');
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -495,6 +552,17 @@ async function load() {
     const hb = document.getElementById('health-badge');
     hb.textContent = '● online'; hb.className = 'badge badge-green';
     document.getElementById('ver').textContent = h.version ? 'v'+h.version : '';
+    // Auth notice (#203): when the server reports auth_required=false,
+    // surface a small banner so users know this is an unauthenticated
+    // pincher (loopback-only by default — non-loopback binds without
+    // --http-key are refused server-side per #199, so this is purely
+    // informational, not a security issue, but still worth flagging).
+    // Dismissed banners stay dismissed via localStorage so the warning
+    // doesn't annoy on repeat loads of an intentional dev setup.
+    if (h.auth_required === false && !localStorage.getItem('pincher.auth-notice.dismissed')) {
+      const banner = document.getElementById('auth-notice');
+      if (banner) banner.classList.add('show');
+    }
   } else {
     document.getElementById('health-badge').textContent = '● offline';
     document.getElementById('health-badge').style.color = 'var(--red)';

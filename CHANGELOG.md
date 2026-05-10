@@ -8,6 +8,20 @@ minors.
 ## [Unreleased]
 
 ### Changed
+- **HTTP dashboard polish** (#203). `/v1/health` now exposes
+  `auth_required` so the dashboard can show a one-time amber banner
+  when pincher is running without `--http-key` (loopback default-deny
+  still applies server-side per #199 — this is purely informational
+  to flag "no auth in place" for users about to expose the API). The
+  banner is dismissed-to-localStorage so it doesn't nag on reload.
+  Added `@media (max-width:720px)` rules so the dashboard renders on
+  phones / narrow split-pane editors: header wraps, tab nav scrolls
+  horizontally, project + search toolbars stack, grids collapse to
+  single column. Tutorial corrected: the previously-claimed "Tools"
+  panel doesn't exist; the dashboard's actual five tabs (Overview /
+  Projects / Search / ADRs / Sessions) are now documented and the
+  OpenAPI spec at `/v1/openapi.json` is pointed to as the API
+  explorer surface.
 - **Coverage gate 84% → 85%** (#221). The remaining path-to-85%
   identified in #200's close (network-bound update paths at 0%
   coverage) closed by splitting `downloadAndSwap` into a tiny

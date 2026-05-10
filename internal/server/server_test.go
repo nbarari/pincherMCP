@@ -2246,6 +2246,37 @@ func TestServeHTTP_Health(t *testing.T) {
 	if resp["ok"] != true {
 		t.Errorf("health ok field: got %v, want true", resp["ok"])
 	}
+	// auth_required surfaces whether --http-key is set so the dashboard
+	// can decide whether to show the "no auth" notice (#203). Default
+	// for the test server is no key → auth_required must be false.
+	if got, ok := resp["auth_required"]; !ok {
+		t.Errorf("health response missing auth_required field; got %#v", resp)
+	} else if got != false {
+		t.Errorf("auth_required: got %v, want false (no http key set)", got)
+	}
+}
+
+// TestServeHTTP_Health_AuthRequiredWhenKeySet covers the other side of
+// the auth_required surface — when --http-key is set, the field must
+// flip to true so the dashboard knows the server is authenticated and
+// suppresses the "no auth" banner.
+func TestServeHTTP_Health_AuthRequiredWhenKeySet(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.SetHTTPKey("test-secret-token")
+
+	// Authenticated GET — the test server enforces the bearer token.
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated health: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if got := resp["auth_required"]; got != true {
+		t.Errorf("auth_required: got %v, want true (http key is set)", got)
+	}
 }
 
 func TestServeHTTP_OpenAPISpec(t *testing.T) {
