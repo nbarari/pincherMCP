@@ -443,8 +443,19 @@ func (p *parser) parseOneCondition() (condition, error) {
 		p.skip("WITH")
 		c.op = "STARTS WITH"
 		c.value = p.next().value
-	default:
+	case "!":
+		// Detect `!=` (two-char op the tokenizer doesn't fuse) so the hint
+		// catches the SQL-muscle-memory case before the generic fallback.
+		if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].value == "=" {
+			return c, fmt.Errorf("unsupported operator: != — use <> ('name <> \"foo\"')")
+		}
 		return c, fmt.Errorf("unsupported operator: %s", p.peek().value)
+	default:
+		op := p.peek().value
+		if hint, ok := operatorHint(op); ok {
+			return c, fmt.Errorf("unsupported operator: %s — %s", op, hint)
+		}
+		return c, fmt.Errorf("unsupported operator: %s", op)
 	}
 	return c, nil
 }
@@ -490,6 +501,26 @@ func (p *parser) parseReturn() ([]returnVar, error) {
 		}
 	}
 	return vars, nil
+}
+
+// operatorHint maps common-mistake operator tokens to a one-line nudge
+// toward the supported pinchQL spelling. Returns ("", false) when the
+// token doesn't have a known suggestion (the caller falls back to the
+// bare "unsupported operator" message).
+func operatorHint(op string) (string, bool) {
+	switch strings.ToUpper(op) {
+	case "LIKE":
+		return "use CONTAINS for substring (CONTAINS 'foo'), or STARTS WITH for prefix", true
+	case "REGEXP", "RLIKE":
+		return "use =~ ('name =~ \".*foo.*\"')", true
+	case "STARTS_WITH":
+		return "use STARTS WITH (two words, no underscore)", true
+	case "ENDS":
+		return "ENDS WITH is not supported; use =~ '.*foo$' instead", true
+	case "MATCHES":
+		return "use =~ for regex match", true
+	}
+	return "", false
 }
 
 func parseHops(s string) (min, max int) {
