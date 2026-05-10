@@ -71,6 +71,10 @@ func main() {
 		runProjectCLI(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "supervised" {
+		runSupervisedCLI(os.Args[2:])
+		return
+	}
 
 	var (
 		showVersion = flag.Bool("version", false, "Print version and exit")
@@ -250,6 +254,7 @@ func printHelpBanner(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pincher                        Run as MCP stdio server (Claude Code, etc.)")
+	fmt.Fprintln(out, "  pincher supervised             Run as MCP stdio server with auto-respawn (recommended for agent CLIs)")
 	fmt.Fprintln(out, "  pincher --http :PORT           Run as MCP stdio + HTTP REST server")
 	fmt.Fprintln(out, "  pincher index PATH             Index a repository from the CLI")
 	fmt.Fprintln(out, "  pincher doctor                 Diagnostic report (schema, staleness, failures)")

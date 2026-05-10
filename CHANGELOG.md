@@ -8,6 +8,24 @@ minors.
 ## [Unreleased]
 
 ### Added
+- **`pincher supervised` subcommand (S1).** Runs an inner pincher MCP
+  server with auto-respawn + initialize-replay, so the MCP client
+  (Claude Code, Codex, etc.) sees an unbroken stdio session even when
+  the inner exits — whether from `PINCHER_AUTO_RESTART_ON_DRIFT`
+  firing on a binary upgrade, an unrecoverable panic, or an OS-level
+  kill. Configure your MCP client to invoke `pincher supervised`
+  instead of `pincher`, and the manual `/mcp` reconnect dance
+  disappears for the disconnect cases pincher can detect itself.
+  Currently MVP scope: spawn/forward + replay captured initialize and
+  notifications/initialized on inner exit. Known limitation: requests
+  in flight during the ~100ms respawn window may be lost (no buffered
+  retry yet). Liveness probe + circuit breaker (S2) and a
+  supervisor-level health meta tool (S3) follow in subsequent PRs.
+  Implementation in `internal/supervisor/`. Five integration-style
+  tests using a fake-inner pipe pair cover forward, init capture +
+  replay, client-EOF clean shutdown, spawn-failure error, and
+  non-init-line non-replay.
+
 - **Bidirectional binary-version drift detection (F1).** The existing
   `index_drift` flag in `health` only catches one direction (newer
   server on older-indexed project — informational). The reverse case —
