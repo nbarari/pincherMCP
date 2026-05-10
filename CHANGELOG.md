@@ -7,6 +7,26 @@ minors.
 
 ## [Unreleased]
 
+## [v0.11.0] — 2026-05-10 — Supervisor: auto-respawn for agent CLIs
+
+Closes the multi-CLI / version-drift / manual-/mcp-reconnect concerns
+that surfaced during v0.10.0 dogfooding. Six PRs land together: one
+build-hygiene fix that exposed how often the symptom was being missed,
+one drift-refusal safety net for the once-per-upgrade window every user
+hits, and four supervisor slices (S1–S4) that wrap an inner pincher
+MCP server with auto-respawn + initialize-replay so disconnects
+self-heal without a human typing `/mcp`.
+
+The recommended way to invoke pincher from any agent CLI is now:
+
+```
+command = "<pincher binary path>"
+args = ["supervised"]
+```
+
+For Codex specifically: `pincher init --target=codex` writes the
+config block + a Codex-isolated `PINCHER_DATA_DIR` in one step.
+
 ### Added
 - **`pincher init --target=codex` (S4).** Closes the v0.11.0
   supervisor plan. Adds Codex (OpenAI's CLI) as an init target. Writes
@@ -1039,7 +1059,8 @@ Highlights:
 - `docs/index.html`: single-file GitHub Pages landing page.
 - CI coverage gate lowered to 83% to match reality.
 
-[Unreleased]: https://github.com/kwad77/pincher/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/kwad77/pincher/compare/v0.11.0...HEAD
+[v0.11.0]: https://github.com/kwad77/pincher/compare/v0.10.0...v0.11.0
 [v0.10.0]: https://github.com/kwad77/pincher/compare/v0.9.0...v0.10.0
 [v0.9.0]: https://github.com/kwad77/pincher/compare/v0.8.0...v0.9.0
 [v0.8.0]: https://github.com/kwad77/pincher/compare/v0.7.0...v0.8.0
