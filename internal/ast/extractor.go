@@ -900,6 +900,13 @@ type regexExtractor struct {
 	methodRE    *regexp.Regexp
 	importRE    *regexp.Regexp
 	enumRE      *regexp.Regexp
+	// varRE matches top-level value declarations (#261). Emitted as
+	// Variable symbols. Only consulted when funcRE didn't match the
+	// same line — otherwise an arrow `const x = () => …` would
+	// double-emit (one Function + one Variable for the same name).
+	// Optional: extractors that don't supply this skip the variable
+	// emission entirely.
+	varRE *regexp.Regexp
 }
 
 func (rx *regexExtractor) extract(source []byte, relPath, language string, opts extractOpts) *FileResult {
@@ -990,6 +997,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		if currentClass != "" && rx.methodRE != nil {
 			funcPattern = rx.methodRE
 		}
+		funcMatched := false
 		if funcPattern != nil {
 			if m := funcPattern.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
@@ -1023,6 +1031,43 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 						IsExported:    isExported(name, opts.exportedFn),
 						IsTest:        opts.isTest(name),
 						Complexity:    estimateComplexity(source[lineStart:min(endByte, len(source))]),
+					})
+					funcMatched = true
+				}
+			}
+		}
+
+		// Variable (#261). Only consulted when the line wasn't already
+		// claimed as a Function/Method — otherwise `const x = () =>
+		// …` would double-emit. The varRE typically anchors at line
+		// start with a `const|let|var` keyword, so block-internal
+		// statements (loop variables, function locals) also surface
+		// as Variables. That's the right call: the alternative
+		// (line-start-only) under-emits real top-level constants in
+		// indented modules, and the extra noise is filterable via
+		// `kind=Variable` searches.
+		if !funcMatched && rx.varRE != nil {
+			if m := rx.varRE.FindStringSubmatch(line); m != nil {
+				name := extractGroup(m, "name")
+				if name != "" {
+					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endLine := offsetToLine(lineOffsets, endByte)
+					sig := strings.TrimSpace(line)
+					if len(sig) > 200 {
+						sig = sig[:200]
+					}
+					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
+					exported := strings.Contains(line, "export")
+					result.Symbols = append(result.Symbols, ExtractedSymbol{
+						Name:          name,
+						QualifiedName: qn,
+						Kind:          "Variable",
+						StartByte:     lineStart,
+						EndByte:       endByte,
+						StartLine:     lineNum,
+						EndLine:       endLine,
+						Signature:     sig,
+						IsExported:    exported,
 					})
 				}
 			}
@@ -1138,10 +1183,37 @@ func extractPython(source []byte, relPath string) *FileResult {
 	return res
 }
 
+// JS function-name regex (#259 + #260 fixes).
+//
+//   - #259: the arrow-function branch must require `=>` after the
+//     parameter list — without it, expressions like
+//     `const x = (a.b || c).method(...)` falsely match as Function
+//     symbols (the regex sees `const NAME = (`). The
+//     `(?:[^()]|\([^)]*\))*` span tolerates one level of nested
+//     parens in the parameter list, which covers `(a = foo())` and
+//     most real arrow signatures.
+//   - #260: object-literal methods `name: function(...) {...}` and
+//     `name: async function(...) {...}` and `name: (args) => {...}`
+//     each emit a Function symbol. Idiomatic in LuCI views, Vue 2
+//     `methods:` blocks, AMD modules, jQuery plugin tables, JSON-RPC
+//     handler dispatch — the highest-volume miss in regex-era JS.
+//
+// Trade-off: regex-only fix. Two levels deep paren nesting in
+// parameter defaults still falls through; ES6 shorthand methods
+// (`name(args) {…}` inside an object literal) are deliberately NOT
+// matched because the pattern collides with arbitrary call
+// expressions. The full fix is a JS AST extractor (#266); these
+// patches close 80% of the gap until that lands.
 var jsRE = &regexExtractor{
 	funcRE: regexp.MustCompile(
 		`(?m)(?:^|\s)(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)|` +
-			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name2>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(`),
+			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name2>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>|` +
+			`(?m)^\s*(?P<name3>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(|` +
+			`(?m)^\s*(?P<name4>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>`),
+	// #261: top-level const/let/var emit Variable symbols. Caught
+	// only when funcRE didn't already claim the line as Function —
+	// see the !funcMatched gate in regexExtractor.extract.
+	varRE: regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=`),
 	classRE: regexp.MustCompile(`(?m)^(?:export\s+)?(?:default\s+)?class\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)(?:\s+extends\s+(?P<parent>[A-Za-z_$][A-Za-z0-9_$]*))?`),
 	importRE: regexp.MustCompile(`(?m)^import\s+.*?from\s+['"](?P<path>[^'"]+)['"]`),
 }
@@ -1161,10 +1233,22 @@ func extractJavaScript(source []byte, relPath string) *FileResult {
 	return jsRE.extract(source, relPath, "JavaScript", opts)
 }
 
+// TS shares the JS arrow-function bug (#259) and the
+// object-literal-method gap (#260); same patches applied here. TS
+// arrow signatures may also carry a return-type annotation before
+// `=>` (e.g. `(a, b): string => …`); the optional `:\s*TYPE` group
+// covers simple type names + generics + array/index forms. Function-
+// typed returns (`(): (x: number) => number => …`) still fall
+// through silently.
 var tsRE = &regexExtractor{
 	funcRE: regexp.MustCompile(
 		`(?m)(?:^|\s)(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)|` +
-			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(`),
+			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*(?::\s*[\w<>\[\]\s,|&'"]+\s*)?=>|` +
+			`(?m)^\s*(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(|` +
+			`(?m)^\s*(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*(?::\s*[\w<>\[\]\s,|&'"]+\s*)?=>`),
+	// #261: top-level const/let/var emit Variable symbols (TS parity
+	// with JS).
+	varRE: regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=`),
 	classRE:     regexp.MustCompile(`(?m)^(?:export\s+)?(?:abstract\s+)?class\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)(?:\s+extends\s+(?P<parent>[A-Za-z_$][A-Za-z0-9_$]*))?`),
 	interfaceRE: regexp.MustCompile(`(?m)^(?:export\s+)?interface\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)`),
 	enumRE:      regexp.MustCompile(`(?m)^(?:export\s+)?(?:const\s+)?enum\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)`),
