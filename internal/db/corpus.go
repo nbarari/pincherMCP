@@ -20,7 +20,7 @@ const (
 //  1. Document kind always routes to docs (`fetch` tool stores remote URL
 //     content with a `Document` kind regardless of detected language).
 //  2. Markdown language → docs.
-//  3. YAML / JSON / HCL / TOML → config.
+//  3. YAML / JSON / HCL / TOML / XML → config.
 //  4. Everything else (Go, Python, JS, TS, Rust, Java, Ruby, PHP, C, C++,
 //     C#, Kotlin, Swift, Bash, JSX, TSX) → code.
 //
@@ -42,7 +42,7 @@ func ClassifyCorpus(language, kind string) string {
 	switch language {
 	case "Markdown", "HTML":
 		return CorpusDocs
-	case "YAML", "JSON", "HCL", "TOML":
+	case "YAML", "JSON", "HCL", "TOML", "XML":
 		return CorpusConfig
 	default:
 		return CorpusCode

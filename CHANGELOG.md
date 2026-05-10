@@ -8,6 +8,28 @@ minors.
 ## [Unreleased]
 
 ### Added
+- **XML extractor** (#101). Pure-Go via stdlib `encoding/xml`, confidence
+  1.0. Emits one `Setting` symbol per element with a hierarchical
+  dotted-path qualified name (`config.database.host`); attributes become
+  `parent_path@attr` Settings (`config.resource@id`). Multi-instance
+  same-name siblings disambiguate via positional suffix (`<usb>` × 4 →
+  `usb.0`, `usb.1`, `usb.2`, `usb.3`) — mirrors the #88 HCL fix and
+  prevents the QN-collision sanity heuristic from firing on real Spring
+  beans / web.xml / .csproj inputs. Namespaced elements strip the prefix
+  in QN (`<android:intent-filter>` → `intent-filter`); the original
+  source text survives in `Signature` so `symbol get` returns the
+  literal element. Templated XML is permissively parsed — partial
+  output beats no output. Routes to the `config` corpus alongside
+  YAML/JSON/HCL/TOML.
+- **Extension scope**: `.xml`, `.xsd`, `.xsl`, `.xslt`, `.config` (the
+  .NET app/web config). Explicitly NOT `.html` (#100 owns that) and NOT
+  `.svg` (the structural attribute space — `d=`, `viewBox=`, transform
+  matrices — is noise from a code-search standpoint).
+- Schema v14 — drop + recreate the per-corpus FTS5 sync triggers with
+  XML in the config-include / code-exclude predicates so existing v13
+  DBs route XML symbols to the config corpus correctly. The vtabs
+  themselves are unchanged. Fresh installs hit the updated baseline
+  schema directly.
 - **HTML extractor** (#100). Pure-Go via `golang.org/x/net/html`,
   confidence 1.0. Emits one `Section` symbol per heading (h1–h6) with
   hierarchical dotted-path qualified names matching the Markdown
