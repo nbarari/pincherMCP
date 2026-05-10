@@ -7,10 +7,12 @@
 [![CI](https://github.com/kwad77/pincher/actions/workflows/ci.yml/badge.svg)](https://github.com/kwad77/pincher/actions/workflows/ci.yml)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-85%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-83%25-22c55e.svg)](docs/REFERENCE.md#test-coverage)
 
 **Codebase intelligence server for LLM agents.**
 Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
+
+[What it does](#what-it-does) · [Quick Start](#quick-start) · [Self-healing connections](#self-healing-connections) · [Why it's fast](#why-its-fast) · [Token savings](#token-savings) · [Staying current](#staying-current) · [Roadmap](#roadmap) · [Limitations](#known-limitations)
 
 </div>
 
@@ -18,7 +20,7 @@ Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
 
 ## What it does
 
-pincherMCP is a single Go binary that indexes a codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through **16 MCP tools** or an HTTP REST API.
+pincherMCP is a single Go binary that indexes a codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through **18 MCP tools** or an HTTP REST API.
 
 Every tool response includes a `_meta` envelope with real BPE token counts (cl100k_base — exact for Claude and OpenAI families, approximate for Gemini/Llama), latency, and cost avoided:
 
@@ -52,14 +54,17 @@ go install github.com/kwad77/pincher/cmd/pinch@latest      # if Go 1.25+ on PATH
 #   git clone https://github.com/kwad77/pincher && cd pincher
 #   go build -o pincher ./cmd/pinch/      # or pincher.exe on Windows
 
-# 2. Drop the policy block into your project's CLAUDE.md (one-time)
-pincher init                             # writes ./CLAUDE.md
-pincher init --global                    # writes ~/.claude/CLAUDE.md
+# 2. Drop the usage policy into your client's config (one-time, idempotent)
+pincher init                             # ./CLAUDE.md (Claude Code, current dir)
+pincher init --global                    # ~/.claude/CLAUDE.md (Claude Code, all projects)
+pincher init --target=cursor             # .cursor/rules/pincher.mdc
+pincher init --target=codex              # ~/.codex/config.toml (writes MCP server block)
+pincher init --target=detect             # auto-detect from marker files in cwd
 
 # 3. Index your project
 pincher index /path/to/your/project
 
-# 4. Point your MCP client at the binary (Claude Code / Cursor / Zed examples below)
+# 4. Point your MCP client at the binary (Claude Code / Cursor / Codex / Zed below)
 #    Or open the dashboard: pincher web
 ```
 
@@ -73,10 +78,12 @@ pincher speaks the standard JSON-RPC 2.0 MCP protocol over stdio. The `command` 
 ```json
 {
   "mcpServers": {
-    "pincher": { "type": "stdio", "command": "/path/to/pincher" }
+    "pincher": { "type": "stdio", "command": "/path/to/pincher", "args": ["supervised"] }
   }
 }
 ```
+
+`args: ["supervised"]` is the v0.11.0 recommended invocation — see [Self-healing connections](#self-healing-connections) below. Drop the `args` to run pincher bare.
 </details>
 
 <details>
@@ -85,10 +92,25 @@ pincher speaks the standard JSON-RPC 2.0 MCP protocol over stdio. The `command` 
 ```json
 {
   "mcpServers": {
-    "pincher": { "command": "/path/to/pincher" }
+    "pincher": { "command": "/path/to/pincher", "args": ["supervised"] }
   }
 }
 ```
+</details>
+
+<details>
+<summary><b>Codex</b> — <code>~/.codex/config.toml</code> (run <code>pincher init --target=codex</code>)</summary>
+
+```toml
+[mcp_servers.pincher]
+command = "/path/to/pincher"
+args = ["supervised"]
+
+[mcp_servers.pincher.env]
+PINCHER_DATA_DIR = "/codex-isolated/data/dir"
+```
+
+`pincher init --target=codex` writes this block (with a Codex-isolated `PINCHER_DATA_DIR`) wrapped in idempotent markers, so re-running it never duplicates.
 </details>
 
 <details>
@@ -98,14 +120,14 @@ pincher speaks the standard JSON-RPC 2.0 MCP protocol over stdio. The `command` 
 {
   "context_servers": {
     "pincher": {
-      "command": { "path": "/path/to/pincher", "args": [] }
+      "command": { "path": "/path/to/pincher", "args": ["supervised"] }
     }
   }
 }
 ```
 </details>
 
-Continue, Windsurf, and any MCP-compatible client follow the same pattern. For editors without MCP, use the [HTTP REST API](docs/REFERENCE.md#http-rest-api).
+Continue, Windsurf, Aider, and any MCP-compatible client follow the same pattern. For editors without MCP, use the [HTTP REST API](docs/REFERENCE.md#http-rest-api).
 
 For managed installs (Homebrew, systemd, launchd, Windows service, Docker), see [`packaging/README.md`](packaging/README.md).
 
@@ -116,6 +138,36 @@ End-to-end walkthroughs (~10 min each):
 - **[Claude Code](docs/tutorials/claude-code.md)** — install → index → `pincher init` → wire MCP → first query.
 - **[Cursor](docs/tutorials/cursor.md)** — same flow with `pincher init --target=cursor` and Cursor's `.mdc` rules format.
 - **[HTTP dashboard](docs/tutorials/http-dashboard.md)** — `pincher --http`, dashboard panels, REST API with `curl`, reverse-proxy notes.
+
+---
+
+## Self-healing connections
+
+Binary upgrades (and the rare panic) used to require a manual `/mcp` reconnect. v0.11.0 closes that loop with a thin supervisor process you put in front of the inner pincher MCP server:
+
+```
+   MCP client                  Supervisor                      Inner pincher
+   (Claude / Codex / Cursor)   (long-lived stdio bridge)       (the actual MCP server)
+
+         stdio  ◄────────────►  captures `initialize` ◄─────►  exits on:
+                                replays it on respawn           • binary upgrade (PINCHER_AUTO_RESTART_ON_DRIFT=1)
+                                liveness probe + circuit        • probe timeout (process hung)
+                                breaker on flaps                • crash / panic / OS kill
+```
+
+**Three pieces work together:**
+
+- **`pincher supervised`** — wraps an inner pincher with auto-respawn + initialize-replay so the client's stdio session looks unbroken across inner exits. Pass it as `args: ["supervised"]` in your MCP config (see Client configuration above).
+- **`PINCHER_AUTO_RESTART_ON_DRIFT=1`** — opt-in env var that makes the inner exit cleanly when it detects a freshly-built binary on disk (a `go build` while the server is running). Combined with the supervisor, this hot-swaps you onto the new binary on the next tool call without a `/mcp` dance. `pincher init --target=codex` sets this for you.
+- **`pincher health-check`** — non-interactive liveness probe (cron / launchd / k8s readinessProbe). Spawns a short-lived MCP client, completes the handshake, runs `tools/list`, exits 0 on success.
+
+```bash
+pincher health-check                              # probe self via os.Executable
+pincher health-check --supervised                 # probe through `pincher supervised`
+pincher health-check --binary /path/to/pincher    # probe a specific binary
+```
+
+The supervisor also exposes a `pincher.supervisor.status` MCP tool that returns `{alive, uptime_sec, restarts, probes_sent, probes_answered, probes_timed_out, last_restart_reason}` — useful when an agent wants to know why pincher cycled mid-session.
 
 ---
 
@@ -138,7 +190,7 @@ End-to-end walkthroughs (~10 min each):
 
 **Reader pool.** SQLite WAL gives concurrent readers; pincher uses a separate read-only connection pool (`--db-readers`, capped at 32) so a busy MCP session can't block the writer.
 
-Measured on this codebase (13 files, 618 symbols, 5,785 edges): cold index 190 ms, single-hop pinchQL 2 ms, BFS depth 3 <5 ms, FTS5 search 1 ms. Full benchmark + methodology in [REFERENCE.md → Performance](docs/REFERENCE.md#performance).
+Measured on this codebase (221 files, 3,769 symbols, 5,920 edges): cold index ~900 ms, single-hop pinchQL 2 ms, BFS depth 3 <5 ms, FTS5 search 1 ms. Re-index after small edits (incremental, content-hash skip) is typically <50 ms. Full benchmark + methodology in [REFERENCE.md → Performance](docs/REFERENCE.md#performance).
 
 ---
 
@@ -192,13 +244,10 @@ Other CLI subcommands ([`pincher index`](docs/REFERENCE.md#pincher-index), [`pin
 
 | Release | Theme | Status |
 |---|---|---|
-| **v0.2** | Index quality at scale (Bash, HCL, Markdown, Jinja2 extractors; per-corpus FTS5 split; pinned-corpus snapshot tests) | ✅ shipped |
-| **v0.3** | Trust + observability (security audit, `pincher doctor`, dashboard CSP tightening, FTS5 escape hatch, per-symbol confidence) | ✅ shipped |
-| **v0.4** | Capture-what-shipped (schema v11, four new CLI subcommands `update`/`web`/`init`/`stats`, HCL REFERENCES edges, plugin SessionStart hook, README split, Terraform pinned corpus) | ✅ shipped |
-| **v0.5** | Trustworthy single-binary release (`go install` fix, default-deny remote HTTP, legacy `symbols_fts` removed, case-insensitive `project_id` fix, release artifact pipeline) | ✅ shipped |
-| **v0.6** | Multi-client adoption (`pincher init` for Cursor / Windsurf / Aider / Continue, three end-to-end tutorials, `pincher project rm` CLI, coverage gate restored to 84%) | ✅ shipped |
-| **v0.7** | Language + polish (HTML / XML extractors, stats reconciliation, pinchQL rename done [#206], bench gate decided advisory [#207]) | 🚧 in flight |
-| **v1.0** | Freeze + announce (tool schemas frozen, schema attestation, migration guide, public launch) | planned |
+| **v0.2 → v0.10** | Index quality at scale, trust + observability, multi-client `pincher init`, HTML/XML extractors, schema migrations through v18, single-binary release pipeline. Per-version notes in [`CHANGELOG.md`](CHANGELOG.md). | ✅ shipped |
+| **v0.11.0** | **Self-healing MCP connections.** `pincher supervised` (auto-respawn + initialize-replay), `pincher init --target=codex`, `pincher health-check` CLI, `pincher.supervisor.status` tool, bidirectional binary-version drift detection, single-source build versioning with CI assertion gate. | ✅ shipped |
+| **v0.11.1** | Patch — fix in-flight response loss during supervised respawn ([#371](https://github.com/kwad77/pincher/issues/371)). | 🚧 in flight |
+| **v1.0** | Tool schemas frozen, schema attestation, migration guide, public launch. | planned |
 
 Live milestone burndown: <https://github.com/kwad77/pincher/milestones>. Full punch lists per release: [#193](https://github.com/kwad77/pincher/issues/193).
 
@@ -209,7 +258,7 @@ Live milestone burndown: <https://github.com/kwad77/pincher/milestones>. Full pu
 - **Sequence-rename ID instability in YAML / JSON arrays.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0` → `tasks.1`). Move detection catches some cases but not deterministically. Decided as won't-fix in v0.7.0 ([#205](https://github.com/kwad77/pincher/issues/205)) — the blast radius is mostly Ansible/k8s manifests which are searched via `corpus=config` BM25 anyway, where qualified-name churn is invisible. For long-lived stored references, prefer searching by name over storing the id. Full rationale in [REFERENCE.md → Known limitations](docs/REFERENCE.md#known-limitations).
 - **Single-user SQLite.** Cross-process indexing is safe (filesystem lockfile). Team / enterprise shared indexes need a server mode — explicitly out of v1.0 scope.
 - **~7 languages without extractors.** Scala, Lua, Zig, Elixir, Haskell, Dart, R are detected as source but emit zero symbols. Adding any of them = implement one Go interface.
-- **HTML / XML extractors not yet shipped.** Markup-heavy projects (component libraries, .NET csproj, Maven pom.xml) currently fall through to no extraction. Both planned for [v0.7](https://github.com/kwad77/pincher/milestone/5) ([#100](https://github.com/kwad77/pincher/issues/100), [#101](https://github.com/kwad77/pincher/issues/101)).
+- **In-flight response loss during supervised binary upgrade ([#371](https://github.com/kwad77/pincher/issues/371)).** Affects v0.11.0 specifically. The first non-`health` tool call that fires on the freshly-upgraded binary loses its response; client reports `MCP error -32000`. Workaround: run bare (`args: []`) and accept manual `/mcp` per upgrade. Fix lands in v0.11.1.
 
 Full known-limitations list, with severity and tracking issue: [REFERENCE.md → Known Limitations](docs/REFERENCE.md#known-limitations).
 
