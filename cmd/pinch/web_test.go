@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -383,6 +384,52 @@ func TestNoStdio_RequiresHTTP(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("--no-stdio requires --http")) {
 		t.Errorf("expected diagnostic 'requires --http'; got:\n%s", out)
+	}
+}
+
+// TestNoStdio_RejectedBeforeDBOpen asserts the fix's invariant: flag
+// validation runs BEFORE db.Open, so an invalid flag combination never
+// touches the data directory. A pincher.db left behind in a temp
+// dir would prove the validation moved too late and the test-isolation
+// footgun returned.
+//
+// Single-case table for forward compatibility — additional pre-DB-open
+// validations should drop in here as new entries.
+func TestNoStdio_RejectedBeforeDBOpen(t *testing.T) {
+	bin := buildPincherBinary(t)
+	cases := []struct {
+		name      string
+		args      []string
+		wantInErr string
+	}{
+		{
+			name:      "no-stdio without http",
+			args:      []string{"--no-stdio"},
+			wantInErr: "--no-stdio requires --http",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			args := append([]string{}, tc.args...)
+			args = append(args, "--data-dir", dataDir)
+			cmd := exec.Command(bin, args...)
+			cmd.Env = pincherCoverEnv()
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected non-zero exit; got success.\n%s", out)
+			}
+			if !bytes.Contains(out, []byte(tc.wantInErr)) {
+				t.Errorf("expected %q in stderr; got:\n%s", tc.wantInErr, out)
+			}
+			// The fix's load-bearing assertion — db.Open never ran.
+			dbPath := filepath.Join(dataDir, "pincher.db")
+			if _, err := os.Stat(dbPath); err == nil {
+				t.Errorf("pincher.db was created at %s — flag validation must run before db.Open", dbPath)
+			} else if !os.IsNotExist(err) {
+				t.Errorf("unexpected stat error: %v", err)
+			}
+		})
 	}
 }
 

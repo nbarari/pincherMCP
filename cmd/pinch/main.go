@@ -119,6 +119,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Validate flag combinations BEFORE touching the database. A user
+	// who runs `pincher --no-stdio` (forgetting --http) used to see a
+	// confusing "DB error" if their DB happened to be at the wrong
+	// schema; the actual problem was always the missing --http flag.
+	// Failing fast on bad flags is independent of any DB state.
+	if *noStdio && *httpAddr == "" && os.Getenv("PINCHER_HTTP_ADDR") == "" {
+		fmt.Fprintln(os.Stderr, "pincher: --no-stdio requires --http (otherwise the process has nothing to do)")
+		os.Exit(1)
+	}
+
 	if !*verbose {
 		log.SetOutput(os.Stderr)
 		log.SetFlags(0)
@@ -205,13 +215,10 @@ func main() {
 
 	// Run MCP server over stdio — unless --no-stdio is set, in which case
 	// we block on context cancellation so the HTTP server (started above)
-	// keeps serving. --no-stdio without --http is nonsensical (the process
-	// has nothing to do); refuse it loudly rather than silently idling.
+	// keeps serving. The --no-stdio without --http combination is rejected
+	// earlier in startup, before DB open, so the binary fails fast with a
+	// clear message regardless of DB state.
 	if *noStdio {
-		if *httpAddr == "" {
-			fmt.Fprintln(os.Stderr, "pincher: --no-stdio requires --http (otherwise the process has nothing to do)")
-			os.Exit(1)
-		}
 		<-ctx.Done()
 		return
 	}
