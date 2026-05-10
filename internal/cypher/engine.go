@@ -1028,15 +1028,15 @@ func buildResult(allRows []map[string]any, q *queryAST) (*Result, error) {
 		projected = append(projected, pr)
 	}
 
-	// ORDER BY
+	// ORDER BY. #313: when both values are numeric, compare them
+	// numerically. The pre-fix path always stringified via
+	// fmt.Sprint, which sorted "1004" before "126" (lex). Numeric
+	// columns (start_line, end_line, complexity) are the typical
+	// ORDER BY target so the silent wrongness was easy to hit.
 	if q.orderBy != "" {
+		desc := q.orderDir == "DESC"
 		sort.SliceStable(projected, func(i, j int) bool {
-			ai := fmt.Sprint(projected[i][q.orderBy])
-			bi := fmt.Sprint(projected[j][q.orderBy])
-			if q.orderDir == "DESC" {
-				return ai > bi
-			}
-			return ai < bi
+			return cypherLessThan(projected[i][q.orderBy], projected[j][q.orderBy], desc)
 		})
 	}
 
@@ -1055,6 +1055,54 @@ func buildResult(allRows []map[string]any, q *queryAST) (*Result, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Scan helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// cypherLessThan compares two values for ORDER BY. Numeric on both
+// sides → numeric compare; otherwise stringify and compare
+// lexicographically. `desc` flips the result. Mixed-type rows fall
+// to the string path (rare in practice — the same column is
+// usually all-numeric or all-string).
+func cypherLessThan(a, b any, desc bool) bool {
+	af, aok := toFloatForOrderBy(a)
+	bf, bok := toFloatForOrderBy(b)
+	if aok && bok {
+		if desc {
+			return af > bf
+		}
+		return af < bf
+	}
+	as := fmt.Sprint(a)
+	bs := fmt.Sprint(b)
+	if desc {
+		return as > bs
+	}
+	return as < bs
+}
+
+// toFloatForOrderBy returns (n, true) when v is one of the integer
+// or floating-point shapes pincher's symRow / map projections might
+// carry. Returns (_, false) for strings, nil, or anything else so
+// the caller falls back to string compare.
+func toFloatForOrderBy(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
+}
 
 func scanSymRow(rows *sql.Rows) (*symRow, error) {
 	var n symRow
