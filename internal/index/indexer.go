@@ -115,6 +115,7 @@ type IndexResult struct {
 	Edges      int
 	Skipped    int // files skipped (unchanged hash)
 	Blocked    int // files refused by ast.ShouldSkip (lockfiles, minified bundles, source maps)
+	Deleted    int // files removed from disk since last index — symbols GC'd this run (#326)
 	DurationMS int64
 }
 
@@ -216,7 +217,8 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		pendingCalls   []ast.ExtractedEdge // deferred Go CALLS: resolved globally after full pass
 		pendingReads   []ast.ExtractedEdge // deferred Go READS (#247 #3): resolved globally; only Variable targets persist
 		bufMu          sync.Mutex
-		lastStatsFlush time.Time // throttle for in-flight project counts; guarded by bufMu
+		lastStatsFlush time.Time           // throttle for in-flight project counts; guarded by bufMu
+		seenFiles      = map[string]bool{} // #326: relPaths the walker yielded this run; tail-pass GC's symbols for files NOT in this set. Populated in the main (single-threaded) loop so no mutex.
 	)
 
 	// Process files
@@ -274,6 +276,10 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		hash := fmt.Sprintf("%x", xxh3.Hash(content))
 		relPath, _ := filepath.Rel(absPath, path)
 		relPath = filepath.ToSlash(relPath)
+		// #326: Mark this file as walker-yielded BEFORE the hash skip so the
+		// tail-pass GC doesn't delete unchanged files. Populated single-threaded
+		// here (not in the per-file goroutine) so no mutex needed.
+		seenFiles[relPath] = true
 
 		if !force {
 			stored := idx.store.GetFileHash(projectID, relPath)
@@ -487,6 +493,32 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		totalEdges += n
 	}
 
+	// #326: Tail-pass GC for files removed from disk. The walker yields only
+	// files that still exist; per-file goroutines call DeleteSymbolsForFile
+	// only on files they visit. Without this pass, deleting a file from disk
+	// leaves its symbols + file_hash row behind forever (paperclip in the
+	// dogfood DB had 4820 orphan symbols and 0 files). Cheap: one SELECT
+	// plus N small DELETEs at index tail; only fires when a file actually
+	// disappeared.
+	var totalDeleted int
+	if storedFiles, listErr := idx.store.ListFilesForProject(projectID); listErr == nil {
+		for _, stored := range storedFiles {
+			if seenFiles[stored] {
+				continue
+			}
+			if err := idx.store.DeleteSymbolsForFile(projectID, stored); err != nil {
+				slog.Warn("pincher.index.gc.delete_symbols.err", "err", err, "file", stored)
+				continue
+			}
+			if err := idx.store.DeleteFileHash(projectID, stored); err != nil {
+				slog.Warn("pincher.index.gc.delete_hash.err", "err", err, "file", stored)
+			}
+			totalDeleted++
+		}
+	} else {
+		slog.Warn("pincher.index.gc.list.err", "err", listErr)
+	}
+
 	duration := time.Since(start)
 
 	// Update project stats — use DB totals so incremental runs reflect the full graph.
@@ -537,6 +569,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		Edges:      totalEdges,
 		Skipped:    totalSkipped,
 		Blocked:    totalBlocked,
+		Deleted:    totalDeleted,
 		DurationMS: duration.Milliseconds(),
 	}, nil
 }

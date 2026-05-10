@@ -1783,13 +1783,14 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 
 	data := map[string]any{
-		"project":    result.Project,
-		"path":       result.Path,
-		"files":      result.Files,
-		"symbols":    result.Symbols,
-		"edges":      result.Edges,
-		"skipped":    result.Skipped,
-		"blocked":    result.Blocked,
+		"project":     result.Project,
+		"path":        result.Path,
+		"files":       result.Files,
+		"symbols":     result.Symbols,
+		"edges":       result.Edges,
+		"skipped":     result.Skipped,
+		"blocked":     result.Blocked,
+		"deleted":     result.Deleted, // #326: files removed from disk since last run, GC'd this index
 		"duration_ms": result.DurationMS,
 	}
 	// When the index produces zero symbols, surface *why* in _meta so the

@@ -425,6 +425,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"GetADR":                  true,
 	"ListADRs":                true,
 	"GetFileHash":             true,
+	"ListFilesForProject":     true,
 	"ListExtractionFailures":         true,
 	"ExtractionFailureCountsByReason": true,
 	"ListSlowQueries":         true,

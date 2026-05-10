@@ -2860,6 +2860,28 @@ func (s *Store) DeleteFileHash(projectID, path string) error {
 	return err
 }
 
+// ListFilesForProject returns every file path currently recorded in the
+// `files` table for projectID. Used by the indexer's tail-pass GC (#326)
+// to find symbols whose source file was deleted from disk between runs:
+// the walker no longer yields them, so the per-file delete-before-extract
+// path never fires.
+func (s *Store) ListFilesForProject(projectID string) ([]string, error) {
+	rows, err := s.ro.Query(`SELECT path FROM files WHERE project_id=?`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ADR operations
 // ─────────────────────────────────────────────────────────────────────────────
