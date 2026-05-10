@@ -53,6 +53,19 @@ func (s *Server) maybeAutoRestart(binaryReplaced, driftDetected bool) {
 	})
 }
 
+// checkAutoRestart is the per-tool-call entry point for the #352
+// self-restart-on-drift path. Called from jsonResultWithMeta /
+// textResultWithMeta so every tool response — not just `health` — is
+// a restart trigger. When PINCHER_AUTO_RESTART_ON_DRIFT is unset,
+// maybeAutoRestart returns at the first os.Getenv check; that's the
+// only steady-state cost (one syscall, sub-µs). When the env var is
+// set, this also stat's the binary path. driftDetected is reported
+// false here because we don't have the index_drift signal outside of
+// health; binary replacement alone is the load-bearing condition.
+func (s *Server) checkAutoRestart() {
+	s.maybeAutoRestart(s.binaryReplacedSinceStart(), false)
+}
+
 // binaryReplacedSinceStart reports whether the on-disk binary's mtime
 // has advanced past s.binaryStartMTime. Returns false when the binary
 // path or start mtime weren't captured (e.g. embedded test runs), or

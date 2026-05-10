@@ -4967,9 +4967,18 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	}
 
 	out, _ := json.MarshalIndent(data, "", "  ")
-	return &mcp.CallToolResult{
+	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
 	}
+
+	// #364: every tool response is a restart trigger. When
+	// PINCHER_AUTO_RESTART_ON_DRIFT=1 is set AND the on-disk binary has
+	// been replaced since startup, exit cleanly so the next tool call
+	// hits a fresh process. sync.Once gates the exit so concurrent
+	// in-flight calls don't race. When the env var is unset (default),
+	// this is a single os.Getenv check — sub-µs.
+	s.checkAutoRestart()
+	return result
 }
 
 // textResultWithMeta performs the same session accounting as jsonResultWithMeta
@@ -4992,9 +5001,12 @@ func (s *Server) textResultWithMeta(text string, start time.Time, tool string, a
 
 	// Append a compact meta line so callers still see accounting info.
 	full := text + fmt.Sprintf("\n  tokens used %-6d  latency %d ms  cost avoided $%.4f\n", tokensUsed, latency, costAvoided)
-	return &mcp.CallToolResult{
+	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: full}},
 	}
+	// #364: same restart hook as jsonResultWithMeta — see comment there.
+	s.checkAutoRestart()
+	return result
 }
 
 // humanInt formats an int with thousands separators ("14200" -> "14,200").

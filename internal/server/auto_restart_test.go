@@ -116,3 +116,84 @@ func TestBinaryReplacedSinceStart_CaptureFailed(t *testing.T) {
 		t.Error("expected false when capture failed (empty path)")
 	}
 }
+
+// #364: checkAutoRestart fires when called from non-health paths
+// (jsonResultWithMeta / textResultWithMeta), not just from handleHealth.
+func TestCheckAutoRestart_TriggersOnReplacedBinary(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	t.Setenv(autoRestartEnvVar, "1")
+
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "pincher.exe")
+	if err := os.WriteFile(fakeBin, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(fakeBin)
+	srv.binaryPath = fakeBin
+	srv.binaryStartMTime = info.ModTime()
+
+	// Move on-disk mtime forward to simulate a rebuild.
+	future := info.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(fakeBin, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	var exited int32
+	srv.exitFn = func(code int) { atomic.StoreInt32(&exited, 1) }
+
+	srv.checkAutoRestart()
+
+	if atomic.LoadInt32(&exited) != 1 {
+		t.Error("checkAutoRestart() did not fire exit; expected restart on replaced binary")
+	}
+}
+
+func TestCheckAutoRestart_NoOpWhenEnvUnset(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	t.Setenv(autoRestartEnvVar, "")
+
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "pincher.exe")
+	if err := os.WriteFile(fakeBin, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(fakeBin)
+	srv.binaryPath = fakeBin
+	srv.binaryStartMTime = info.ModTime()
+	future := info.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(fakeBin, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	var exited int32
+	srv.exitFn = func(code int) { atomic.StoreInt32(&exited, 1) }
+
+	srv.checkAutoRestart()
+
+	if atomic.LoadInt32(&exited) != 0 {
+		t.Error("exit fired with env var unset; opt-in semantics broken")
+	}
+}
+
+func TestCheckAutoRestart_NoOpWhenBinaryNotReplaced(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	t.Setenv(autoRestartEnvVar, "1")
+
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "pincher.exe")
+	if err := os.WriteFile(fakeBin, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(fakeBin)
+	srv.binaryPath = fakeBin
+	srv.binaryStartMTime = info.ModTime()
+
+	var exited int32
+	srv.exitFn = func(code int) { atomic.StoreInt32(&exited, 1) }
+
+	srv.checkAutoRestart()
+
+	if atomic.LoadInt32(&exited) != 0 {
+		t.Error("exit fired without binary replacement; would loop forever")
+	}
+}
