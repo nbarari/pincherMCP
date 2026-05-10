@@ -429,7 +429,7 @@ func TestEnsureSymbolIDColumn_OptionAReplica(t *testing.T) {
 	}
 	// Build the schema EXCLUDING the symbol_id column on `symbols`.
 	for _, stmt := range []string{
-		`CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT, name TEXT, indexed_at INTEGER, file_count INTEGER, sym_count INTEGER, edge_count INTEGER)`,
+		`CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT, name TEXT, indexed_at INTEGER, file_count INTEGER, sym_count INTEGER, edge_count INTEGER, schema_version_at_index INTEGER)`,
 		// symbols table WITHOUT the symbol_id column — this is the
 		// Option-A-lineage shape.
 		`CREATE TABLE symbols (

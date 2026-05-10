@@ -60,6 +60,20 @@ minors.
   would have nothing to do). Same fix benefits Unix detached spawns.
 
 ### Added
+- **Stale-project detection in `pincher list` and `pincher doctor`**
+  (#236, reported by @nbarari). Schema migration v15 adds
+  `projects.schema_version_at_index INTEGER` — stamped by
+  `UpsertProject` on every index. Pre-v15 rows stay NULL
+  (unknowable). `pincher list` and `pincher doctor` flag projects
+  whose stamped version is below the running binary's max-known
+  schema with a `[stale]` marker; doctor adds a dedicated "Stale
+  projects (would benefit from re-index)" section that names each
+  project with the precise reason (`indexed at v12, current is v15`)
+  so users know which to re-index. The `--json` output for both
+  surfaces `schema_version_at_index`, `stale`, and `stale_reason`
+  fields. Closes the observability gap where long-lived indexes
+  silently miss data added by later extractor or migration work
+  (TOML, HTML, XML, etc.).
 - **`$PINCHER_DATA_DIR` environment variable** — when set, `db.DataDir()`
   returns the env var's value verbatim instead of the platform default
   (`%APPDATA%\pincherMCP\` / `~/Library/Application Support/pincherMCP/`

@@ -139,6 +139,69 @@ func TestFormatProjectList_RendersTable(t *testing.T) {
 	}
 }
 
+// TestStaleness_FreshNonNil covers the happy path: a project indexed
+// at the current schema version isn't stale.
+func TestStaleness_FreshNonNil(t *testing.T) {
+	current := db.CurrentSchemaVersion()
+	at := current
+	stale, reason := staleness(&at, current)
+	if stale {
+		t.Errorf("stale=true for current version (%d); reason=%q", current, reason)
+	}
+}
+
+// TestStaleness_OlderNonNil covers a project indexed at an older
+// schema — must report stale with the precise version pinpoint.
+func TestStaleness_OlderNonNil(t *testing.T) {
+	at := 12
+	stale, reason := staleness(&at, 15)
+	if !stale {
+		t.Errorf("stale=false for v12 against current v15")
+	}
+	if !strings.Contains(reason, "v12") || !strings.Contains(reason, "v15") {
+		t.Errorf("reason should name both versions; got %q", reason)
+	}
+}
+
+// TestStaleness_NilIsStale covers the pre-v15 row case: NULL means
+// the row pre-dates the column itself, treated as stale (unknown)
+// because we can't know how much older.
+func TestStaleness_NilIsStale(t *testing.T) {
+	stale, reason := staleness(nil, 15)
+	if !stale {
+		t.Errorf("stale=false for nil")
+	}
+	if !strings.Contains(reason, "predates") {
+		t.Errorf("reason should mention 'predates'; got %q", reason)
+	}
+}
+
+// TestFormatProjectList_StaleMarker covers the user-visible surface:
+// a stale project gets a `[stale]` suffix appended to its name in the
+// rendered table.
+func TestFormatProjectList_StaleMarker(t *testing.T) {
+	current := db.CurrentSchemaVersion()
+	older := current - 1
+	projects := []db.Project{
+		{ID: "fresh", Name: "fresh-proj", Path: "/p1", SchemaVersionAtIndex: &current},
+		{ID: "old", Name: "old-proj", Path: "/p2", SchemaVersionAtIndex: &older},
+		{ID: "unk", Name: "unk-proj", Path: "/p3"}, // nil → pre-v15
+	}
+	got := formatProjectList(projects)
+	if !strings.Contains(got, "old-proj [stale]") {
+		t.Errorf("expected `old-proj [stale]` in output; got:\n%s", got)
+	}
+	if !strings.Contains(got, "unk-proj [stale]") {
+		t.Errorf("expected `unk-proj [stale]` (nil/pre-v15); got:\n%s", got)
+	}
+	if strings.Contains(got, "fresh-proj [stale]") {
+		t.Errorf("did not expect `fresh-proj [stale]`; got:\n%s", got)
+	}
+	if !strings.Contains(got, "2 stale") {
+		t.Errorf("footer should report stale count; got:\n%s", got)
+	}
+}
+
 // ── end-to-end via test binary ───────────────────────────────────────────────
 
 // (project tests use buildPincherBinary from coverbuild_test.go so

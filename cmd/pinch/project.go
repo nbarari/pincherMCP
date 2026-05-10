@@ -101,27 +101,54 @@ type projectListReport struct {
 }
 
 func buildProjectListReport(ps []db.Project) projectListReport {
+	current := db.CurrentSchemaVersion()
 	out := projectListReport{Count: len(ps), Projects: make([]ProjectStats, 0, len(ps))}
 	for _, p := range ps {
-		out.Projects = append(out.Projects, ProjectStats{
-			ID:      p.ID,
-			Name:    p.Name,
-			Path:    p.Path,
-			Files:   p.FileCount,
-			Symbols: p.SymCount,
-			Edges:   p.EdgeCount,
-		})
+		stats := ProjectStats{
+			ID:                   p.ID,
+			Name:                 p.Name,
+			Path:                 p.Path,
+			Files:                p.FileCount,
+			Symbols:              p.SymCount,
+			Edges:                p.EdgeCount,
+			SchemaVersionAtIndex: p.SchemaVersionAtIndex,
+		}
+		stats.Stale, stats.StaleReason = staleness(p.SchemaVersionAtIndex, current)
+		out.Projects = append(out.Projects, stats)
 	}
 	return out
 }
 
+// staleness compares a project's schema_version_at_index against the
+// running binary's max-known schema version. Returns (stale, reason).
+//
+// nil → pre-v15 row, treated as "stale (unknown)" — definitely older
+// than the column itself, but we don't know how much older.
+//
+// non-nil and < current → stale with a precise reason.
+// non-nil and >= current → fresh.
+func staleness(at *int, current int) (bool, string) {
+	if at == nil {
+		return true, "predates schema_version_at_index column (pre-v15)"
+	}
+	if *at < current {
+		return true, fmt.Sprintf("indexed at v%d, current is v%d", *at, current)
+	}
+	return false, ""
+}
+
 // formatProjectList renders the table form used by `pincher project list`.
+// Stale projects (schema_version_at_index < current, or NULL) get a `[stale]`
+// suffix appended to their name so the gap nbarari hit (#236) is visible
+// at a glance.
 func formatProjectList(ps []db.Project) string {
 	if len(ps) == 0 {
 		return "No projects indexed.\n\nRun `pincher index <path>` to add one.\n"
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].Name < ps[j].Name })
 
+	current := db.CurrentSchemaVersion()
+	staleCount := 0
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-32s  %-10s  %-10s  %-10s  %s\n", "PROJECT", "FILES", "SYMBOLS", "EDGES", "PATH")
 	fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 100))
@@ -130,12 +157,21 @@ func formatProjectList(ps []db.Project) string {
 		if name == "" {
 			name = p.ID
 		}
+		stale, _ := staleness(p.SchemaVersionAtIndex, current)
+		if stale {
+			staleCount++
+			name += " [stale]"
+		}
 		if len(name) > 32 {
 			name = name[:29] + "..."
 		}
 		fmt.Fprintf(&b, "%-32s  %-10d  %-10d  %-10d  %s\n", name, p.FileCount, p.SymCount, p.EdgeCount, p.Path)
 	}
-	fmt.Fprintf(&b, "\n%d project(s).\n", len(ps))
+	if staleCount > 0 {
+		fmt.Fprintf(&b, "\n%d project(s), %d stale. Re-index a stale project with `pincher index <path>`.\n", len(ps), staleCount)
+	} else {
+		fmt.Fprintf(&b, "\n%d project(s).\n", len(ps))
+	}
 	return b.String()
 }
 

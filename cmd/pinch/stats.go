@@ -131,6 +131,20 @@ type ProjectStats struct {
 	Files    int    `json:"files"`
 	Symbols  int    `json:"symbols"`
 	Edges    int    `json:"edges"`
+	// SchemaVersionAtIndex is the schema version current when this
+	// project was last indexed (#236). Pointer-to-int so we can
+	// distinguish nil ("indexed before the column existed — pre-v15")
+	// from a recorded value. Omitted from JSON when nil.
+	SchemaVersionAtIndex *int `json:"schema_version_at_index,omitempty"`
+	// Stale is true when the project's schema version is below the
+	// current binary's max-known schema version (or unknown / pre-v15).
+	// Computed at render time, not persisted. JSON consumers can use
+	// this directly; the CLI table appends a `[stale]` marker.
+	Stale bool `json:"stale,omitempty"`
+	// StaleReason carries a short human-readable hint surfaced in
+	// `pincher doctor` ("indexed at v12, current is v15"). Empty when
+	// Stale is false.
+	StaleReason string `json:"stale_reason,omitempty"`
 }
 
 func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {

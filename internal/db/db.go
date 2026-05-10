@@ -841,6 +841,15 @@ CREATE TRIGGER sym_fts_corpus_update AFTER UPDATE ON symbols BEGIN
            COALESCE(new.signature,''), COALESCE(new.docstring,'')
     WHERE new.kind = 'Document' OR new.language IN ('Markdown', 'HTML');
 END;`,
+
+	// v14 → v15: add projects.schema_version_at_index (#236). Surfaces
+	// "this project was last indexed against schema vN" so pincher list
+	// / doctor can flag projects that predate later extractor or
+	// migration work and would benefit from a re-index. Existing rows
+	// get NULL (no backfill — we genuinely don't know what version
+	// indexed them); UpsertProject stamps the column on every future
+	// upsert so re-indexing populates it for real users naturally.
+	`ALTER TABLE projects ADD COLUMN schema_version_at_index INTEGER`,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -1413,6 +1422,11 @@ CREATE TABLE IF NOT EXISTS projects (
     file_count  INTEGER DEFAULT 0,
     sym_count   INTEGER DEFAULT 0,
     edge_count  INTEGER DEFAULT 0
+    -- schema_version_at_index column added by v15 migration (#236).
+    -- Intentionally not in baseline so the ALTER TABLE in the migration
+    -- doesn't double-declare on a fresh-DB path (CREATE TABLE creates
+    -- the column, then ALTER TABLE fails with "duplicate column name").
+    -- The migration runs for both fresh and upgrading DBs.
 );
 
 -- Stable ID format: "{file_path}::{qualified_name}#{kind}"
@@ -1545,6 +1559,15 @@ type Project struct {
 	FileCount int
 	SymCount  int
 	EdgeCount int
+	// SchemaVersionAtIndex is the schema_version_at_index column added in
+	// v15 (#236). Surfaces "this project was last indexed against schema
+	// vN" so pincher list / doctor can flag projects that predate later
+	// extractor or migration work and would benefit from a re-index. NULL
+	// (as a *int with a nil value) means the row predates the column —
+	// rendered as "stale (unknown)" because it was definitely indexed
+	// before v15. Non-nil = exact value, compare against the running
+	// binary's max-known schema version.
+	SchemaVersionAtIndex *int
 }
 
 // SearchResult is a FTS5 match returned by SearchSymbols.
@@ -1557,16 +1580,22 @@ type SearchResult struct {
 // Project operations
 // ─────────────────────────────────────────────────────────────────────────────
 
-// UpsertProject creates or updates a project record.
+// UpsertProject creates or updates a project record. The schema_version_at_index
+// column (#236, v15) is stamped with the current binary's max-known schema
+// version on every call — that's the moment the indexer "vouches for" the
+// project's freshness. Subsequent re-index runs by a binary at a higher
+// schema bump it again; binaries that don't re-index leave it stale.
 func (s *Store) UpsertProject(p Project) error {
+	currentSchema := len(schemaMigrations) + 1
 	_, err := s.db.Exec(`
-		INSERT INTO projects(id, path, name, indexed_at, file_count, sym_count, edge_count)
-		VALUES (?,?,?,?,?,?,?)
+		INSERT INTO projects(id, path, name, indexed_at, file_count, sym_count, edge_count, schema_version_at_index)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			path=excluded.path, name=excluded.name, indexed_at=excluded.indexed_at,
-			file_count=excluded.file_count, sym_count=excluded.sym_count, edge_count=excluded.edge_count`,
+			file_count=excluded.file_count, sym_count=excluded.sym_count, edge_count=excluded.edge_count,
+			schema_version_at_index=excluded.schema_version_at_index`,
 		p.ID, p.Path, p.Name, p.IndexedAt.Unix(),
-		p.FileCount, p.SymCount, p.EdgeCount,
+		p.FileCount, p.SymCount, p.EdgeCount, currentSchema,
 	)
 	return err
 }
@@ -1587,7 +1616,7 @@ func (s *Store) UpdateProjectCounts(projectID string, files, syms, edges int) er
 func (s *Store) ListProjects() ([]Project, error) {
 	// Reader pool (#51).
 	rows, err := s.ro.Query(
-		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count FROM projects ORDER BY name`)
+		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count, schema_version_at_index FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -1596,10 +1625,15 @@ func (s *Store) ListProjects() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		var ts int64
-		if err := rows.Scan(&p.ID, &p.Path, &p.Name, &ts, &p.FileCount, &p.SymCount, &p.EdgeCount); err != nil {
+		var schemaVer sql.NullInt64
+		if err := rows.Scan(&p.ID, &p.Path, &p.Name, &ts, &p.FileCount, &p.SymCount, &p.EdgeCount, &schemaVer); err != nil {
 			return nil, err
 		}
 		p.IndexedAt = time.Unix(ts, 0)
+		if schemaVer.Valid {
+			v := int(schemaVer.Int64)
+			p.SchemaVersionAtIndex = &v
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -1664,16 +1698,28 @@ func pathContains(parent, child string) bool {
 func (s *Store) GetProject(id string) (*Project, error) {
 	// Reader pool (#51).
 	row := s.ro.QueryRow(
-		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count FROM projects WHERE id=?`, id)
+		`SELECT id, path, name, indexed_at, file_count, sym_count, edge_count, schema_version_at_index FROM projects WHERE id=?`, id)
 	var p Project
 	var ts int64
-	if err := row.Scan(&p.ID, &p.Path, &p.Name, &ts, &p.FileCount, &p.SymCount, &p.EdgeCount); err == sql.ErrNoRows {
+	var schemaVer sql.NullInt64
+	if err := row.Scan(&p.ID, &p.Path, &p.Name, &ts, &p.FileCount, &p.SymCount, &p.EdgeCount, &schemaVer); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	}
 	p.IndexedAt = time.Unix(ts, 0)
+	if schemaVer.Valid {
+		v := int(schemaVer.Int64)
+		p.SchemaVersionAtIndex = &v
+	}
 	return &p, nil
+}
+
+// CurrentSchemaVersion returns the maximum schema version this binary
+// understands. Used by callers like `pincher list` and `pincher doctor`
+// to compare against per-project SchemaVersionAtIndex (#236).
+func CurrentSchemaVersion() int {
+	return len(schemaMigrations) + 1
 }
 
 // LanguageCoverage describes extraction quality for one language.

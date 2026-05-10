@@ -94,13 +94,16 @@ type DoctorReport struct {
 }
 
 type DoctorProjectSummary struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Files     int    `json:"files"`
-	Symbols   int    `json:"symbols"`
-	Edges     int    `json:"edges"`
-	IndexedAt string `json:"indexed_at"`
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Path                 string `json:"path"`
+	Files                int    `json:"files"`
+	Symbols              int    `json:"symbols"`
+	Edges                int    `json:"edges"`
+	IndexedAt            string `json:"indexed_at"`
+	SchemaVersionAtIndex *int   `json:"schema_version_at_index,omitempty"`
+	Stale                bool   `json:"stale,omitempty"`
+	StaleReason          string `json:"stale_reason,omitempty"`
 }
 
 type DoctorFailureRow struct {
@@ -149,16 +152,20 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int) (*Do
 	// Projects
 	projects, err := store.ListProjects()
 	if err == nil {
+		current := db.CurrentSchemaVersion()
 		for _, p := range projects {
-			r.Projects = append(r.Projects, DoctorProjectSummary{
-				ID:        p.ID,
-				Name:      p.Name,
-				Path:      p.Path,
-				Files:     p.FileCount,
-				Symbols:   p.SymCount,
-				Edges:     p.EdgeCount,
-				IndexedAt: p.IndexedAt.Format(time.RFC3339),
-			})
+			summary := DoctorProjectSummary{
+				ID:                   p.ID,
+				Name:                 p.Name,
+				Path:                 p.Path,
+				Files:                p.FileCount,
+				Symbols:              p.SymCount,
+				Edges:                p.EdgeCount,
+				IndexedAt:            p.IndexedAt.Format(time.RFC3339),
+				SchemaVersionAtIndex: p.SchemaVersionAtIndex,
+			}
+			summary.Stale, summary.StaleReason = staleness(p.SchemaVersionAtIndex, current)
+			r.Projects = append(r.Projects, summary)
 		}
 	}
 
@@ -237,10 +244,33 @@ func formatDoctorMarkdown(r *DoctorReport) string {
 	if len(r.Projects) > 0 {
 		fmt.Fprintln(&b, "Projects (largest first):")
 		for _, p := range r.Projects {
-			fmt.Fprintf(&b, "  %-30s  files=%-6d  symbols=%-8d  edges=%d\n",
-				truncMid(p.Name, 30), p.Files, p.Symbols, p.Edges)
+			marker := ""
+			if p.Stale {
+				marker = " [stale]"
+			}
+			fmt.Fprintf(&b, "  %-30s  files=%-6d  symbols=%-8d  edges=%d%s\n",
+				truncMid(p.Name, 30), p.Files, p.Symbols, p.Edges, marker)
 		}
 		fmt.Fprintln(&b)
+	}
+
+	// Stale-projects roll-up (#236). Names every project that predates
+	// the current binary's max-known schema version with the precise
+	// reason ("indexed at v12, current is v15") so users know which to
+	// re-index. Pre-v15 rows render as "predates the column" with no
+	// version pinpoint since we genuinely don't know.
+	var stale []DoctorProjectSummary
+	for _, p := range r.Projects {
+		if p.Stale {
+			stale = append(stale, p)
+		}
+	}
+	if len(stale) > 0 {
+		fmt.Fprintf(&b, "Stale projects (would benefit from re-index): %d\n", len(stale))
+		for _, p := range stale {
+			fmt.Fprintf(&b, "  %-30s  %s\n", truncMid(p.Name, 30), p.StaleReason)
+		}
+		fmt.Fprintf(&b, "  Re-index a project: pincher index <path>\n\n")
 	}
 
 	// Extraction failures
