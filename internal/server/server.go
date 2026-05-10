@@ -3083,11 +3083,66 @@ func suggestChangesNextSteps(impacted []map[string]any, changedSyms []map[string
 		return out
 	}
 	// No callers found — the change is contained to the changed symbols.
-	first, _ := changedSyms[0]["name"].(string)
+	// #292: when every changed symbol is a documentation kind (Section,
+	// Heading, Document), there's no callgraph to walk and the section
+	// title makes a poor FTS5 query (em-dashes, colons, dot-prefixed
+	// numbers). Return a one-line note instead of a search call that
+	// would either error or BM25-match unrelated code symbols.
+	if allDocKinds(changedSyms) {
+		return []map[string]string{
+			{"tool": "", "note": "documentation-only change — no callers to trace",
+				"why": "all changed symbols are Section/Heading/Document kinds; the file is doc, not code"},
+		}
+	}
+	// Code change with no callers found — propose an FTS5 search using
+	// the first non-doc symbol's name. Skips Section symbols since their
+	// titles aren't useful FTS5 queries.
+	first := firstCodeSymbolName(changedSyms)
+	if first == "" {
+		// Mixed but couldn't find a code-shaped name — return nothing
+		// rather than guess.
+		return nil
+	}
 	return []map[string]string{
 		{"tool": "search", "args": fmt.Sprintf(`{"query":"%s","kind":"Function","corpus":"code"}`, first),
 			"why": "no callers found — change is contained. Consider searching for related tests or writing one for the new behaviour."},
 	}
+}
+
+// allDocKinds reports whether every entry in syms has a documentation
+// kind (Section/Heading/Document). Used to suppress search-shaped
+// next_steps for doc-only diffs (#292).
+func allDocKinds(syms []map[string]any) bool {
+	if len(syms) == 0 {
+		return false
+	}
+	for _, s := range syms {
+		k, _ := s["kind"].(string)
+		switch k {
+		case "Section", "Heading", "Document":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// firstCodeSymbolName returns the name of the first non-doc symbol in
+// syms, skipping Section/Heading/Document. Returns "" when no code-
+// shaped symbol is present (#292).
+func firstCodeSymbolName(syms []map[string]any) string {
+	for _, s := range syms {
+		k, _ := s["kind"].(string)
+		switch k {
+		case "Section", "Heading", "Document":
+			continue
+		}
+		if name, _ := s["name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
