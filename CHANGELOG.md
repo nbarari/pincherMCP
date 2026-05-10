@@ -8,6 +8,27 @@ minors.
 ## [Unreleased]
 
 ### Fixed
+- **Supervisor respawn no longer leaks a duplicate `initialize`
+  response or stray startup notifications to the client (#371,
+  follow-up to the server-side fix in the same milestone).** The
+  supervisor now replays `initialize` to the new inner with a
+  supervisor-sentinel JSON-RPC id (`__pincher_supervisor_init_<n>`),
+  intercepts the matching response in the inner→client pump, and
+  drops server-initiated notifications during a 500ms post-respawn
+  quiet window. Without this, the new inner's response carried the
+  client's *original* `initialize` id (or, in S1.5's first attempt,
+  no response interception at all) and broke the client's JSON-RPC
+  framing assumptions even after the in-flight response loss was
+  fixed. New `TestSupervisor_InitReplayResponseIsIntercepted` pins
+  the contract with a faithful echo-fake.
+
+### Added
+- `internal/supervisor/cmd/probe` — maintained out-of-band diagnostic
+  harness that drives a real `pincher` (or `pincher supervised`)
+  process through the post-bump auto-restart sequence and reports
+  per-call response delivery. Replaces ad-hoc `cmd/test-364` and
+  `cmd/test-371*` reproducers; this is what surfaced #371.
+
 - **Supervised mode lost the in-flight response when the inner
   self-restarted on binary drift (#371).** `Server.jsonResultWithMeta`
   called `s.checkAutoRestart()` before `return result`; the production

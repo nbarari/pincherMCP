@@ -237,18 +237,32 @@ func TestSupervisor_CapturesAndReplaysInit(t *testing.T) {
 		t.Fatalf("expected 2 inners after respawn, got %d", got)
 	}
 
-	// 4. Second inner should have received the init + initialized
-	// replay, but NOT the tools/call (that was sent before respawn).
-	waitForReceived(t, func() *fakeInner { return fakes[1] }, []byte(initLine), time.Second)
+	// 4. Second inner should have received the init replay (with a
+	// supervisor-sentinel ID per S1.5) and the initialized
+	// notification, but NOT the tools/call (sent before respawn) and
+	// NOT the original client-id initialize line (replay synthesizes
+	// a new line).
+	waitForReceived(t, func() *fakeInner { return fakes[1] }, []byte(initIDPrefix), time.Second)
 	got := fakes[1].Receive()
-	if !bytes.Contains(got, []byte(initLine)) {
-		t.Errorf("inner #2 missing initialize replay; got: %q", got)
+	if !bytes.Contains(got, []byte(initIDPrefix)) {
+		t.Errorf("inner #2 missing initialize replay (sentinel-id form); got: %q", got)
+	}
+	// The replay should carry the original client's params verbatim
+	// — params: {} in this test — so we can't easily assert content
+	// equality, but we can assert the method is "initialize".
+	if !bytes.Contains(got, []byte(`"method":"initialize"`)) {
+		t.Errorf("inner #2 didn't see method initialize on replay; got: %q", got)
 	}
 	if !bytes.Contains(got, []byte(initdLine)) {
 		t.Errorf("inner #2 missing initialized replay; got: %q", got)
 	}
 	if bytes.Contains(got, []byte(callLine)) {
 		t.Error("inner #2 received the tools/call from before respawn — unexpected (would imply double-replay)")
+	}
+	// Critical S1.5 assertion: the replay must NOT use the client's
+	// original ID (the bug from #371).
+	if bytes.Contains(got, []byte(`"id":1,"method":"initialize"`)) {
+		t.Error("inner #2 received the replay with the CLIENT's original id=1 — would surface a duplicate response to the client (#371 regression)")
 	}
 
 	if r := sup.Restarts.Load(); r != 1 {
@@ -668,6 +682,154 @@ func TestSupervisor_StatusReflectsRestartReason(t *testing.T) {
 	if got := sup.Status().LastRestartReason; got != "probe timeout (inner unresponsive)" {
 		t.Errorf("LastRestartReason = %q, want probe timeout reason", got)
 	}
+}
+
+// TestSupervisor_InitReplayResponseIsIntercepted (S1.5 / #371):
+// after respawn, the new inner's response to the supervisor's init
+// replay MUST NOT be forwarded to the client. The client only ever
+// sees ONE initialize response (from the original inner). A
+// duplicate would cause real MCP clients to close stdio.
+func TestSupervisor_InitReplayResponseIsIntercepted(t *testing.T) {
+	clientStdinR, clientStdinW := io.Pipe()
+	var clientStdout bytes.Buffer
+
+	var fakeMu sync.Mutex
+	var fakes []*fakeInner
+
+	sup := &Supervisor{
+		Stdin:              clientStdinR,
+		Stdout:             &clientStdout,
+		Stderr:             io.Discard,
+		ProbeInterval:      24 * time.Hour, // disable probes for clarity
+		RespawnQuietWindow: 50 * time.Millisecond,
+		spawnFn: func() (*innerProc, error) {
+			fakeMu.Lock()
+			id := len(fakes) + 1
+			f := newFakeInner(id)
+			fakes = append(fakes, f)
+			fakeMu.Unlock()
+			return f.makeProc(), nil
+		},
+	}
+
+	// Echo bot: every line received by the latest fake that has an
+	// `id` and `method` (a request) gets a synthetic response back
+	// via Send. This emulates what a real pincher inner does on
+	// receiving the replayed initialize.
+	stopEcho := make(chan struct{})
+	go func() {
+		seen := map[int]int{} // fake-id → bytes-consumed
+		for {
+			select {
+			case <-stopEcho:
+				return
+			default:
+			}
+			fakeMu.Lock()
+			snap := append([]*fakeInner(nil), fakes...)
+			fakeMu.Unlock()
+			for _, f := range snap {
+				latest := f.Receive()
+				delta := latest[seen[f.id]:]
+				if len(delta) == 0 {
+					continue
+				}
+				lines := bytes.Split(delta, []byte("\n"))
+				for _, line := range lines {
+					if len(line) == 0 {
+						continue
+					}
+					var msg struct {
+						ID     json.RawMessage `json:"id"`
+						Method string          `json:"method"`
+					}
+					if json.Unmarshal(line, &msg) != nil {
+						continue
+					}
+					if msg.ID == nil || msg.Method == "" {
+						continue
+					}
+					// Forward whatever ID shape the request used —
+					// numeric or string — so the test exercises both
+					// the client's numeric IDs and the supervisor's
+					// string-prefix sentinel IDs.
+					_ = f.Send(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"fake","version":"1"},"capabilities":{}}}` + "\n")
+				}
+				seen[f.id] = len(latest)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+
+	// 1. Client sends initialize. Echo bot replies. Forward reaches client.
+	clientInitID := 7
+	clientStdinW.Write([]byte(`{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}` + "\n"))
+	clientStdinW.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"))
+
+	// Wait for client to receive the inner's response to id=7.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if bytes.Contains(clientStdout.Bytes(), []byte(`"id":7,`)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !bytes.Contains(clientStdout.Bytes(), []byte(`"id":7,`)) {
+		t.Fatalf("client never received initial init response (id=%d); got: %q", clientInitID, clientStdout.String())
+	}
+
+	// Snapshot client output before respawn — anything new that
+	// appears AFTER fake.Close() better not be a duplicate init
+	// response.
+	preRespawn := clientStdout.Bytes()
+	preLen := len(preRespawn)
+
+	// 2. Force respawn by closing the first fake.
+	fakes[0].Close()
+
+	// 3. Wait for respawn to complete (fake count rises) + replay
+	// to fire + echo bot to reply to the synthesized init request.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fakeMu.Lock()
+		n := len(fakes)
+		fakeMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Give the echo bot another moment to reply to the init replay.
+	time.Sleep(150 * time.Millisecond)
+
+	// 4. Critical assertion: client output AFTER the respawn must
+	// NOT contain a second initialize response. Look for the
+	// supervisor-sentinel ID prefix — its presence in client output
+	// would mean the replay response leaked through.
+	postRespawn := clientStdout.Bytes()[preLen:]
+	if bytes.Contains(postRespawn, []byte(initIDPrefix)) {
+		t.Errorf("client received init-replay response containing supervisor sentinel id (S1.5/#371 regression); leaked: %q", postRespawn)
+	}
+
+	// 5. Also assert the original-id init response wasn't duplicated.
+	// We had ONE id=7 response pre-respawn; post-respawn should have ZERO.
+	postIDCount := bytes.Count(postRespawn, []byte(`"id":7,`))
+	if postIDCount > 0 {
+		t.Errorf("client received %d additional id=7 init responses after respawn (should be 0); leaked: %q", postIDCount, postRespawn)
+	}
+
+	close(stopEcho)
+	clientStdinW.Close()
+	for _, f := range fakes {
+		f.Close()
+	}
+	cancel()
+	<-runDone
 }
 
 // TestRecordRestart_TrimsOldEntries: entries older than RestartWindow

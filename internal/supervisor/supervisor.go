@@ -56,6 +56,15 @@ const (
 	// the client).
 	probeIDPrefix = "__pincher_supervisor_probe_"
 
+	// initIDPrefix tags the JSON-RPC `id` field on supervisor-issued
+	// initialize-replay requests. The matching response from the new
+	// inner is intercepted in forwardInnerStdoutWithProbeFilter and
+	// NEVER reaches the client — the client already received an
+	// initialize response from the original inner and a duplicate
+	// (with the original ID OR a different one with the same shape)
+	// would violate JSON-RPC framing. S1.5 fix for #371.
+	initIDPrefix = "__pincher_supervisor_init_"
+
 	// SupervisorStatusToolName is the MCP tool name the supervisor
 	// answers directly (without forwarding to the inner). Agents call
 	// it to check supervisor health: restart count, probe stats,
@@ -70,6 +79,17 @@ const (
 	defaultProbeTimeout  = 5 * time.Second
 	defaultMaxRestarts   = 5
 	defaultRestartWindow = 60 * time.Second
+
+	// defaultRespawnQuietWindow is the post-respawn window during which
+	// server-initiated notifications from the new inner (e.g.
+	// `notifications/tools/list_changed`, `notifications/initialized`
+	// echoes) are dropped instead of forwarded. The client already
+	// processed equivalent notifications from the original inner;
+	// re-firing them mid-session would surface as duplicate state
+	// changes the client may reject. 500ms is enough for the new
+	// inner to finish its init-side notification burst without delaying
+	// real responses much. Tests override with a smaller window.
+	defaultRespawnQuietWindow = 500 * time.Millisecond
 )
 
 // Supervisor wraps an inner pincher process with auto-respawn semantics.
@@ -110,10 +130,27 @@ type Supervisor struct {
 	MaxRestarts   int
 	RestartWindow time.Duration
 
+	// RespawnQuietWindow tunes the post-respawn drop window for
+	// server-initiated notifications. Zero uses the default.
+	RespawnQuietWindow time.Duration
+
 	mu              sync.RWMutex
 	inner           *innerProc
-	initLine        []byte
-	initializedLine []byte
+	// initParams holds the most-recently-captured `params` payload
+	// from a client `initialize` request. We store params (not the
+	// whole line) because on respawn we synthesize a fresh request
+	// with a supervisor-sentinel ID — matching the client's original
+	// ID would let the new inner's response leak to the client and
+	// look like a duplicate (the bug fixed in S1.5 / #371).
+	initParams        []byte
+	initializedLine   []byte
+	initReplayCounter atomic.Int64
+
+	// respawnQuietUntil is the wall-clock instant after which
+	// server-initiated notifications start passing through to the
+	// client again. Set in respawn() to now + RespawnQuietWindow;
+	// checked in forwardInnerStdoutWithProbeFilter on every line.
+	respawnQuietUntil atomic.Pointer[time.Time]
 
 	// pendingProbe captures the timestamp at which the most recent
 	// liveness probe was sent to the inner. Cleared (atomic.Pointer
@@ -430,18 +467,32 @@ func (s *Supervisor) pumpInnerToClient(ctx context.Context) error {
 }
 
 // forwardInnerStdoutWithProbeFilter reads inner stdout line-by-line.
-// Lines matching a pending liveness probe's ID are consumed silently
-// (clearing the pending state); every other line is written verbatim
-// to the client stdout. Returns when the inner closes its stdout —
-// the caller's loop handles respawn from there.
+// Three categories of line get filtered:
+//   - Liveness probe responses (id matches probeIDPrefix) — clear
+//     the pending probe state.
+//   - Init-replay responses (id matches initIDPrefix) — the client
+//     already received an initialize response from the original
+//     inner; surfacing a duplicate would close stdio. S1.5 / #371.
+//   - Server-initiated notifications during the post-respawn quiet
+//     window — these are usually `tools/list_changed` etc. that the
+//     new inner fires on startup; mid-session re-firing confuses
+//     clients.
+//
+// Everything else passes through to the client verbatim. Returns when
+// the inner closes its stdout — the caller's loop handles respawn.
 func (s *Supervisor) forwardInnerStdoutWithProbeFilter(stdout io.Reader) {
 	r := bufio.NewReader(stdout)
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
-			if s.consumeIfProbeResponse(line) {
+			switch s.classifyInnerLine(line) {
+			case innerLineProbeResponse:
 				s.ProbesAnswered.Add(1)
-			} else {
+			case innerLineInitReplayResponse:
+				// drop silently
+			case innerLineQuietWindowNotification:
+				// drop silently
+			default:
 				_, _ = s.Stdout.Write(line)
 			}
 		}
@@ -451,34 +502,56 @@ func (s *Supervisor) forwardInnerStdoutWithProbeFilter(stdout io.Reader) {
 	}
 }
 
-// consumeIfProbeResponse parses just the JSON-RPC `id` field, checks
-// for the supervisor's sentinel prefix, and clears the pending probe
-// state if matched. Returns true when the line was a probe response
-// (caller should NOT forward to client) and false otherwise.
-func (s *Supervisor) consumeIfProbeResponse(line []byte) bool {
+// innerLineKind buckets each parsed inner→client line into a forward
+// or drop decision. classifyInnerLine implements the bucketing.
+type innerLineKind int
+
+const (
+	innerLineForward innerLineKind = iota
+	innerLineProbeResponse
+	innerLineInitReplayResponse
+	innerLineQuietWindowNotification
+)
+
+// classifyInnerLine inspects the line's JSON-RPC shape (best-effort
+// — malformed lines forward verbatim) and returns the bucket. Side
+// effect: clears pendingProbe when a probe response is recognized.
+func (s *Supervisor) classifyInnerLine(line []byte) innerLineKind {
 	var head struct {
-		ID json.RawMessage `json:"id"`
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
 	}
 	if err := json.Unmarshal(line, &head); err != nil {
-		return false
+		return innerLineForward
 	}
+
+	// Notification: no id, has method. Drop during quiet window;
+	// otherwise forward.
+	if len(head.ID) == 0 && head.Method != "" {
+		if t := s.respawnQuietUntil.Load(); t != nil && time.Now().Before(*t) {
+			return innerLineQuietWindowNotification
+		}
+		return innerLineForward
+	}
+
+	// Response or request: has id. Check sentinel prefixes.
 	if len(head.ID) == 0 {
-		return false
+		return innerLineForward
 	}
-	// IDs may be either string or number per JSON-RPC. Probe IDs are
-	// always quoted strings starting with probeIDPrefix.
-	var id string
-	if err := json.Unmarshal(head.ID, &id); err != nil {
-		return false
+	var idStr string
+	if err := json.Unmarshal(head.ID, &idStr); err != nil {
+		// Numeric id — not one of our string sentinels. Forward.
+		return innerLineForward
 	}
-	if !strings.HasPrefix(id, probeIDPrefix) {
-		return false
+	switch {
+	case strings.HasPrefix(idStr, probeIDPrefix):
+		s.pendingProbe.Store(nil)
+		return innerLineProbeResponse
+	case strings.HasPrefix(idStr, initIDPrefix):
+		return innerLineInitReplayResponse
+	default:
+		return innerLineForward
 	}
-	// Match — clear pending probe state. The pendingProbe pointer
-	// might already be nil if the timeout closure fired first; that
-	// race is benign (response arrived after timeout-kill, ignore).
-	s.pendingProbe.Store(nil)
-	return true
 }
 
 // probeLoop sends a periodic JSON-RPC `tools/list` to the inner with a
@@ -616,12 +689,20 @@ func (s *Supervisor) recordRestart() error {
 
 // maybeCaptureInit parses just enough of an inbound JSON-RPC line to
 // detect an initialize request or notifications/initialized
-// notification, and stashes the raw bytes for later replay. We re-capture
-// each time so re-init from the client (rare, e.g. after roots change)
-// updates the replay payload.
+// notification, and stashes the params (for initialize) or the whole
+// line (for the notification). We re-capture each time so re-init
+// from the client (rare, e.g. after roots change) updates the replay
+// payload.
+//
+// S1.5 (#371): only initialize PARAMS are stored. The replay
+// synthesizes a fresh JSON-RPC request with a supervisor-sentinel ID
+// so the new inner's response can be intercepted server-side and
+// never reach the client (which would otherwise see a duplicate
+// initialize response and close stdio).
 func (s *Supervisor) maybeCaptureInit(line []byte) {
 	var head struct {
-		Method string `json:"method"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(line, &head); err != nil {
 		return
@@ -629,7 +710,13 @@ func (s *Supervisor) maybeCaptureInit(line []byte) {
 	switch head.Method {
 	case "initialize":
 		s.mu.Lock()
-		s.initLine = append(s.initLine[:0], line...)
+		// Default to "{}" if params absent, so the synthesized
+		// replay is still well-formed JSON-RPC.
+		if len(head.Params) == 0 {
+			s.initParams = []byte("{}")
+		} else {
+			s.initParams = append(s.initParams[:0], head.Params...)
+		}
 		s.mu.Unlock()
 	case "notifications/initialized", "initialized":
 		s.mu.Lock()
@@ -652,9 +739,17 @@ func (s *Supervisor) writeToInner(line []byte) error {
 	return err
 }
 
-// respawn spawns a fresh inner, replays the captured init handshake,
+// respawn spawns a fresh inner, replays the captured init handshake
+// with a supervisor-sentinel ID (so the response can be intercepted),
 // and atomically swaps it in for the old. Holds the write lock for the
 // duration so client→inner writes can't race with the swap.
+//
+// Sets respawnQuietUntil to now + RespawnQuietWindow so the
+// inner→client pump drops server-initiated notifications during the
+// window. Without this drop, the new inner's
+// `notifications/tools/list_changed` (and similar startup
+// notifications) reach the client mid-session and look like
+// unexpected state changes. S1.5 / #371.
 func (s *Supervisor) respawn() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -664,24 +759,50 @@ func (s *Supervisor) respawn() error {
 		return err
 	}
 
-	// Replay handshake. If the client never finished initialize we
-	// have nothing to replay — the new inner will just wait for the
-	// client's initialize like a fresh start.
-	if len(s.initLine) > 0 {
-		if _, err := p.stdin.Write(s.initLine); err != nil {
-			_ = p.cmd.Process.Kill()
+	// Set quiet window BEFORE writing init replay so any
+	// notifications the new inner emits before processing initialize
+	// are also covered.
+	quietWindow := s.RespawnQuietWindow
+	if quietWindow == 0 {
+		quietWindow = defaultRespawnQuietWindow
+	}
+	until := time.Now().Add(quietWindow)
+	s.respawnQuietUntil.Store(&until)
+
+	// Replay handshake with a supervisor-sentinel ID. The matching
+	// response from the new inner is intercepted in
+	// forwardInnerStdoutWithProbeFilter and dropped — the client
+	// already received an initialize response from the original
+	// inner.
+	initReplayed := false
+	if len(s.initParams) > 0 {
+		sentinelID := fmt.Sprintf("%s%d", initIDPrefix, s.initReplayCounter.Add(1))
+		// JSON-RPC line format. params is already a json.RawMessage
+		// shape (object, null, or array — but spec mandates object
+		// for initialize).
+		payload := fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"method":"initialize","params":%s}`+"\n",
+			sentinelID, string(s.initParams))
+		if _, err := p.stdin.Write([]byte(payload)); err != nil {
+			if p.cmd != nil && p.cmd.Process != nil {
+				_ = p.cmd.Process.Kill()
+			}
 			return fmt.Errorf("replay initialize: %w", err)
 		}
+		initReplayed = true
 	}
 	if len(s.initializedLine) > 0 {
 		if _, err := p.stdin.Write(s.initializedLine); err != nil {
-			_ = p.cmd.Process.Kill()
+			if p.cmd != nil && p.cmd.Process != nil {
+				_ = p.cmd.Process.Kill()
+			}
 			return fmt.Errorf("replay initialized: %w", err)
 		}
 	}
 
 	s.inner = p
-	slog.Info("supervisor.respawn", "init_replayed", len(s.initLine) > 0)
+	slog.Info("supervisor.respawn",
+		"init_replayed", initReplayed,
+		"quiet_window", quietWindow)
 	return nil
 }
 
