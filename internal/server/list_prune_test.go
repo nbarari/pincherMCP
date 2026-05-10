@@ -105,19 +105,21 @@ func TestHandleList_PruneDeadEmptyArrayWhenNothingDead(t *testing.T) {
 	}
 }
 
-// include_dead=true short-circuits the prune — caller wanted to see
-// dead rows, not delete them.
-func TestHandleList_IncludeDeadDoesNotPruneEvenIfFlagSet(t *testing.T) {
+// #378: include_dead and prune_dead are orthogonal. Pre-#378 the
+// prune branch was nested inside !includeDead, so combining the two
+// silently no-op'd the prune — surprising for a caller who naturally
+// reads "show dead rows AND delete them" as audit + cleanup.
+//
+// Post-fix: the dead row appears in the response (via include_dead)
+// AND is removed from the DB (via prune_dead). The pruned field
+// reports exactly what got deleted.
+func TestHandleList_IncludeDeadAndPruneDead_BothHonored(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	deadDir := filepath.Join(t.TempDir(), "dead-dir-doesnt-exist")
 	store.UpsertProject(db.Project{
 		ID: "ghost", Path: deadDir, Name: "ghost", IndexedAt: time.Now(),
 	})
 
-	// include_dead=true means "show me dead rows" — DO NOT delete them
-	// even if prune_dead=true is also set. The prune branch only fires
-	// inside the "drop dead" filter, and include_dead=true skips that
-	// filter entirely.
 	result, err := srv.handleList(context.Background(), makeReq(map[string]any{
 		"include_dead": true,
 		"prune_dead":   true,
@@ -129,9 +131,58 @@ func TestHandleList_IncludeDeadDoesNotPruneEvenIfFlagSet(t *testing.T) {
 	if body["count"].(float64) != 1 {
 		t.Errorf("count = %v, want 1 (ghost surfaced via include_dead)", body["count"])
 	}
-	// Ghost still in DB.
+	// Pruned reports what was deleted from the DB.
+	pruned, ok := body["pruned"].([]any)
+	if !ok {
+		t.Fatalf("pruned field missing despite prune_dead=true; body: %v", body)
+	}
+	if len(pruned) != 1 || pruned[0] != "ghost" {
+		t.Errorf("pruned = %v, want [ghost]", pruned)
+	}
+	// Ghost is GONE from the DB — even though it appeared in the response.
 	projects, _ := store.ListProjects()
-	if len(projects) != 1 {
-		t.Errorf("ghost should not have been pruned when include_dead=true; got %d projects", len(projects))
+	if len(projects) != 0 {
+		t.Errorf("ghost should have been pruned despite include_dead=true; %d projects remain", len(projects))
+	}
+}
+
+// #378 dogfood repro: caller passes both flags wanting "audit + cleanup".
+// Pre-fix, dropped + 0 entries returned (silently filtered). Post-fix,
+// the dead row IS shown AND deleted, so subsequent calls see it gone.
+func TestHandleList_IncludeDeadAndPruneDead_DogfoodRepro(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	deadDir := filepath.Join(t.TempDir(), "NonexistentProjectThatDoesNotExist")
+	store.UpsertProject(db.Project{
+		ID: "ghost", Path: deadDir, Name: "ghost", IndexedAt: time.Now(),
+	})
+	aliveDir := t.TempDir()
+	store.UpsertProject(db.Project{
+		ID: "alive", Path: aliveDir, Name: "alive", IndexedAt: time.Now(),
+	})
+
+	// Call shape from the dogfood report: active=false (see all),
+	// include_dead=true (don't filter dead), prune_dead=true (clean up).
+	result, err := srv.handleList(context.Background(), makeReq(map[string]any{
+		"active":       false,
+		"include_dead": true,
+		"prune_dead":   true,
+	}))
+	if err != nil {
+		t.Fatalf("handleList: %v", err)
+	}
+	body := decode(t, result)
+	pruned, _ := body["pruned"].([]any)
+	if len(pruned) != 1 || pruned[0] != "ghost" {
+		t.Errorf("pruned = %v, want [ghost] (the dogfood case must actually delete)", pruned)
+	}
+
+	// Subsequent call with no flags: only alive remains.
+	result2, err := srv.handleList(context.Background(), makeReq(map[string]any{}))
+	if err != nil {
+		t.Fatalf("handleList second call: %v", err)
+	}
+	body2 := decode(t, result2)
+	if body2["count"].(float64) != 1 {
+		t.Errorf("after prune, count = %v, want 1 (alive only)", body2["count"])
 	}
 }

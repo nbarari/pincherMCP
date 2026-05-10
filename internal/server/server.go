@@ -1707,8 +1707,8 @@ func (s *Server) registerTools() {
 		InputSchema: json.RawMessage(`{"type":"object","properties":{
 			"active":{"type":"boolean","description":"Filter to projects indexed within active_within_days. Default true."},
 			"active_within_days":{"type":"integer","description":"Activity window for active=true. Default 14."},
-			"include_dead":{"type":"boolean","description":"Include projects whose on-disk path no longer exists. Default false."},
-			"prune_dead":{"type":"boolean","description":"Permanently delete projects whose on-disk path no longer exists. Default false. Pruned ids returned in the pruned field. Set include_dead=true instead when you want to *see* dead rows, not delete them."},
+			"include_dead":{"type":"boolean","description":"Include projects whose on-disk path no longer exists in the response. Default false. Orthogonal to prune_dead — combine for an audit + cleanup pass (#378)."},
+			"prune_dead":{"type":"boolean","description":"Permanently delete projects whose on-disk path no longer exists from the store. Default false. Pruned ids returned in the pruned field. Combine with include_dead=true to see what got deleted in the same call."},
 			"limit":{"type":"integer","description":"Max rows returned per page. Default 50. Pass 0 for legacy unbounded behaviour."},
 			"offset":{"type":"integer","description":"Skip the first N rows (default 0). Use the value from _meta.next_steps to walk pages."}
 		}}`),
@@ -3770,10 +3770,10 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 	if v, ok := args["include_dead"].(bool); ok {
 		includeDead = v
 	}
-	// #302: explicit prune flag. When true (and only when true), the
-	// dead-on-disk projects we'd otherwise just hide are physically
-	// removed from the store. include_dead=true short-circuits the
-	// prune (caller asked to *see* them, not delete them).
+	// #302/#378: explicit prune flag. When true, dead-on-disk projects
+	// are physically removed from the store. Orthogonal to include_dead
+	// — set both to audit + cleanup in one call (the pruned ids are
+	// reported in the response so the caller sees what got deleted).
 	pruneDead := false
 	if v, ok := args["prune_dead"].(bool); ok {
 		pruneDead = v
@@ -3814,24 +3814,31 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 	dropped := 0
 	var pruned []string // #302: ids of dead-on-disk projects we deleted
 	for _, p := range projects {
-		// Drop dead-on-disk paths unless the caller explicitly
-		// opts back in. Cheap (one os.Stat per project); on a
-		// dev machine with 100+ stale worktrees this is the
-		// load-bearing token-cost reduction.
-		if !includeDead {
-			if _, err := os.Stat(p.Path); os.IsNotExist(err) {
-				dropped++
-				if pruneDead {
-					// #302: delete the row so it doesn't keep
-					// appearing in subsequent list calls. Failure
-					// to delete is non-fatal — we still hide it
-					// and let the next call try again.
-					if delErr := s.store.DeleteProject(p.ID); delErr == nil {
-						pruned = append(pruned, p.ID)
-					}
-				}
-				continue
+		// Stat once per project — used by both the include_dead filter
+		// and the prune_dead deletion. include_dead and prune_dead are
+		// orthogonal (#378): include_dead=true asks "show dead rows in
+		// the response", prune_dead=true asks "delete dead rows from
+		// the DB". Combining them = audit + cleanup in one call.
+		// Pre-#378 the prune branch was nested inside !includeDead,
+		// so include_dead=true silently no-op'd prune_dead.
+		_, statErr := os.Stat(p.Path)
+		dead := os.IsNotExist(statErr)
+
+		if dead && pruneDead {
+			// #302: delete the row so it doesn't keep appearing in
+			// subsequent list calls. Failure to delete is non-fatal —
+			// we still report it via dropped/included and let the next
+			// call try again.
+			if delErr := s.store.DeleteProject(p.ID); delErr == nil {
+				pruned = append(pruned, p.ID)
 			}
+		}
+		if dead && !includeDead {
+			// Hide dead rows from the response unless the caller
+			// explicitly opts in. The DB row may have been pruned
+			// above; either way it doesn't appear here.
+			dropped++
+			continue
 		}
 		if activeOnly && p.IndexedAt.Before(cutoff) {
 			dropped++

@@ -200,7 +200,7 @@
           "type": "integer"
         },
         "include_dead": {
-          "description": "Include projects whose on-disk path no longer exists. Default false.",
+          "description": "Include projects whose on-disk path no longer exists in the response. Default false. Orthogonal to prune_dead — combine for an audit + cleanup pass (#378).",
           "type": "boolean"
         },
         "limit": {
@@ -212,7 +212,7 @@
           "type": "integer"
         },
         "prune_dead": {
-          "description": "Permanently delete projects whose on-disk path no longer exists. Default false. Pruned ids returned in the pruned field. Set include_dead=true instead when you want to *see* dead rows, not delete them.",
+          "description": "Permanently delete projects whose on-disk path no longer exists from the store. Default false. Pruned ids returned in the pruned field. Combine with include_dead=true to see what got deleted in the same call.",
           "type": "boolean"
         }
       },
