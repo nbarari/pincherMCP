@@ -241,7 +241,7 @@
           "type": "integer"
         },
         "min_confidence": {
-          "description": "Minimum extraction_confidence (0.0-1.0). Default 0.71 — filters the lowest-scored symbols (README/CHANGELOG/CONTRIBUTING H1 sections that bottom out at exactly 0.70 on real corpora). Set to 0.0 to disable filtering and surface every symbol the index contains. Inclusive: a symbol scored at or above the threshold IS returned.",
+          "description": "Minimum extraction_confidence (0.0-1.0). Default is query-aware (#247 #5): exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0.0; phrase / wildcard / multi-word queries default to 0.71. Rationale: 0.71 filters bottom-floor doc-section symbols that can BM25-match wide queries; an exact identifier query can't legitimately match doc-section noise so the floor isn't needed. Set explicitly to override either default. Inclusive: a symbol scored at or above the threshold IS returned.",
           "type": "number"
         },
         "project": {

@@ -1225,7 +1225,7 @@ func (s *Server) registerTools() {
 				"corpus":{"type":"string","enum":["","code","config","docs"],"description":"FTS5 corpus to search. Default (omitted or '') is 'code' — source-code identifiers (Function/Method/Class/etc). 'config' restricts to YAML/JSON/HCL/TOML Settings/Resources/Outputs; 'docs' to Markdown sections + fetched Documents. Use a specific corpus to avoid BM25 dilution from unrelated symbol kinds. (The legacy 'all' value was removed in v0.5; older callers passing 'all' are soft-redirected to 'code' with a deprecation log line.)"},
 				"limit":{"type":"integer","description":"Max results (default 20)"},
 				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."},
-				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.71 — filters the lowest-scored symbols (README/CHANGELOG/CONTRIBUTING H1 sections that bottom out at exactly 0.70 on real corpora). Set to 0.0 to disable filtering and surface every symbol the index contains. Inclusive: a symbol scored at or above the threshold IS returned."}
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default is query-aware (#247 #5): exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0.0; phrase / wildcard / multi-word queries default to 0.71. Rationale: 0.71 filters bottom-floor doc-section symbols that can BM25-match wide queries; an exact identifier query can't legitimately match doc-section noise so the floor isn't needed. Set explicitly to override either default. Inclusive: a symbol scored at or above the threshold IS returned."}
 			}
 		}`),
 	}, s.handleSearch)
@@ -1739,16 +1739,22 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	limit := intArg(args, "limit", 20)
 	fieldsArg := str(args, "fields")
-	// #34 Phase 4 + #112 calibration: default min_confidence is 0.71.
-	// Per the variance characterization in #112, real corpora produce a
-	// confidence floor at exactly 0.70 (README/CHANGELOG/CONTRIBUTING H1
-	// sections under the Markdown extractor: kindBaseline 0.80 averaged
-	// with BaseExtractor 1.00 = 0.90, minus PathPenalty -0.20 = 0.70).
-	// A 0.71 cutoff filters those bottom-floor cases (~3.6% of symbols
-	// on typical mixed corpora) without clipping the next tier (.pb.go
-	// generated code lands at 0.75). Callers pass 0.0 explicitly to
-	// surface every symbol.
-	minConfidence := floatArg(args, "min_confidence", 0.71)
+	// #34 Phase 4 + #112 calibration baseline: 0.71 filters the
+	// bottom-floor symbols (README/CHANGELOG/CONTRIBUTING H1 sections that
+	// land at exactly 0.70 on real corpora; ~3.6% of symbols on typical
+	// mixed corpora). Without this, doc-quality noise dominated wide
+	// keyword searches.
+	//
+	// #247 query-aware adjustment: when the query looks like an exact
+	// identifier (single token, no spaces / wildcards / quotes), the
+	// doc-quality floor is irrelevant — there's no documentation symbol
+	// named e.g. `registerTools`. Use 0.0 in that case so an exact-name
+	// search never silently zero-results on a real symbol. Phrase /
+	// wildcard / multi-word queries keep the 0.71 baseline because they
+	// can match doc-section titles and need the floor.
+	//
+	// Callers pass min_confidence explicitly to override either default.
+	minConfidence := floatArg(args, "min_confidence", defaultMinConfidenceFor(query))
 
 	// project=* searches all indexed projects — no project filter applied.
 	var projectID string
@@ -2056,6 +2062,37 @@ func verifyEmptySearchCause(
 	// diagnosis. This covers spelling errors, wrong project, and
 	// symbols that genuinely don't exist in the index.
 	return "", nil, false
+}
+
+// defaultMinConfidenceFor picks the right min_confidence default for a
+// query that doesn't carry an explicit threshold (#247 #5).
+//
+// The 0.71 baseline filters bottom-floor noise (README/CHANGELOG H1
+// sections at 0.70) on wide keyword searches — necessary because a
+// doc-section title can BM25-match an unrelated identifier query. But
+// for an exact identifier query like `registerTools`, no documentation
+// symbol could share the name; the doc-quality floor is irrelevant
+// and silently drops valid results.
+//
+// Heuristic: if the query is a single identifier-shaped token (one or
+// more letters/digits/underscores, no spaces, no wildcards, no
+// quotes), default to 0.0 — surface every match. Anything more
+// complex (phrase, wildcard, multi-word) keeps 0.71.
+//
+// This is a default only; explicit min_confidence on the call wins.
+func defaultMinConfidenceFor(query string) float64 {
+	if query == "" {
+		return 0.71
+	}
+	if strings.ContainsAny(query, " \t\"*") {
+		return 0.71
+	}
+	for _, r := range query {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return 0.71
+		}
+	}
+	return 0.0
 }
 
 // diagnoseEmptySearch returns a one-line explanation of the most likely
