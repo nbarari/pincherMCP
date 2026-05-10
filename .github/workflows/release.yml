@@ -66,6 +66,23 @@ jobs:
             tar -czf "pincher-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "${BIN}"
           fi
 
+      # Gate: stamped --version output must match the tag exactly. Catches
+      # ldflags drift, accidental hardcoded fallbacks (the v0.6.0-stuck-default
+      # bug we hit pre-#X), and version-bump misses. Runs only on native
+      # linux/amd64 since we can't execute the cross-compiled binaries here.
+      - name: Verify --version matches tag
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          BIN="dist/pincher-${GITHUB_REF_NAME}-linux-amd64"
+          STAMPED="$("$BIN" --version | awk '{print $NF}')"
+          EXPECTED="v${GITHUB_REF_NAME#v}"
+          echo "stamped:  $STAMPED"
+          echo "expected: $EXPECTED"
+          if [ "$STAMPED" != "$EXPECTED" ]; then
+            echo "::error::pincher --version reported '$STAMPED' but tag is '${GITHUB_REF_NAME}' (expected '$EXPECTED')"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.goos }}-${{ matrix.goarch }}

@@ -7,6 +7,19 @@ minors.
 
 ## [Unreleased]
 
+### Fixed
+- **Single-source versioning + CI gate.** Local builds via bare `go build` had
+  a hardcoded `var version = "0.6.0"` fallback, so `pincher --version` lied
+  about the binary's actual provenance during dogfooding (the v0.6.0 string
+  persisted across multiple v0.7–v0.10 sessions before being noticed). The
+  default is now `"dev"`, `make build` derives the version from
+  `git describe --tags --dirty --always`, CLAUDE.md documents both stamped
+  and bare paths, and `release.yml` gains a post-build assertion that fails
+  CI if the stamped `--version` output doesn't match the tag exactly. Caught
+  via a v0.10.0 release-prep dogfood — no functional change to released
+  binaries (release.yml already stamped correctly), purely closes the
+  developer-build provenance gap.
+
 ## [v0.10.0] — 2026-05-10 — pinchQL hardening, drift recovery, language coverage
 
 > Note: v0.7.0, v0.8.0, and v0.9.0 were retro-tagged from existing

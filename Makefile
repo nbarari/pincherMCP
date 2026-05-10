@@ -29,8 +29,16 @@ JQ_STRIP := 'del(.$(shell echo "$(SNAPSHOT_NOISE_FIELDS)" | sed "s/,/, ./g"))'
 
 .PHONY: build test corpus-test corpus-snapshot-update bench bench-index bench-server corpus-bench corpus-bench-update
 
+# Version stamped at build time via -ldflags. `git describe` produces e.g.
+# `v0.10.0` on a clean tag, `v0.10.0-3-gabcdef` ahead of one, `-dirty`
+# suffix when the tree has uncommitted changes. The leading `v` is stripped
+# for parity with the release workflow's `${GITHUB_REF_NAME#v}` format.
+# Falls back to `dev` if git is unavailable (e.g., source tarball builds).
+PINCHER_VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null | sed 's/^v//' || echo dev)
+LDFLAGS         := -s -w -X main.version=$(PINCHER_VERSION)
+
 build:
-	$(GO) build -o $(PINCHER_BIN) ./cmd/pinch/
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(PINCHER_BIN) ./cmd/pinch/
 
 test:
 	$(GO) test ./...

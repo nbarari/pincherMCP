@@ -25,9 +25,12 @@ import (
 )
 
 // version is overridden at build time via -ldflags="-X main.version=...".
-// Default tracks the latest released tag so binaries built without -ldflags
-// from a clone at HEAD report a version that matches the GitHub release.
-var version = "0.6.0"
+//   - Released binaries: stamped by .github/workflows/release.yml from the tag.
+//   - Local builds via `make build`: stamped from `git describe --tags --dirty`.
+//   - Bare `go build ./cmd/pinch/`: falls back to "dev" so the value is
+//     obviously not a real release. Use `make build` for an accurate version,
+//     or pass -ldflags="-X main.version=$(git describe --tags --dirty --always)".
+var version = "dev"
 
 func main() {
 	// Subcommand dispatch — must happen before flag.Parse() since the global

@@ -65,9 +65,16 @@ These fail when changes elsewhere don't update them in lockstep:
 ## Build & Test
 
 ```bash
-# Build
-go build -o pincher.exe ./cmd/pinch/     # Windows
-go build -o pincher ./cmd/pinch/         # Linux/macOS
+# Build (recommended — stamps version from `git describe`)
+make build PINCHER_BIN=./pincher.exe     # Windows
+make build                               # Linux/macOS
+
+# Bare go build (skips version stamping — `pincher --version` reports "dev")
+go build -o pincher.exe ./cmd/pinch/     # Windows, dev-stamped
+go build -o pincher ./cmd/pinch/         # Linux/macOS, dev-stamped
+
+# Manual stamp without make:
+go build -ldflags="-s -w -X main.version=$(git describe --tags --dirty --always | sed 's/^v//')" -o pincher.exe ./cmd/pinch/
 
 # Test
 go test ./...
