@@ -1265,7 +1265,7 @@ func (s *Server) registerTools() {
 	// 8. changes
 	s.addTool(&mcp.Tool{
 		Name:        "changes",
-		Description: "**Use before final response after code edits** to surface the blast radius. Maps `git diff` to affected symbols, BFS-traces impact, returns `changed_symbols` + impacted callers tagged CRITICAL/HIGH/MEDIUM/LOW + summary counts. Scopes: `unstaged` (default) / `staged` / `all` (includes untracked) / a branch name.",
+		Description: "**Use before final response after code edits** to surface the blast radius. Maps `git diff` to affected symbols, BFS-traces impact, returns `changed_symbols` + impacted callers tagged CRITICAL/HIGH/MEDIUM/LOW + summary counts + `tests_to_run` (test functions that exercise the changed symbols, ranked by overlap descending — re-run the top entries before pushing). Scopes: `unstaged` (default) / `staged` / `all` (includes untracked) / a branch name.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","properties":{
 				"project":{"type":"string"},
@@ -2463,14 +2463,29 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 	// not whichever same-named symbol the name-based lookup picks first
 	// (#5). The previous Trace(name, ...) path computed blast radius
 	// from a sibling symbol when one name had multiple definitions.
+	//
+	// #247 #4: alongside the impacted-symbol collection, track which
+	// test symbols reach each changed symbol — separately from the
+	// `seen` dedupe so a test reached via multiple changed symbols gets
+	// its overlap counted, not collapsed into the first path. Used to
+	// produce the tests_to_run array sorted by overlap descending.
 	var impacted []map[string]any
 	seen := make(map[string]bool)
+	testHits := make(map[string]map[string]bool) // test sym ID → set of changed sym IDs that reach it
+	testSyms := make(map[string]db.Symbol)       // test sym ID → the symbol (for output projection)
 	for _, sym := range changedSymbols {
 		hops, err := s.indexer.TraceByID(ctx, projectID, sym.ID, "inbound", depth, true)
 		if err != nil {
 			continue
 		}
 		for _, h := range hops {
+			if h.Symbol.IsTest {
+				if _, ok := testHits[h.Symbol.ID]; !ok {
+					testHits[h.Symbol.ID] = make(map[string]bool)
+					testSyms[h.Symbol.ID] = h.Symbol
+				}
+				testHits[h.Symbol.ID][sym.ID] = true
+			}
 			if seen[h.Symbol.ID] {
 				continue
 			}
@@ -2485,6 +2500,34 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 			})
 		}
 	}
+
+	// Build tests_to_run sorted by overlap descending (then test ID
+	// ascending for stable output). Overlap = how many distinct
+	// changed symbols this test reaches; higher overlap = more bang
+	// per re-run. Deterministic ordering keeps any future snapshot
+	// test on this surface stable.
+	type testRow struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		FilePath string `json:"file_path"`
+		Overlap  int    `json:"overlap"`
+	}
+	testsToRun := make([]testRow, 0, len(testHits))
+	for testID, hits := range testHits {
+		sym := testSyms[testID]
+		testsToRun = append(testsToRun, testRow{
+			ID:       testID,
+			Name:     sym.Name,
+			FilePath: sym.FilePath,
+			Overlap:  len(hits),
+		})
+	}
+	sort.Slice(testsToRun, func(i, j int) bool {
+		if testsToRun[i].Overlap != testsToRun[j].Overlap {
+			return testsToRun[i].Overlap > testsToRun[j].Overlap
+		}
+		return testsToRun[i].ID < testsToRun[j].ID
+	})
 
 	// Build risk summary
 	riskCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -2507,10 +2550,12 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 		"changed_files":   changedFiles,
 		"changed_symbols": changedSymNames,
 		"impacted":        impacted,
+		"tests_to_run":    testsToRun,
 		"summary": map[string]any{
 			"changed_files":   len(changedFiles),
 			"changed_symbols": len(changedSymbols),
 			"total_impacted":  len(impacted),
+			"tests_to_run":    len(testsToRun),
 			"critical":        riskCounts["CRITICAL"],
 			"high":            riskCounts["HIGH"],
 			"medium":          riskCounts["MEDIUM"],

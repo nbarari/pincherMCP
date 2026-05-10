@@ -45,7 +45,7 @@
   },
   {
     "name": "changes",
-    "description": "**Use before final response after code edits** to surface the blast radius. Maps `git diff` to affected symbols, BFS-traces impact, returns `changed_symbols` + impacted callers tagged CRITICAL/HIGH/MEDIUM/LOW + summary counts. Scopes: `unstaged` (default) / `staged` / `all` (includes untracked) / a branch name.",
+    "description": "**Use before final response after code edits** to surface the blast radius. Maps `git diff` to affected symbols, BFS-traces impact, returns `changed_symbols` + impacted callers tagged CRITICAL/HIGH/MEDIUM/LOW + summary counts + `tests_to_run` (test functions that exercise the changed symbols, ranked by overlap descending — re-run the top entries before pushing). Scopes: `unstaged` (default) / `staged` / `all` (includes untracked) / a branch name.",
     "input_schema": {
       "properties": {
         "depth": {
