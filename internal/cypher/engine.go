@@ -106,11 +106,12 @@ type pattern struct {
 }
 
 type condition struct {
-	variable string
-	property string
-	op       string // = <> > < >= <= =~ CONTAINS STARTS_WITH ENDS_WITH IS_NULL IS_NOT_NULL
-	value    string
-	negated  bool // #354: WHERE NOT n.x = ... — invert the comparison result
+	variable  string
+	property  string
+	op        string // = <> > < >= <= =~ CONTAINS STARTS_WITH ENDS_WITH IS_NULL IS_NOT_NULL
+	value     string
+	negated   bool   // #354: WHERE NOT n.x = ... — invert the comparison result
+	connector string // #358: "AND" or "OR" — connects this condition to the running result. First condition is "" (start).
 }
 
 type returnVar struct {
@@ -399,16 +400,24 @@ func (p *parser) parseProps() map[string]string {
 
 func (p *parser) parseConditions() ([]condition, error) {
 	var conds []condition
+	// Pending connector stamped on the next-parsed condition. First
+	// condition has no connector (it's the start of the chain); each
+	// subsequent gets the AND/OR token that preceded it. Pre-fix this
+	// connector was discarded, silently converting every OR to AND (#358).
+	pendingConnector := ""
 	for {
 		c, err := p.parseOneCondition()
 		if err != nil {
 			return nil, err
 		}
+		c.connector = pendingConnector
 		conds = append(conds, c)
-		if p.peek().value != "AND" && p.peek().value != "OR" {
+		next := p.peek().value
+		if next != "AND" && next != "OR" {
 			break
 		}
-		p.next() // consume AND/OR (simplified: treat all as AND)
+		p.next() // consume AND/OR
+		pendingConnector = next
 	}
 	return conds, nil
 }
@@ -679,12 +688,17 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 
 	// Push down simple WHERE conditions
 	var unpushed []condition
+	// #358: SQL pushdown emits AND-joined WHERE clauses; if any condition
+	// has an OR connector, all conditions must go through Go evaluation
+	// (which handles boolean composition correctly). Otherwise an OR
+	// condition would silently push to SQL as AND, recreating the bug.
+	hasOr := conditionsHaveOr(q.conditions)
 	for _, c := range q.conditions {
 		if c.variable != pat.fromVar {
 			continue
 		}
 		col := cypherPropToCol(c.property)
-		if col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
+		if !hasOr && col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
 			appendWhereOp(&sqlQ, &args, "", col, c)
 		} else {
 			unpushed = append(unpushed, c)
@@ -727,6 +741,19 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 	}
 
 	return buildResult(nodes, q)
+}
+
+// conditionsHaveOr reports whether any condition is OR-joined to the
+// previous one. SQL pushdown emits AND-joined WHERE clauses; if any
+// connector is OR, all conditions must be evaluated in Go to honor
+// boolean composition (#358).
+func conditionsHaveOr(conds []condition) bool {
+	for _, c := range conds {
+		if c.connector == "OR" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasAggregation reports whether any RETURN variable in q is an
@@ -786,6 +813,7 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 
 	// Push down WHERE conditions
 	var unpushed []condition
+	hasOr := conditionsHaveOr(q.conditions)
 	for _, c := range q.conditions {
 		tableAlias := "a"
 		if c.variable == pat.toVar {
@@ -795,7 +823,7 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 			continue
 		}
 		col := cypherPropToCol(c.property)
-		if col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
+		if !hasOr && col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
 			appendWhereOp(&sqlQ, &args, tableAlias+".", col, c)
 		} else {
 			unpushed = append(unpushed, c)
@@ -1367,17 +1395,29 @@ func matchesConditions(row map[string]any, conds []condition) bool {
 }
 
 func matchesConditionsWithCache(row map[string]any, conds []condition, reCache map[string]*regexp.Regexp) bool {
-	for _, c := range conds {
+	if len(conds) == 0 {
+		return true
+	}
+	// #358: walk left-to-right honouring AND/OR connectors. No operator
+	// precedence (paren parsing not yet implemented), so `a OR b AND c`
+	// evaluates as `(a OR b) AND c`. Document this as a known limitation.
+	result := evalCondition(row, conds[0], reCache)
+	if conds[0].negated {
+		result = !result
+	}
+	for _, c := range conds[1:] {
 		matched := evalCondition(row, c, reCache)
 		if c.negated {
-			// #354: NOT prefix inverts the per-condition result.
 			matched = !matched
 		}
-		if !matched {
-			return false
+		switch c.connector {
+		case "OR":
+			result = result || matched
+		default: // "AND" or "" (treat as AND for safety)
+			result = result && matched
 		}
 	}
-	return true
+	return result
 }
 
 // evalCondition returns true iff the row satisfies the un-negated form
