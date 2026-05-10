@@ -8,6 +8,30 @@ minors.
 ## [Unreleased]
 
 ### Added
+- **Supervisor health surface + `pincher health-check` CLI (S3).**
+  Two pieces:
+  - **`pincher.supervisor.status` MCP tool.** The supervisor intercepts
+    tool calls with this name (does NOT forward to inner) and responds
+    with a `SupervisorStatus` JSON: `{alive, uptime_sec, restarts,
+    probes_sent, probes_answered, probes_timed_out,
+    last_restart_reason}`. Probe-timeout-triggered restarts surface as
+    "probe timeout (inner unresponsive)" via a one-shot reason override
+    so the natural-exit case ("inner exited (code=N)") doesn't mask
+    the actual cause. Out-of-band knowledge for now — the tool is NOT
+    auto-injected into `tools/list` responses.
+  - **`pincher health-check` subcommand.** External-watchdog probe
+    (cron, launchd, k8s liveness) that spawns a pincher MCP server
+    short-lived, completes initialize + tools/list within `--timeout`,
+    and exits 0/1 accordingly. Supports `--binary PATH`, `--supervised`
+    (probe through `pincher supervised` instead of bare), and
+    `--verbose` for JSON-RPC trace. Handles MCP server-initiated
+    requests like `roots/list` by replying with an empty array — the
+    initial implementation deadlocked on this until #X surfaced it
+    via the smoke test.
+
+  Three new supervisor tests cover status-tool-returns-response,
+  non-status-tool-passes-through, and status-reflects-restart-reason.
+
 - **Supervisor liveness probe + circuit breaker (S2).** Builds on S1's
   `pincher supervised`. Adds two protections against pathological
   inner states:

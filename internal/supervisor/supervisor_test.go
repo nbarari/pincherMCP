@@ -556,6 +556,120 @@ func TestSupervisor_CircuitBreakerTrips(t *testing.T) {
 	}
 }
 
+// TestSupervisor_StatusToolReturnsResponse: a tools/call for the
+// supervisor's status tool is intercepted (NOT forwarded to inner)
+// and a synthesized JSON-RPC response lands at the client.
+func TestSupervisor_StatusToolReturnsResponse(t *testing.T) {
+	clientStdinR, clientStdinW := io.Pipe()
+	var clientStdout bytes.Buffer
+
+	fake := newFakeInner(1)
+
+	sup := &Supervisor{
+		Stdin:         clientStdinR,
+		Stdout:        &clientStdout,
+		Stderr:        io.Discard,
+		ProbeInterval: 24 * time.Hour, // disable probes for clarity
+		spawnFn:       func() (*innerProc, error) { return fake.makeProc(), nil },
+	}
+	sup.Restarts.Store(2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+
+	// Send a status tool call.
+	call := `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"` + SupervisorStatusToolName + `","arguments":{}}}` + "\n"
+	clientStdinW.Write([]byte(call))
+
+	// Wait for response on client stdout.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if bytes.Contains(clientStdout.Bytes(), []byte(`"id":42`)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !bytes.Contains(clientStdout.Bytes(), []byte(`"id":42`)) {
+		t.Fatalf("status tool response not seen on client stdout; got: %q", clientStdout.String())
+	}
+
+	// Inner should NOT have received the call.
+	if bytes.Contains(fake.Receive(), []byte(SupervisorStatusToolName)) {
+		t.Errorf("status tool call leaked to inner: %q", fake.Receive())
+	}
+
+	// Response payload should contain the SupervisorStatus fields.
+	out := clientStdout.String()
+	for _, want := range []string{"alive", "uptime_sec", "restarts", "probes_sent"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status response missing %q field: %q", want, out)
+		}
+	}
+
+	clientStdinW.Close()
+	fake.Close()
+	cancel()
+	<-runDone
+}
+
+// TestSupervisor_NonStatusToolPassesThrough: a tools/call for a
+// regular tool name (search, etc.) is NOT intercepted — it forwards
+// to the inner as normal.
+func TestSupervisor_NonStatusToolPassesThrough(t *testing.T) {
+	clientStdinR, clientStdinW := io.Pipe()
+	var clientStdout bytes.Buffer
+
+	fake := newFakeInner(1)
+
+	sup := &Supervisor{
+		Stdin:         clientStdinR,
+		Stdout:        &clientStdout,
+		Stderr:        io.Discard,
+		ProbeInterval: 24 * time.Hour,
+		spawnFn:       func() (*innerProc, error) { return fake.makeProc(), nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+
+	call := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search","arguments":{"query":"x"}}}` + "\n"
+	clientStdinW.Write([]byte(call))
+
+	waitForReceived(t, func() *fakeInner { return fake }, []byte(`"name":"search"`), time.Second)
+
+	clientStdinW.Close()
+	fake.Close()
+	cancel()
+	<-runDone
+}
+
+// TestSupervisor_StatusReflectsRestartReason: probe-timeout-triggered
+// restarts surface as "probe timeout (inner unresponsive)" in the
+// status payload, distinguishing from natural inner exits.
+func TestSupervisor_StatusReflectsRestartReason(t *testing.T) {
+	sup := &Supervisor{}
+	sup.startedAt = time.Now()
+
+	// No restart yet.
+	if got := sup.Status().LastRestartReason; got != "" {
+		t.Errorf("initial LastRestartReason = %q, want empty", got)
+	}
+
+	// Simulate a probe-timeout pre-stage + pump consume cycle.
+	sup.nextRestartReason = "probe timeout (inner unresponsive)"
+	override := sup.nextRestartReason
+	sup.nextRestartReason = ""
+	sup.lastRestartReason = override
+
+	if got := sup.Status().LastRestartReason; got != "probe timeout (inner unresponsive)" {
+		t.Errorf("LastRestartReason = %q, want probe timeout reason", got)
+	}
+}
+
 // TestRecordRestart_TrimsOldEntries: entries older than RestartWindow
 // don't count toward the breaker threshold.
 func TestRecordRestart_TrimsOldEntries(t *testing.T) {

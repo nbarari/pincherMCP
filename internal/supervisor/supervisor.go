@@ -56,6 +56,15 @@ const (
 	// the client).
 	probeIDPrefix = "__pincher_supervisor_probe_"
 
+	// SupervisorStatusToolName is the MCP tool name the supervisor
+	// answers directly (without forwarding to the inner). Agents call
+	// it to check supervisor health: restart count, probe stats,
+	// uptime. Out-of-band knowledge for now — the tool is NOT injected
+	// into tools/list responses (that's a future enhancement). The
+	// dotted notation distinguishes it from inner pincher tools, which
+	// are unprefixed (search, query, symbol, etc.).
+	SupervisorStatusToolName = "pincher.supervisor.status"
+
 	// Defaults for liveness/circuit-breaker tunables. Tests override.
 	defaultProbeInterval = 30 * time.Second
 	defaultProbeTimeout  = 5 * time.Second
@@ -137,6 +146,37 @@ type Supervisor struct {
 	// ProbesTimedOut counts probes that fired the timeout-kill.
 	// Non-zero in steady state suggests a flapping inner.
 	ProbesTimedOut atomic.Int64
+
+	// startedAt is set in Run before any pump goroutines launch.
+	// Surfaced via the status tool as uptime.
+	startedAt time.Time
+
+	// lastRestartReason records why the most recent respawn happened.
+	// Updated under restartHistoryMu. Surfaced via the status tool.
+	lastRestartReason string
+
+	// nextRestartReason is a one-shot override the probe-timeout path
+	// uses to inject "probe timeout (inner unresponsive)" before
+	// killInner; pumpInnerToClient picks it up on the next respawn
+	// and clears it. Without this, every respawn would be labelled
+	// "inner exited (code=X)" — unhelpful when the cause was our own
+	// probe deciding the inner was hung.
+	nextRestartReasonMu sync.Mutex
+	nextRestartReason   string
+}
+
+// SupervisorStatus is the response payload of the
+// `pincher.supervisor.status` MCP tool. Stable JSON shape (renaming or
+// removing fields is a breaking change for any agent that parses it).
+type SupervisorStatus struct {
+	Alive             bool   `json:"alive"`
+	UptimeSec         int64  `json:"uptime_sec"`
+	Restarts          int32  `json:"restarts"`
+	ProbesSent        int64  `json:"probes_sent"`
+	ProbesAnswered    int64  `json:"probes_answered"`
+	ProbesTimedOut    int64  `json:"probes_timed_out"`
+	LastRestartReason string `json:"last_restart_reason,omitempty"`
+	SupervisorVersion string `json:"supervisor_version,omitempty"`
 }
 
 // probeState is the pendingProbe payload — the time the probe went
@@ -198,6 +238,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// on every Copy call.
 	pumpCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	s.startedAt = time.Now()
 
 	p, err := s.spawnFn()
 	if err != nil {
@@ -288,6 +330,12 @@ func (s *Supervisor) pumpClientToInner(ctx context.Context) error {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
 			s.maybeCaptureInit(line)
+			// S3: intercept calls to the supervisor's own status tool;
+			// don't forward them to the inner. Direct response to the
+			// client matches the tool's MCP shape.
+			if s.handleStatusToolCall(line) {
+				continue
+			}
 			if writeErr := s.writeToInner(line); writeErr != nil {
 				slog.Debug("supervisor.client_to_inner.write_err",
 					"err", writeErr.Error(), "loss_window", "respawn")
@@ -349,6 +397,22 @@ func (s *Supervisor) pumpInnerToClient(ctx context.Context) error {
 			"exit_code", exitCode,
 			"wait_err", fmt.Sprint(waitErr),
 			"restarts_so_far", s.Restarts.Load())
+
+		// Record reason for the status tool. The probe-timeout path
+		// pre-stages a one-shot override; pump consumes + clears it
+		// here. Without override, fall back to the exit-code form.
+		s.nextRestartReasonMu.Lock()
+		override := s.nextRestartReason
+		s.nextRestartReason = ""
+		s.nextRestartReasonMu.Unlock()
+
+		reason := override
+		if reason == "" {
+			reason = fmt.Sprintf("inner exited (code=%d)", exitCode)
+		}
+		s.restartHistoryMu.Lock()
+		s.lastRestartReason = reason
+		s.restartHistoryMu.Unlock()
 
 		if err := s.respawn(); err != nil {
 			return fmt.Errorf("respawn after inner exit: %w", err)
@@ -480,8 +544,14 @@ func (s *Supervisor) sendProbe() {
 	time.AfterFunc(timeout, func() {
 		if s.pendingProbe.CompareAndSwap(state, nil) {
 			// We were the in-flight probe; nothing answered us in
-			// the timeout window. Treat the inner as hung.
+			// the timeout window. Treat the inner as hung. Stage a
+			// one-shot reason so the next respawn surfaces "probe
+			// timeout" rather than "inner exited (code=X)" via the
+			// status tool.
 			s.ProbesTimedOut.Add(1)
+			s.nextRestartReasonMu.Lock()
+			s.nextRestartReason = "probe timeout (inner unresponsive)"
+			s.nextRestartReasonMu.Unlock()
 			slog.Warn("supervisor.probe_timeout",
 				"id", id,
 				"sent_at", now,
@@ -613,6 +683,79 @@ func (s *Supervisor) respawn() error {
 	s.inner = p
 	slog.Info("supervisor.respawn", "init_replayed", len(s.initLine) > 0)
 	return nil
+}
+
+// Status returns a snapshot of the supervisor's runtime stats.
+// Atomic-loaded counters mean this is safe to call concurrently with
+// the pumps. Used both by the MCP status tool and by tests.
+func (s *Supervisor) Status() SupervisorStatus {
+	s.restartHistoryMu.Lock()
+	reason := s.lastRestartReason
+	s.restartHistoryMu.Unlock()
+
+	uptime := int64(0)
+	if !s.startedAt.IsZero() {
+		uptime = int64(time.Since(s.startedAt).Seconds())
+	}
+
+	s.mu.RLock()
+	alive := s.inner != nil
+	s.mu.RUnlock()
+
+	return SupervisorStatus{
+		Alive:             alive,
+		UptimeSec:         uptime,
+		Restarts:          s.Restarts.Load(),
+		ProbesSent:        s.ProbesSent.Load(),
+		ProbesAnswered:    s.ProbesAnswered.Load(),
+		ProbesTimedOut:    s.ProbesTimedOut.Load(),
+		LastRestartReason: reason,
+	}
+}
+
+// handleStatusToolCall intercepts a JSON-RPC tools/call for the
+// supervisor's status tool, writes a synthesized response back to the
+// client, and returns true to signal "do NOT forward to inner". Returns
+// false for any line that isn't a status-tool call (parse error, wrong
+// method, wrong tool name) — caller forwards as usual.
+func (s *Supervisor) handleStatusToolCall(line []byte) bool {
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return false
+	}
+	if msg.Method != "tools/call" {
+		return false
+	}
+	if msg.Params.Name != SupervisorStatusToolName {
+		return false
+	}
+
+	status := s.Status()
+	statusJSON, _ := json.MarshalIndent(status, "", "  ")
+
+	// MCP CallToolResult shape: {"content": [{"type":"text","text":"..."}]}
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      msg.ID,
+		"result": map[string]any{
+			"content": []map[string]any{
+				{"type": "text", "text": string(statusJSON)},
+			},
+		},
+	}
+	out, _ := json.Marshal(resp)
+	out = append(out, '\n')
+
+	if _, err := s.Stdout.Write(out); err != nil {
+		slog.Warn("supervisor.status_write_err", "err", err.Error())
+	}
+	return true
 }
 
 // shutdownInner kills and reaps the current inner. Idempotent. Tolerates
