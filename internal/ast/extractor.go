@@ -600,37 +600,61 @@ func buildGoSignature(d *ast.FuncDecl) string {
 	sb.WriteString(d.Name.Name)
 	sb.WriteString("(")
 	if d.Type.Params != nil {
-		for i, p := range d.Type.Params.List {
-			if i > 0 {
-				sb.WriteString(", ")
-			}
-			for j, n := range p.Names {
-				if j > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(n.Name)
-			}
-			sb.WriteString(" ")
-			sb.WriteString(goTypeToString(p.Type))
-		}
+		writeGoFieldList(&sb, d.Type.Params.List)
 	}
 	sb.WriteString(")")
-	if d.Type.Results != nil {
+	if d.Type.Results != nil && len(d.Type.Results.List) > 0 {
 		sb.WriteString(" ")
-		if len(d.Type.Results.List) > 1 {
+		// Parens are mandatory in Go when any return is named OR when
+		// there are multiple returns. A single unnamed return like
+		// `func f() error` is bare; a single named return like
+		// `func f() (x int)` requires parens.
+		needParens := len(d.Type.Results.List) > 1
+		if !needParens {
+			for _, r := range d.Type.Results.List {
+				if len(r.Names) > 0 {
+					needParens = true
+					break
+				}
+			}
+		}
+		if needParens {
 			sb.WriteString("(")
 		}
-		for i, r := range d.Type.Results.List {
-			if i > 0 {
-				sb.WriteString(", ")
-			}
-			sb.WriteString(goTypeToString(r.Type))
-		}
-		if len(d.Type.Results.List) > 1 {
+		writeGoFieldList(&sb, d.Type.Results.List)
+		if needParens {
 			sb.WriteString(")")
 		}
 	}
 	return sb.String()
+}
+
+// writeGoFieldList renders a *ast.FieldList in source-equivalent form.
+// Each Field carries 0..N names and one type; grouped same-type fields
+// like `func f(a, b, c int)` come through as a single Field with three
+// names. The pre-fix renderer (#245) treated each Field as one entry
+// regardless of name count, so a 5-named-1-typed return came back as
+// a 1-typed signature (wrong arity). This walk emits the names then
+// the type, restoring the source shape.
+func writeGoFieldList(sb *strings.Builder, fields []*ast.Field) {
+	for i, f := range fields {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		for j, n := range f.Names {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(n.Name)
+		}
+		// Only insert a separating space when names were emitted; an
+		// unnamed param like `func f(int)` should render as `int`,
+		// not ` int` (the pre-fix code wrote a leading space here).
+		if len(f.Names) > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(goTypeToString(f.Type))
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
