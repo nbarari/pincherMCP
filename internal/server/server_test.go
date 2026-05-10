@@ -5138,7 +5138,7 @@ func TestHandleIndex_NonZeroNoUnnecessaryDiagnosis(t *testing.T) {
 func TestSuggestNextSteps_FunctionRecommendsContextAndTrace(t *testing.T) {
 	suggestions := suggestNextSteps(db.Symbol{
 		ID: "a.go::pkg.F#Function", Name: "F", Kind: "Function",
-	})
+	}, false)
 	if len(suggestions) != 2 {
 		t.Fatalf("Function should get 2 suggestions, got %d", len(suggestions))
 	}
@@ -5157,7 +5157,7 @@ func TestSuggestNextSteps_FunctionRecommendsContextAndTrace(t *testing.T) {
 func TestSuggestNextSteps_SettingRecommendsSymbol(t *testing.T) {
 	suggestions := suggestNextSteps(db.Symbol{
 		ID: "k.yaml::services.web.image#Setting", Name: "image", Kind: "Setting",
-	})
+	}, false)
 	if len(suggestions) != 1 {
 		t.Fatalf("Setting should get 1 suggestion, got %d", len(suggestions))
 	}
@@ -5169,7 +5169,7 @@ func TestSuggestNextSteps_SettingRecommendsSymbol(t *testing.T) {
 func TestSuggestNextSteps_DocumentRecommendsSymbolWithFieldsProjection(t *testing.T) {
 	suggestions := suggestNextSteps(db.Symbol{
 		ID: "url::https://example.com#Document", Name: "example", Kind: "Document",
-	})
+	}, false)
 	if len(suggestions) != 1 {
 		t.Fatalf("Document should get 1 suggestion, got %d", len(suggestions))
 	}

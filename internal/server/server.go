@@ -2519,15 +2519,27 @@ func suggestEmptySearchNextSteps(query, kind, language string, minConfidence flo
 // top search result's kind. Mirrors the workflow advice in CLAUDE.md but
 // concretised against the actual ID, so the agent doesn't have to translate
 // "use context on a Function result" into "context(id=...)".
-func suggestNextSteps(top db.Symbol) []map[string]string {
+//
+// `nameAmbiguous` says whether the top result's `Name` is shared with at
+// least one other returned row. When true, the trace recommendation uses
+// `qualified_name` instead of bare `name` so the agent doesn't follow the
+// suggestion into the wrong symbol — `trace` resolves an ambiguous bare
+// name to the first match silently. (#291)
+func suggestNextSteps(top db.Symbol, nameAmbiguous bool) []map[string]string {
 	id := top.ID
+	traceName := top.Name
+	traceWhy := "find callers if you're about to change behaviour other code depends on"
+	if nameAmbiguous && top.QualifiedName != "" {
+		traceName = top.QualifiedName
+		traceWhy = "find callers; using qualified_name because bare name is shared with other returned results"
+	}
 	switch top.Kind {
 	case "Function", "Method":
 		return []map[string]string{
 			{"tool": "context", "args": fmt.Sprintf(`{"id":"%s"}`, id),
 				"why": "read the function plus everything it directly imports/calls (one shot, ~90% token reduction)"},
-			{"tool": "trace", "args": fmt.Sprintf(`{"name":"%s"}`, top.Name),
-				"why": "find callers if you're about to change behaviour other code depends on"},
+			{"tool": "trace", "args": fmt.Sprintf(`{"name":"%s"}`, traceName),
+				"why": traceWhy},
 		}
 	case "Class", "Interface", "Type", "Enum":
 		return []map[string]string{
@@ -2581,14 +2593,19 @@ func suggestNextStepsForResults(results []db.SearchResult) []map[string]string {
 	top := results[0].Symbol
 
 	fileSet := make(map[string]bool, len(results))
+	nameCount := 0
 	for _, r := range results {
 		fileSet[r.Symbol.FilePath] = true
+		if r.Symbol.Name == top.Name {
+			nameCount++
+		}
 	}
 	fileCount := len(fileSet)
+	nameAmbiguous := nameCount > 1
 
 	// Shape 1: many results spread across many files. Orient before drilling.
 	if len(results) > 10 && fileCount > 5 {
-		base := suggestNextSteps(top)
+		base := suggestNextSteps(top, nameAmbiguous)
 		out := make([]map[string]string, 0, len(base)+1)
 		out = append(out, map[string]string{
 			"tool": "architecture",
@@ -2605,14 +2622,14 @@ func suggestNextStepsForResults(results []db.SearchResult) []map[string]string {
 
 	// Shape 2: single high-confidence result. Trim secondary suggestions.
 	if len(results) == 1 && top.ExtractionConfidence >= 0.9 {
-		base := suggestNextSteps(top)
+		base := suggestNextSteps(top, nameAmbiguous)
 		if len(base) > 1 {
 			return base[:1]
 		}
 		return base
 	}
 
-	return suggestNextSteps(top)
+	return suggestNextSteps(top, nameAmbiguous)
 }
 
 func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -3151,7 +3168,9 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 	// source. Mirrors the pattern in handleSearch's _meta.next_steps.
 	if len(hotspots) > 0 {
 		data["_meta"] = map[string]any{
-			"next_steps": suggestNextSteps(hotspots[0]),
+			// Hotspot is the most-called symbol — by construction it's
+			// canonical, so name ambiguity isn't a concern here.
+			"next_steps": suggestNextSteps(hotspots[0], false),
 		}
 	} else if len(entryPoints) > 0 {
 		// No hotspots (project has no CALLS edges yet — common for
