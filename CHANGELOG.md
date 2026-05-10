@@ -7,6 +7,17 @@ minors.
 
 ## [Unreleased]
 
+### Fixed
+- **`pincher web` auto-start fails on Windows** (#232). The detached
+  child spawned by `web_windows.go startDetached` had no inherited
+  console (DETACHED_PROCESS), so the always-on MCP stdio reader hit
+  `INVALID_HANDLE_VALUE` immediately, errored, and `log.Fatalf` tore
+  the whole process down — including the in-flight HTTP server,
+  before the readiness probe fired. Fix: a new `--no-stdio` flag
+  skips the MCP stdio loop entirely; `pincher web`'s spawn path now
+  passes it. The flag refuses to run without `--http` (the process
+  would have nothing to do). Same fix benefits Unix detached spawns.
+
 ### Added
 - **`$PINCHER_DATA_DIR` environment variable** — when set, `db.DataDir()`
   returns the env var's value verbatim instead of the platform default

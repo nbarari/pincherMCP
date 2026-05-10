@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -365,4 +366,74 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// TestNoStdio_RequiresHTTP asserts the --no-stdio flag refuses to run
+// without --http (the process would have nothing to do — no MCP, no
+// HTTP). The diagnostic message is the gate, not the exit code, since
+// hand-authored exit codes drift; matching the message catches both
+// "removed the check" and "renamed the check" regressions.
+func TestNoStdio_RequiresHTTP(t *testing.T) {
+	bin := buildPincherBinary(t)
+	cmd := exec.Command(bin, "--no-stdio")
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("--no-stdio without --http should exit non-zero; got success.\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("--no-stdio requires --http")) {
+		t.Errorf("expected diagnostic 'requires --http'; got:\n%s", out)
+	}
+}
+
+// TestNoStdio_WithHTTP_StaysAlive asserts the detached-spawn fix for
+// #232 — `pincher --http :PORT --no-stdio` keeps serving HTTP without
+// requiring an inherited console. The Windows web auto-start flow
+// (web_windows.go startDetached) relies on this; the test exercises it
+// directly via exec.Cmd with no stdin attached, which mirrors what
+// DETACHED_PROCESS produces.
+func TestNoStdio_WithHTTP_StaysAlive(t *testing.T) {
+	bin := buildPincherBinary(t)
+
+	// Pick a free port so parallel runs don't collide.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	addr := "127.0.0.1:" + itoa(port)
+
+	dataDir := t.TempDir()
+	cmd := exec.Command(bin, "--http", addr, "--no-stdio", "--data-dir", dataDir)
+	cmd.Env = pincherCoverEnv()
+	cmd.Stdin = nil // mirror what startDetached does — no inherited console
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+
+	// Poll /v1/health for up to 10s; the child should bind quickly.
+	url := "http://" + addr + "/v1/health"
+	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Post(url, "application/json", strings.NewReader("{}"))
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return // success
+			}
+			lastErr = nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("--no-stdio child never became ready on %s within 10s (last err: %v)", url, lastErr)
 }

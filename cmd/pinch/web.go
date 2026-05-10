@@ -172,7 +172,13 @@ func startBackgroundHTTPServer(startPort int, readyTimeout time.Duration) (strin
 		exe = resolved
 	}
 
-	cmd := exec.Command(exe, "--http", addr)
+	// --no-stdio prevents the detached child from running the MCP stdio
+	// loop. On Windows, DETACHED_PROCESS gives the child no inherited
+	// console; the stdio reader would error immediately and tear down
+	// the HTTP server before our readiness probe fires (#232). On Unix
+	// the child inherits no stdin (we redirect to /dev/null effectively
+	// via cmd.Stdin = nil below), so the same flag matters there too.
+	cmd := exec.Command(exe, "--http", addr, "--no-stdio")
 	cmd.Env = os.Environ()
 	// Detach from parent's stdin/stdout — the child should outlive this `web`
 	// invocation. Stderr is silenced; fatal startup errors surface via the

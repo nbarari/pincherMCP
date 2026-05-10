@@ -81,6 +81,7 @@ func main() {
 		slowQueryMS = flag.Int64("slow-query-ms", 0, "Persist tool calls slower than N ms to the slow_queries table for `pincher doctor` to surface (#42). 0 = disabled (zero overhead).")
 		dbReaders   = flag.Int("db-readers", db.DefaultReaderPoolSize, "Maximum concurrent SQLite read connections. Higher = more parallel tool calls behind a busy server; capped at 32. Falls back to $PINCHER_DB_READERS.")
 		maxFileMB   = flag.Int("max-file-size-mb", int(index.DefaultMaxFileSize/(1024*1024)), "Per-file size cap during indexing (MB). Files larger than this are recorded as `file_too_large` failures and skipped without being read into memory (#111). 0 disables the cap. Falls back to $PINCHER_MAX_FILE_SIZE_MB.")
+		noStdio     = flag.Bool("no-stdio", false, "Don't run the MCP stdio loop. Used by `pincher web` when spawning a detached HTTP-only child on Windows, where the child has no inherited console and the stdio reader would error immediately and tear down the in-flight HTTP server (#232). Requires --http or the process has nothing to do.")
 	)
 	// Custom usage banner: subcommand summary + the standard flag list.
 	// Without this, `pincher --help` only shows flags — and a new user has
@@ -201,7 +202,18 @@ func main() {
 		}()
 	}
 
-	// Run MCP server over stdio
+	// Run MCP server over stdio — unless --no-stdio is set, in which case
+	// we block on context cancellation so the HTTP server (started above)
+	// keeps serving. --no-stdio without --http is nonsensical (the process
+	// has nothing to do); refuse it loudly rather than silently idling.
+	if *noStdio {
+		if *httpAddr == "" {
+			fmt.Fprintln(os.Stderr, "pincher: --no-stdio requires --http (otherwise the process has nothing to do)")
+			os.Exit(1)
+		}
+		<-ctx.Done()
+		return
+	}
 	if err := srv.MCPServer().Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		log.Fatalf("pincherMCP: server error: %v", err)
 	}
