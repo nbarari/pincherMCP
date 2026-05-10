@@ -633,8 +633,16 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 		}
 	}
 
-	sqlQ += " LIMIT ?"
-	args = append(args, e.maxRows()*2)
+	// #308: skip the SQL LIMIT when the query is aggregating
+	// (COUNT projection). The pre-fix path clamped the row scan to
+	// `max_rows * 2` even for COUNT queries, so `RETURN COUNT(n)`
+	// silently returned the clamp instead of the cardinality.
+	// Non-aggregating queries keep the safety clamp so a runaway
+	// query can't drag the entire symbols table into memory.
+	if !hasAggregation(q) {
+		sqlQ += " LIMIT ?"
+		args = append(args, e.maxRows()*2)
+	}
 
 	rows, err := e.DB.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
@@ -661,6 +669,19 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 	}
 
 	return buildResult(nodes, q)
+}
+
+// hasAggregation reports whether any RETURN variable in q is an
+// aggregation (currently only COUNT). Aggregating queries must scan
+// the full match set so the COUNT reflects cardinality, not the
+// safety LIMIT (#308).
+func hasAggregation(q *queryAST) bool {
+	for _, rv := range q.returnVars {
+		if rv.fn == "COUNT" {
+			return true
+		}
+	}
+	return false
 }
 
 // runJoinQuery handles: MATCH (a:Kind)-[:EDGE]->(b:Kind) WHERE ... RETURN ...
@@ -723,8 +744,11 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 		}
 	}
 
-	sqlQ += " LIMIT ?"
-	args = append(args, e.maxRows()*2)
+	// #308: same skip-when-aggregating treatment as runNodeScan.
+	if !hasAggregation(q) {
+		sqlQ += " LIMIT ?"
+		args = append(args, e.maxRows()*2)
+	}
 
 	rows, err := e.DB.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
