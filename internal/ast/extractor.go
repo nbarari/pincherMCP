@@ -603,51 +603,193 @@ func extractGoCalls(body *ast.BlockStmt, callerQN string) []ExtractedEdge {
 	return edges
 }
 
-// extractGoReads emits READS edges for every distinct identifier
+// extractGoReads emits READS and WRITES edges for identifiers
 // referenced inside a function body. The post-pass resolution drops
 // references that don't match a known package-level Variable symbol,
 // which is the natural filter without doing scope analysis at
 // extraction time. Local variables, parameters, types, and function
 // names all surface here and get dropped at resolve-time.
 //
-// One edge per distinct identifier per function (deduped here so a
-// var read 50 times in one body emits one READS, not 50). Confidence
-// 0.5 — lower than CALLS (0.7) because over-emission is expected.
+// Edge attribution:
+//   - WRITES: identifier appears as the LHS of an assignment (`Cache =
+//     ...`) or in an inc/dec statement (`Counter++`). Short-var-decls
+//     (`x := ...`) are LOCAL declarations, not writes-to-package-vars,
+//     so they are excluded — emitting WRITES on them would produce
+//     false-positive cross-function edges via name collision.
+//   - READS: every other identifier reference in the body, including
+//     the RHS of assignments. A `Cache = Cache + 1` produces both
+//     a WRITES and a READS for `Cache`, which is the correct model.
+//   - Pure write (`Cache = make(...)`): WRITES only — the LHS Ident
+//     is not walked as a read because the AssignStmt branch consumes
+//     LHS expressions before recursing into RHS.
+//
+// One edge per (name, kind) per function (deduped here so a var read
+// 50 times emits one READS, not 50). Confidence 0.5 — lower than
+// CALLS (0.7) because over-emission is expected and resolution is
+// what filters.
 //
 // #247 #3: enables `trace inbound name=Cache` to surface every
-// function that reads a package-level var. Refactoring a var name
-// becomes a one-shot trace instead of a Grep + judgment exercise.
+// function reading or writing a package-level var. The READS / WRITES
+// split lets refactor planners ask the narrower question — who
+// modifies this vs who only observes it.
 func extractGoReads(body *ast.BlockStmt, callerQN string) []ExtractedEdge {
 	if body == nil {
 		return nil
 	}
-	seen := make(map[string]bool)
+	seenReads := make(map[string]bool)
+	seenWrites := make(map[string]bool)
 	var edges []ExtractedEdge
-	ast.Inspect(body, func(n ast.Node) bool {
-		id, ok := n.(*ast.Ident)
-		if !ok {
-			return true
+
+	emitWrite := func(name string) {
+		if isPredeclaredOrBlank(name) || seenWrites[name] {
+			return
 		}
-		// Skip the blank identifier and Go's predeclared booleans/nil/etc;
-		// they would never resolve to a Variable symbol but they're noisy
-		// in pending-edge memory. Cheap filter at extraction time.
-		switch id.Name {
-		case "_", "true", "false", "nil", "iota":
-			return true
-		}
-		if seen[id.Name] {
-			return true
-		}
-		seen[id.Name] = true
+		seenWrites[name] = true
 		edges = append(edges, ExtractedEdge{
 			FromQN:     callerQN,
-			ToName:     id.Name,
+			ToName:     name,
+			Kind:       "WRITES",
+			Confidence: 0.5,
+		})
+	}
+	emitRead := func(name string) {
+		if isPredeclaredOrBlank(name) || seenReads[name] {
+			return
+		}
+		seenReads[name] = true
+		edges = append(edges, ExtractedEdge{
+			FromQN:     callerQN,
+			ToName:     name,
 			Kind:       "READS",
 			Confidence: 0.5,
 		})
-		return true
-	})
+	}
+
+	// walkRead recursively walks any expression tree as a read context —
+	// every Ident inside is a READS.
+	var walkRead func(n ast.Node)
+	walkRead = func(n ast.Node) {
+		if n == nil {
+			return
+		}
+		ast.Inspect(n, func(child ast.Node) bool {
+			if id, ok := child.(*ast.Ident); ok {
+				emitRead(id.Name)
+			}
+			return true
+		})
+	}
+
+	// Custom recursive walker that recognises AssignStmt and IncDecStmt
+	// at the *statement* level so we don't double-walk LHS expressions
+	// as reads. Unrecognised nodes fall through to walkRead which
+	// emits READS for every Ident underneath.
+	var walk func(n ast.Node)
+	walk = func(n ast.Node) {
+		if n == nil {
+			return
+		}
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			// Short-var-decl introduces locals, not writes to existing
+			// vars. The LHS names are local declarations; skip writes
+			// emission and walk LHS as reads (covers cases like
+			// `x, err := f()` where you might want err visible).
+			isWrite := v.Tok != token.DEFINE
+			for _, lhs := range v.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && isWrite {
+					emitWrite(id.Name)
+				} else {
+					walkRead(lhs)
+				}
+			}
+			for _, rhs := range v.Rhs {
+				walkRead(rhs)
+			}
+		case *ast.IncDecStmt:
+			if id, ok := v.X.(*ast.Ident); ok {
+				emitWrite(id.Name)
+			} else {
+				walkRead(v.X)
+			}
+		case *ast.BlockStmt:
+			for _, stmt := range v.List {
+				walk(stmt)
+			}
+		case *ast.IfStmt:
+			walk(v.Init)
+			walkRead(v.Cond)
+			walk(v.Body)
+			walk(v.Else)
+		case *ast.ForStmt:
+			walk(v.Init)
+			walkRead(v.Cond)
+			walk(v.Post)
+			walk(v.Body)
+		case *ast.RangeStmt:
+			// `for k, v := range x` — k/v are local; only Key/Value
+			// when assignment-style (`=`) count as writes.
+			isWrite := v.Tok != token.DEFINE && v.Tok != token.ILLEGAL
+			if v.Key != nil {
+				if id, ok := v.Key.(*ast.Ident); ok && isWrite {
+					emitWrite(id.Name)
+				} else {
+					walkRead(v.Key)
+				}
+			}
+			if v.Value != nil {
+				if id, ok := v.Value.(*ast.Ident); ok && isWrite {
+					emitWrite(id.Name)
+				} else {
+					walkRead(v.Value)
+				}
+			}
+			walkRead(v.X)
+			walk(v.Body)
+		case *ast.SwitchStmt:
+			walk(v.Init)
+			walkRead(v.Tag)
+			walk(v.Body)
+		case *ast.TypeSwitchStmt:
+			walk(v.Init)
+			walk(v.Assign)
+			walk(v.Body)
+		case *ast.SelectStmt:
+			walk(v.Body)
+		case *ast.CaseClause:
+			for _, e := range v.List {
+				walkRead(e)
+			}
+			for _, stmt := range v.Body {
+				walk(stmt)
+			}
+		case *ast.CommClause:
+			walk(v.Comm)
+			for _, stmt := range v.Body {
+				walk(stmt)
+			}
+		case *ast.LabeledStmt:
+			walk(v.Stmt)
+		default:
+			// Expression statements, return statements, defer, go,
+			// declarations, etc — walk every Ident underneath as a read.
+			walkRead(n)
+		}
+	}
+	walk(body)
 	return edges
+}
+
+// isPredeclaredOrBlank skips identifiers that would never resolve to
+// a project-level Variable symbol — saves pending-edge memory at the
+// extraction stage. Centralised so the read/write paths share the
+// same exclusion list and don't drift.
+func isPredeclaredOrBlank(name string) bool {
+	switch name {
+	case "_", "true", "false", "nil", "iota":
+		return true
+	}
+	return false
 }
 
 func goCalleeToString(expr ast.Expr) string {

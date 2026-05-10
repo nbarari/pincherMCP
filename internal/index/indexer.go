@@ -354,7 +354,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 					deferredImports = append(deferredImports, e)
 					continue
 				}
-				if e.Kind == "READS" && lang == "Go" {
+				if (e.Kind == "READS" || e.Kind == "WRITES") && lang == "Go" {
 					deferredReads = append(deferredReads, e)
 					continue
 				}
@@ -1067,18 +1067,21 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) 
 	return len(edges)
 }
 
-// resolveReads converts deferred Go READS edges into concrete db.Edge
-// rows when the resolved target is a Variable symbol. Anything else
-// (Function, Method, Class, local-name shadow with no Variable in the
-// project) is dropped — that's the natural filter for the
-// over-emission from extractGoReads which deliberately walks every
-// identifier without scope analysis. Self-edges and duplicates are
-// dropped. Returns the number of edges actually persisted.
+// resolveReads converts deferred Go READS and WRITES edges into
+// concrete db.Edge rows when the resolved target is a Variable symbol.
+// Anything else (Function, Method, Class, local-name shadow with no
+// Variable in the project) is dropped — that's the natural filter for
+// the over-emission from extractGoReads which deliberately walks every
+// identifier without scope analysis. Self-edges and duplicates within
+// a (kind) are dropped — but a function that both reads AND writes a
+// var produces both edges (different kinds, different keys). Returns
+// the number of edges actually persisted.
 //
-// #247 #3: enables `trace inbound name=Cache` to surface every
-// function reading a package-level var. Confidence is preserved from
-// the extracted edge (0.5 for unresolved-by-default READS — lower
-// than CALLS at 0.7 because over-emission is expected).
+// #247 #3: READS surfaces every reader of a package var; WRITES
+// surfaces every modifier. Trace can answer the narrower question
+// "who modifies Cache" vs "who only observes it" by filtering on
+// edge kind. Confidence is preserved from the extracted edge (0.5 —
+// lower than CALLS at 0.7 because over-emission is expected).
 func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) int {
 	if len(pending) == 0 {
 		return 0
@@ -1154,16 +1157,25 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 		if to.id == "" || !to.isVar || fromID == to.id {
 			continue
 		}
-		key := fromID + "\x00" + to.id
+		// Dedupe key includes the edge kind so a function that BOTH
+		// reads and writes the same var produces two edges (READS +
+		// WRITES) — they answer different refactor questions.
+		key := fromID + "\x00" + to.id + "\x00" + e.Kind
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
+		// Preserve the extractor's edge kind verbatim so READS stays
+		// READS and WRITES stays WRITES through resolution.
+		kind := e.Kind
+		if kind != "READS" && kind != "WRITES" {
+			kind = "READS" // defensive default for any future extractor that forgets to set Kind
+		}
 		edges = append(edges, db.Edge{
 			ProjectID:  projectID,
 			FromID:     fromID,
 			ToID:       to.id,
-			Kind:       "READS",
+			Kind:       kind,
 			Confidence: e.Confidence,
 		})
 	}
