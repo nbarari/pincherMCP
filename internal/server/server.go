@@ -2280,7 +2280,7 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// can match doc-section titles and need the floor.
 	//
 	// Callers pass min_confidence explicitly to override either default.
-	minConfidence := floatArg(args, "min_confidence", defaultMinConfidenceFor(query))
+	minConfidence := floatArg(args, "min_confidence", defaultMinConfidenceFor(query, corpus))
 
 	// project=* searches all indexed projects — no project filter applied.
 	var projectID string
@@ -2709,22 +2709,29 @@ func isAlphanum(c byte) bool {
 }
 
 // defaultMinConfidenceFor picks the right min_confidence default for a
-// query that doesn't carry an explicit threshold (#247 #5).
+// query that doesn't carry an explicit threshold (#247 #5 #379).
 //
 // The 0.71 baseline filters bottom-floor noise (README/CHANGELOG H1
-// sections at 0.70) on wide keyword searches — necessary because a
-// doc-section title can BM25-match an unrelated identifier query. But
-// for an exact identifier query like `registerTools`, no documentation
-// symbol could share the name; the doc-quality floor is irrelevant
-// and silently drops valid results.
+// sections at 0.70) on wide keyword searches against the code corpus —
+// necessary because a doc-section title can BM25-match an unrelated
+// identifier query. But two cases break that defaulting:
 //
-// Heuristic: if the query is a single identifier-shaped token (one or
-// more letters/digits/underscores, no spaces, no wildcards, no
-// quotes), default to 0.0 — surface every match. Anything more
-// complex (phrase, wildcard, multi-word) keeps 0.71.
+//  1. Exact identifier queries (#247): `registerTools` can't share a
+//     name with a doc symbol, so the floor is irrelevant. Default 0.0.
 //
-// This is a default only; explicit min_confidence on the call wins.
-func defaultMinConfidenceFor(query string) float64 {
+//  2. Explicit corpus=docs (#379): the caller is asking for Markdown /
+//     fetched-document content, which is exactly what 0.71 was designed
+//     to filter out. Markdown sections extract at 0.7-0.81, so the
+//     default silently zero-results the caller's intended target.
+//     When corpus=docs, default 0.0 — the caller's scope choice IS
+//     the noise filter.
+//
+// Anything else (phrase, wildcard, multi-word against code/config) keeps
+// the 0.71 baseline. Explicit min_confidence on the call wins.
+func defaultMinConfidenceFor(query, corpus string) float64 {
+	if corpus == "docs" {
+		return 0.0
+	}
 	if isExactIdentifierQuery(query) {
 		return 0.0
 	}
