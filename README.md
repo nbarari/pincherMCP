@@ -206,7 +206,7 @@ Live milestone burndown: <https://github.com/kwad77/pincher/milestones>. Full pu
 
 ## Known limitations
 
-- **Sequence-rename ID instability in YAML.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0` → `tasks.1`). Move detection catches some cases but not deterministically. Verdict (fix vs document-as-won't-fix) tracked at [#205](https://github.com/kwad77/pincher/issues/205) for v0.7.
+- **Sequence-rename ID instability in YAML / JSON arrays.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0` → `tasks.1`). Move detection catches some cases but not deterministically. Decided as won't-fix in v0.7.0 ([#205](https://github.com/kwad77/pincher/issues/205)) — the blast radius is mostly Ansible/k8s manifests which are searched via `corpus=config` BM25 anyway, where qualified-name churn is invisible. For long-lived stored references, prefer searching by name over storing the id. Full rationale in [REFERENCE.md → Known limitations](docs/REFERENCE.md#known-limitations).
 - **Single-user SQLite.** Cross-process indexing is safe (filesystem lockfile). Team / enterprise shared indexes need a server mode — explicitly out of v1.0 scope.
 - **~7 languages without extractors.** Scala, Lua, Zig, Elixir, Haskell, Dart, R are detected as source but emit zero symbols. Adding any of them = implement one Go interface.
 - **HTML / XML extractors not yet shipped.** Markup-heavy projects (component libraries, .NET csproj, Maven pom.xml) currently fall through to no extraction. Both planned for [v0.7](https://github.com/kwad77/pincher/milestone/5) ([#100](https://github.com/kwad77/pincher/issues/100), [#101](https://github.com/kwad77/pincher/issues/101)).

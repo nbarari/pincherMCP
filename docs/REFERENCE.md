@@ -778,11 +778,18 @@ Each release tier names a theme and the issues that close it. Issue numbers link
 
 ## Known limitations
 
-- **`go install` doesn't work yet.** `go.mod`'s module path (`github.com/kwad77/pincher`) doesn't match the GitHub URL (`kwad77/pincher`). `go install github.com/...@latest` fails. Tracked: rename module-path or switch the GitHub repo to a matching org. Until then: `git clone` + `go build` is the install path.
-- **No release binaries yet.** The `pincher update` standalone path is ready to download asset-named `pincher_<os>_<arch>[.exe]` from each release tag, but the release workflow doesn't upload artifacts. Until that ships, in-repo `pincher update` (git pull + build) is the supported path.
-- **Sequence-rename ID instability in YAML.** Inserting an item at index 0 of a YAML sequence renames every downstream symbol's qualified name (`tasks.0.name` → `tasks.1.name`). Move detection via `(qualified_name, kind)` matching catches some of this but not deterministically.
+- **Sequence-rename ID instability in YAML / JSON arrays** (#205, decided as won't-fix for v0.7.0). Inserting an item at index 0 of a YAML sequence (or JSON array) renames every downstream symbol's qualified name: `tasks.0.name` becomes `tasks.1.name`, the old ID disappears, a new ID appears. Move detection via `(qualified_name, kind)` matching catches *some* of this but not deterministically — the qualified names changed, so the move-detection key doesn't match.
+
+  **Practical impact**: in `pincher changes` output, a sequence reorder shows up as N deletes + N adds rather than a single move. In long-lived stored ID references (e.g. an ADR pinning a specific symbol id), inserting a new item at the top of a sequence breaks the reference.
+
+  **Why not fix it now**: a content-hash ID scheme (deterministic across reorders) is real engineering work — symbol-ID format change, migration path, full re-index of every existing DB. The blast radius is mostly Ansible / k8s manifests, and those are typically searched via `corpus=config` BM25 anyway, where the qualified-name churn is invisible to FTS5. We'd be paying a structural cost for a problem that real users mostly don't hit through the queries pincher is good at.
+
+  **Workarounds**: use named-list syntax where the YAML schema allows it (`tasks: [{name: deploy, ...}]` reads `tasks.0.name = "deploy"` regardless of position once the parser sees `name:` as the canonical key — a future enhancement). For ADRs and long-lived references, prefer searching by symbol *name* (`pincher search`) over storing the symbol id.
+
+  **Revisit trigger**: real complaints with reproducible churn. v0.8 / v1.1 territory. Tracked at #205.
 - **Single-user SQLite.** Concurrent processes are safely serialized via `internal/index/lockfile.go`, but the `sessions` table and symbol store are local-only. Team/enterprise shared indexes need a server mode that's not built yet.
-- **Regex gap.** ~13 non-Go languages still use regex extraction (~70–85% accuracy). `extraction_confidence` surfaces this to callers. Full fix = per-language pure-Go AST libraries (no tree-sitter / no CGO), tracked in the extractor refactor plan.
+- **Single-user SQLite.** Concurrent processes are safely serialized via `internal/index/lockfile.go`, but the `sessions` table and symbol store are local-only. Team/enterprise shared indexes need a server mode that's not built yet.
+- **Regex gap.** ~7 non-Go languages still use regex extraction (~70–85% accuracy). `extraction_confidence` surfaces this to callers. Full fix = per-language pure-Go AST libraries (no tree-sitter / no CGO), tracked in the extractor refactor plan.
 - **HTTP auth.** The `--http` REST API is open by default; bearer-token auth is opt-in via `--http-key` (or `PINCHER_HTTP_KEY`). For non-localhost deployments, set `--http-key` or front pincher with a reverse proxy.
 - **Two-process stats gap.** The MCP stdio process and the HTTP dashboard process can be separate (e.g. `pincher web` auto-spawns its own). Stats are shared via the `sessions` SQLite table (flushed every 10 s). The dashboard shows all-time totals from DB when it has no live MCP session.
 - **`symbols` batch cap.** `maxBatchSymbols = 100` — requests with more than 100 IDs are rejected. Larger batches: split client-side.
