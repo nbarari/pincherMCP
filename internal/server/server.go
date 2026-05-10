@@ -2078,15 +2078,41 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 		if source == "" && sym.Kind == "Document" {
 			source = sym.Docstring
 		}
-		results = append(results, map[string]any{
-			"id":         sym.ID,
-			"name":       sym.Name,
-			"kind":       sym.Kind,
-			"file_path":  sym.FilePath,
-			"start_line": sym.StartLine,
-			"signature":  sym.Signature,
-			"source":     source,
-		})
+		// #336: project the same field set as handleSymbol so a one-ID
+		// `symbols` batch returns the same shape as a single `symbol` call.
+		// Without parity, callers had to know which tool to use to access
+		// fields like qualified_name / extraction_confidence.
+		entry := map[string]any{
+			"id":                    sym.ID,
+			"name":                  sym.Name,
+			"qualified_name":        sym.QualifiedName,
+			"kind":                  sym.Kind,
+			"language":              sym.Language,
+			"file_path":             sym.FilePath,
+			"start_line":            sym.StartLine,
+			"end_line":              sym.EndLine,
+			"start_byte":            sym.StartByte,
+			"end_byte":              sym.EndByte,
+			"signature":             sym.Signature,
+			"return_type":           sym.ReturnType,
+			"docstring":             sym.Docstring,
+			"complexity":            sym.Complexity,
+			"is_exported":           sym.IsExported,
+			"extraction_confidence": sym.ExtractionConfidence,
+			"source":                source,
+		}
+		// #317 staleness warning, per-entry. Each batch result carries its
+		// own _meta when the file's on-disk hash diverges from the indexed
+		// one. Mirrors the per-symbol path so a mixed batch (some stale,
+		// some fresh) reports accurately at the entry level.
+		if root != "" && sym.Kind != "Document" {
+			pidForHash := resolvedProjectID
+			if pidForHash == "" {
+				pidForHash = sym.ProjectID
+			}
+			s.attachStalenessWarning(entry, pidForHash, sym, root)
+		}
+		results = append(results, entry)
 		// Document symbols have no on-disk file; skip them in the
 		// savings baseline so we don't os.Stat a non-existent path.
 		if sym.Kind != "Document" && sym.FilePath != "" {
