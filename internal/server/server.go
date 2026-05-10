@@ -2119,7 +2119,9 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 
 	// Find IMPORTS edges from this symbol
 	importEdges, _ := s.store.EdgesFrom(sym.ID, []string{"IMPORTS"})
-	var imports []map[string]any
+	// #332: zero-len init so JSON shape is stable when the symbol has
+	// no imports (same fix as #328/#330).
+	imports := []map[string]any{}
 	var importPaths []string
 	for _, e := range importEdges {
 		imp, err := s.store.GetSymbol(e.ToID)
@@ -3014,7 +3016,8 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		byDepth[h.Depth] = append(byDepth[h.Depth], entry)
 	}
 
-	var hopsList []map[string]any
+	// #332: zero-len init so JSON shape is stable when trace finds no hops.
+	hopsList := []map[string]any{}
 	for d := 1; d <= depth; d++ {
 		if nodes, ok := byDepth[d]; ok {
 			hop := map[string]any{"depth": d, "nodes": nodes}
@@ -3380,7 +3383,9 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 	// scratch space, not real entrypoints. Filter at the basename
 	// level only so a legitimate testdata/corpus/.../scratch.go fixture
 	// can still surface (path components past the basename are ignored).
-	var entryPoints []map[string]any
+	// #332: zero-len init so JSON shape is stable for projects without
+	// any indexed entry points.
+	entryPoints := []map[string]any{}
 	if epRows, err := s.store.RO().QueryContext(ctx,
 		`SELECT name, file_path, start_line FROM symbols WHERE project_id=? AND is_entry_point=1 LIMIT 40`,
 		projectID); err == nil {
@@ -3414,7 +3419,9 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 	}
 	rawHotspots, _ := s.store.GetHotspots(projectID, hotspotFetchLimit)
 	var hotspots []db.Symbol
-	var hotspotMaps []map[string]any
+	// #332: zero-len init so JSON shape is stable for projects without
+	// any callable hotspots (early-stage indexes, doc-only repos).
+	hotspotMaps := []map[string]any{}
 	for _, h := range rawHotspots {
 		if !includeTests && isTestFile(h.FilePath) {
 			continue
