@@ -7,6 +7,140 @@ minors.
 
 ## [Unreleased]
 
+## [v0.10.0] — 2026-05-10 — pinchQL hardening, drift recovery, language coverage
+
+> Note: v0.7.0, v0.8.0, and v0.9.0 were retro-tagged from existing
+> master commits without per-version CHANGELOG entries. The work that
+> shipped under those tags (~75 commits since v0.6.0 — JSON-shape
+> sweep, JS/TS regex hardening, pinchQL operator additions, search
+> sanitization, drift detection, etc.) is consolidated under this
+> v0.10.0 entry. Future releases follow the per-version section
+> convention from the start.
+
+### Fixed
+- **Auto-restart on every tool call, not just `health`** (#364,
+  follow-up to #352). When `PINCHER_AUTO_RESTART_ON_DRIFT=1` was set
+  and a fresh binary landed on disk, the restart only fired if the
+  user happened to call `health`. Now `(*Server).checkAutoRestart`
+  runs from `jsonResultWithMeta` / `textResultWithMeta` so any tool
+  response is a restart opportunity. Per-call cost when env var
+  unset (default): one `os.Getenv` early-exit (sub-µs); when set,
+  same plus one `os.Stat` on the binary path. `sync.Once` still
+  gates the actual exit. Three new tests cover the broader entry
+  point.
+
+- **OR connector in WHERE clauses** (#358, #359). `WHERE A OR B` was
+  silently treated as `A AND B` — for equality on a single property
+  that's always zero rows. The parser stamped no connector on
+  conditions and matchesConditions evaluated as conjunction. Fixed
+  with documented left-to-right composition for mixed AND/OR. Pure-AND
+  queries still SQL-pushdown unchanged (the common case).
+
+- **`LIMIT 0` returned arbitrary rows; missing MATCH/RETURN silently
+  parsed** (#360, #361, #363). Two grammar correctness bugs found by
+  dogfooding the parser surface: `LIMIT 0` clamped to nothing instead
+  of returning zero rows, and queries missing `MATCH` or `RETURN` were
+  accepted instead of producing a parse error. Both gated now with
+  regression tests.
+
+- **`search` colon-bearing queries leaked SQLite errors** (#356, #357).
+  An `a:b` query hit FTS5's column-prefix syntax and surfaced "no
+  such column: a" to the agent. Sanitizer now wraps colon-bearing
+  tokens so they're searched as text rather than treated as a column
+  selector.
+
+- **`pinchql` NOT prefix on conditions** (#354, #355). `WHERE NOT x`
+  was previously rejected as "unsupported operator: <varname>"; now
+  parsed as a first-class unary negation on the condition.
+
+- **Self-restart on schema/binary drift** (#352, #353). Opt-in via
+  `PINCHER_AUTO_RESTART_ON_DRIFT=1`. When `health` (now any tool —
+  see #364 above) detects index drift AND the on-disk binary's mtime
+  has advanced past startup-mtime, the server exits 0; Claude Code's
+  MCP transport respawns into the rebuilt binary. `sync.Once` gates
+  the exit so concurrent in-flight calls don't race.
+
+- **`search` exact-name match across kinds** (#350, #351). When a
+  `kind:` filter excluded the exact-name match, the result list was
+  empty even though the symbol was in the index under a different
+  kind. Fixed: surface the cross-kind match with a hint when the
+  filter would otherwise hide it.
+
+- **Implicit `GROUP BY` when mixing non-aggregate with `COUNT`** (#348,
+  #349). The non-aggregate column was silently dropped; now an
+  implicit GROUP BY surfaces it.
+
+- **JSON-shape sweep — empty slices marshal as `[]`, never `null`**
+  (#328 health, #330 changes, #332 trace/context/architecture, #334
+  search/list/sessions, #336 symbols batch, #338 query rows). Six
+  separate fixes for the same recurring class of bug: a `var x []T`
+  declaration marshals to JSON `null`; consumers iterating without
+  null-check break. Pattern flagged in CLAUDE.md as a JSON response
+  invariant — always allocate as `[]T{}`.
+
+- **`changes` symbols stable shape** (#326, #327). Files deleted
+  from disk left orphan symbols + stale `file_hash` rows. Tail-pass
+  GC after `wg.Wait` prunes both per index pass.
+
+- **Index-vs-binary version drift detection** (#304, schema v18). New
+  `projects.binary_version` column captures the running binary's
+  version at index time; `health` compares against `s.version` and
+  emits `index_drift: true` + a `_meta.next_steps` entry pointing at
+  `index --force` to refresh resolution-dependent edges.
+
+- **Boolean equality compares case-insensitively** (#323, #324). `where
+  exported = true` and `where Exported = TRUE` now compare equally;
+  previously the literal-case difference yielded zero rows.
+
+- **`IN` operator hint** (#321, #322). `WHERE x IN [a, b]` returns a
+  parse error with a hint pointing at `WHERE x = a OR x = b` —
+  pinchQL's supported fallback. The IN parser is on the v1.x roadmap.
+
+- **`trace` ambiguity-tiebreaking** (#319, #320). When multiple symbols
+  share a name, prefer callable kinds (Function/Method) and skip
+  scratch/test files, surfacing the intended target rather than a
+  test stub.
+
+- **`symbol`/`context` warn on out-of-date file** (#317, #318). When
+  the file on disk has been modified since the last index pass,
+  responses now include a staleness warning so byte-offset reads
+  aren't blindly trusted.
+
+- **`next_steps` args use `json.Marshal` for proper escaping** (#315,
+  #316). String args containing quotes / backslashes / unicode
+  previously broke the JSON snippet a downstream agent would have
+  to copy-paste.
+
+- **`ORDER BY` numeric compare on numeric columns** (#313, #314).
+  Lexical compare of strings encoded as numbers — "10" < "9" — gave
+  wrong ordering for confidence/score/edges columns.
+
+- **`pincher list --prune-dead=true` permanently removes dead-on-disk
+  projects** (#302, #312). Previously the prune flag only filtered
+  output; the projects came back on the next `list`.
+
+- **`pincher index` fails fast when path doesn't exist** (#310, #311).
+  Previously an empty index was created with a confusing "0 symbols"
+  log line.
+
+- **`COUNT()` returns cardinality, not LIMIT clamp** (#308, #309). When
+  the query had `LIMIT N`, COUNT was capped at N instead of returning
+  the true cardinality of the matching set.
+
+- **`pincher web` auto-start on Windows** (#232). The detached child
+  spawned by `web_windows.go startDetached` had no inherited console
+  (DETACHED_PROCESS), so the always-on MCP stdio reader hit
+  `INVALID_HANDLE_VALUE` and `log.Fatalf` tore the whole process
+  down. Fixed via a new `--no-stdio` flag that `pincher web`'s spawn
+  path passes; refuses to run without `--http` (the process would
+  have nothing to do).
+
+- **`pincher update` standalone-mode GitHub URL** — `updateGitHubRepo`
+  in `cmd/pinch/update.go` still pointed at the pre-rename
+  `pincherMCP` slug. Calls succeeded only via GitHub's repo-rename
+  redirect, which would break the day someone deletes the alias.
+  Bumped to canonical `pincher`.
+
 ### Added
 - **Per-language call counts in `pincher stats`** (#240, schema v16).
   Surfaces "is the agent calling pincher on the file types it
@@ -767,7 +901,12 @@ Highlights:
 - `docs/index.html`: single-file GitHub Pages landing page.
 - CI coverage gate lowered to 83% to match reality.
 
-[Unreleased]: https://github.com/kwad77/pincher/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/kwad77/pincher/compare/v0.10.0...HEAD
+[v0.10.0]: https://github.com/kwad77/pincher/compare/v0.9.0...v0.10.0
+[v0.9.0]: https://github.com/kwad77/pincher/compare/v0.8.0...v0.9.0
+[v0.8.0]: https://github.com/kwad77/pincher/compare/v0.7.0...v0.8.0
+[v0.7.0]: https://github.com/kwad77/pincher/compare/v0.6.0...v0.7.0
+[v0.6.0]: https://github.com/kwad77/pincher/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/kwad77/pincher/compare/v0.4.1...v0.5.0
 [v0.4.1]: https://github.com/kwad77/pincher/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/kwad77/pincher/compare/v0.3.0...v0.4.0
