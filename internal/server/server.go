@@ -2419,6 +2419,38 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// concrete top-1 result.
 	if len(results) > 0 {
 		meta["next_steps"] = suggestNextStepsForResults(results)
+		// #350: misleading-match detection. When the query is an exact
+		// identifier and a kind filter is set, a non-empty result with no
+		// exact-name match means BM25 surfaced a partial-token match
+		// (e.g. handleIndex with kind=Function returned a test function
+		// containing "Handle" + "Search" tokens — the real handleIndex
+		// is a Method, excluded by the filter). Run the same relaxation
+		// verifyEmptySearchCause uses for the empty case; if the kind-
+		// relaxed query has an exact-name match, surface it so the agent
+		// isn't fooled by the partial.
+		if kind != "" && isExactIdentifierQuery(query) && !resultsContainExactName(results, query) {
+			if relaxed, err := s.store.SearchSymbolsByCorpus(projectID, ftsQuery, "", language, corpus, 5); err == nil {
+				for _, rr := range relaxed {
+					if rr.Symbol.Name == query {
+						meta["exact_match_in_other_kind"] = map[string]any{
+							"kind":      rr.Symbol.Kind,
+							"id":        rr.Symbol.ID,
+							"file_path": rr.Symbol.FilePath,
+							"hint":      fmt.Sprintf("exact name %q exists with kind=%q; current kind=%q filter is hiding it. Top result is a BM25 partial-token match, not a name match.", query, rr.Symbol.Kind, kind),
+						}
+						// Prepend a relax-the-kind next_step.
+						steps, _ := meta["next_steps"].([]map[string]string)
+						steps = append([]map[string]string{{
+							"tool": "search",
+							"args": nextStepArgs(map[string]any{"query": query, "language": language, "corpus": corpus}),
+							"why":  fmt.Sprintf("exact match for %q exists with kind=%q — drop the kind filter to surface it", query, rr.Symbol.Kind),
+						}}, steps...)
+						meta["next_steps"] = steps
+						break
+					}
+				}
+			}
+		}
 	} else {
 		// Zero results, even after corpus fallthrough. Surface a
 		// best-guess diagnosis + concrete recovery suggestions so the
@@ -2649,18 +2681,43 @@ func isAlphanum(c byte) bool {
 //
 // This is a default only; explicit min_confidence on the call wins.
 func defaultMinConfidenceFor(query string) float64 {
+	if isExactIdentifierQuery(query) {
+		return 0.0
+	}
+	return 0.71
+}
+
+// resultsContainExactName reports whether any result in results has its
+// Symbol.Name exactly equal to name. Used by the #350 misleading-match
+// detector to decide whether a kind-relaxation hint is warranted.
+func resultsContainExactName(results []db.SearchResult, name string) bool {
+	for _, r := range results {
+		if r.Symbol.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isExactIdentifierQuery reports whether the query looks like a single
+// programming-language identifier (one or more letters/digits/underscores,
+// no spaces / wildcards / quotes). The heuristic is reused by:
+//   - defaultMinConfidenceFor (#247 #5) to skip the doc-quality floor
+//   - the #350 misleading-match check to detect when a kind filter
+//     excluded an exact-name match in another kind
+func isExactIdentifierQuery(query string) bool {
 	if query == "" {
-		return 0.71
+		return false
 	}
 	if strings.ContainsAny(query, " \t\"*") {
-		return 0.71
+		return false
 	}
 	for _, r := range query {
 		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
-			return 0.71
+			return false
 		}
 	}
-	return 0.0
+	return true
 }
 
 // diagnoseEmptySearch returns a one-line explanation of the most likely
