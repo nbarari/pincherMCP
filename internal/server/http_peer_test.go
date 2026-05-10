@@ -29,7 +29,7 @@ func TestHasHTTPPeer_FreshPeerDetected(t *testing.T) {
 	// PID that isn't ours and a recent last_seen.
 	otherPID := os.Getpid() + 1
 	if err := store.RecordSession("peer-session", time.Now().Add(-2*time.Second), 1, 100, 200, 0.05,
-		"http://localhost:7777", otherPID); err != nil {
+		"http://localhost:7777", otherPID, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestHasHTTPPeer_MyOwnPIDIgnored(t *testing.T) {
 
 	// Write a row with our own PID.
 	if err := store.RecordSession("self-session", time.Now(), 1, 100, 200, 0.05,
-		"http://localhost:7777", os.Getpid()); err != nil {
+		"http://localhost:7777", os.Getpid(), ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestHasHTTPPeer_NoHTTPURLIgnored(t *testing.T) {
 
 	otherPID := os.Getpid() + 1
 	if err := store.RecordSession("stdio-only", time.Now(), 1, 100, 200, 0.05,
-		"", otherPID); err != nil {
+		"", otherPID, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 

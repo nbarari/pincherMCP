@@ -428,9 +428,10 @@ var readerRoutedStoreMethods = map[string]bool{
 	"ListExtractionFailures":         true,
 	"ExtractionFailureCountsByReason": true,
 	"ListSlowQueries":         true,
-	"GetAllTimeSavings":       true,
-	"GetSessions":             true,
-	"GetLatestHTTPSession":    true,
+	"GetAllTimeSavings":         true,
+	"GetAllTimeCallsByLanguage": true,
+	"GetSessions":               true,
+	"GetLatestHTTPSession":      true,
 	"ResolveStaleID":          true,
 	"TraceViaCTE":             true,
 	"TraceViaCTEScoped":       true,
@@ -2542,7 +2543,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 func TestRecordSession_Basic(t *testing.T) {
 	s := newTestStore(t)
 	start := time.Now().Add(-5 * time.Minute)
-	if err := s.RecordSession("sess-001", start, 10, 500, 12000, 0.036, "", 0); err != nil {
+	if err := s.RecordSession("sess-001", start, 10, 500, 12000, 0.036, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	rows, err := s.GetSessions(10)
@@ -2571,11 +2572,11 @@ func TestRecordSession_Upsert(t *testing.T) {
 	s := newTestStore(t)
 	start := time.Now().Add(-10 * time.Minute)
 	// First write
-	if err := s.RecordSession("sess-abc", start, 5, 200, 4000, 0.012, "", 0); err != nil {
+	if err := s.RecordSession("sess-abc", start, 5, 200, 4000, 0.012, "", 0, ""); err != nil {
 		t.Fatalf("first RecordSession: %v", err)
 	}
 	// Upsert with updated stats (same session_id)
-	if err := s.RecordSession("sess-abc", start, 20, 900, 18000, 0.054, "", 0); err != nil {
+	if err := s.RecordSession("sess-abc", start, 20, 900, 18000, 0.054, "", 0, ""); err != nil {
 		t.Fatalf("second RecordSession: %v", err)
 	}
 	rows, err := s.GetSessions(10)
@@ -2596,7 +2597,7 @@ func TestGetSessions_OrderAndLimit(t *testing.T) {
 	// Insert 3 sessions with different start times
 	for i, offset := range []time.Duration{-3 * time.Hour, -2 * time.Hour, -1 * time.Hour} {
 		id := "sess-" + string(rune('a'+i))
-		if err := s.RecordSession(id, now.Add(offset), int64(i+1)*5, 100, 1000, 0.003, "", 0); err != nil {
+		if err := s.RecordSession(id, now.Add(offset), int64(i+1)*5, 100, 1000, 0.003, "", 0, ""); err != nil {
 			t.Fatalf("RecordSession %d: %v", i, err)
 		}
 	}
@@ -2642,10 +2643,10 @@ func TestGetAllTimeSavings_Empty(t *testing.T) {
 func TestGetAllTimeSavings_Aggregates(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now()
-	if err := s.RecordSession("sess-x", now.Add(-2*time.Hour), 10, 300, 5000, 0.015, "", 0); err != nil {
+	if err := s.RecordSession("sess-x", now.Add(-2*time.Hour), 10, 300, 5000, 0.015, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession 1: %v", err)
 	}
-	if err := s.RecordSession("sess-y", now.Add(-1*time.Hour), 20, 600, 10000, 0.030, "", 0); err != nil {
+	if err := s.RecordSession("sess-y", now.Add(-1*time.Hour), 20, 600, 10000, 0.030, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession 2: %v", err)
 	}
 	calls, used, saved, cost, err := s.GetAllTimeSavings()
@@ -2663,6 +2664,82 @@ func TestGetAllTimeSavings_Aggregates(t *testing.T) {
 	}
 	if cost < 0.044 || cost > 0.046 {
 		t.Errorf("total cost_avoided=%v, want ~0.045", cost)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetAllTimeCallsByLanguage (#240)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestGetAllTimeCallsByLanguage_Empty(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.GetAllTimeCallsByLanguage()
+	if err != nil {
+		t.Fatalf("GetAllTimeCallsByLanguage on empty DB: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d entries on empty DB, want 0 (got %v)", len(got), got)
+	}
+}
+
+// Sessions persisted without a calls_by_language payload (empty string
+// → SQL NULL) must not surface in the aggregate. This pins the NULL
+// filtering in the WHERE clause: a regression that scanned NULLs would
+// either error or inflate counts with default-zero entries.
+func TestGetAllTimeCallsByLanguage_NullColumnSkipped(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.RecordSession("legacy", time.Unix(1, 0), 5, 50, 500, 0.05, "", 0, ""); err != nil {
+		t.Fatalf("RecordSession: %v", err)
+	}
+	got, err := s.GetAllTimeCallsByLanguage()
+	if err != nil {
+		t.Fatalf("GetAllTimeCallsByLanguage: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d entries, want 0 — sessions without language data must not appear", len(got))
+	}
+}
+
+// Multiple sessions with overlapping languages must sum per-language.
+// This is the load-bearing diagnostic property: the user's surfaced
+// per-language tally is a sum across every session that recorded data.
+func TestGetAllTimeCallsByLanguage_SumsAcrossSessions(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.RecordSession("a", time.Unix(1, 0), 10, 100, 1000, 0.1, "", 0, `{"Go":7,"Markdown":3}`); err != nil {
+		t.Fatalf("RecordSession a: %v", err)
+	}
+	if err := s.RecordSession("b", time.Unix(2, 0), 4, 40, 400, 0.04, "", 0, `{"Go":2,"Python":4}`); err != nil {
+		t.Fatalf("RecordSession b: %v", err)
+	}
+	got, err := s.GetAllTimeCallsByLanguage()
+	if err != nil {
+		t.Fatalf("GetAllTimeCallsByLanguage: %v", err)
+	}
+	want := map[string]int64{"Go": 9, "Markdown": 3, "Python": 4}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("aggregate mismatch:\n  got  %v\n  want %v", got, want)
+	}
+}
+
+// A session whose JSON payload is malformed must be skipped silently —
+// one corrupted row should not blank out every other session's data.
+// Defensive against forward-compat: a future writer that ships a
+// non-flat-int shape shouldn't error this read path.
+func TestGetAllTimeCallsByLanguage_MalformedJSONSkipped(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.RecordSession("good", time.Unix(1, 0), 10, 100, 1000, 0.1, "", 0, `{"Go":5}`); err != nil {
+		t.Fatalf("RecordSession good: %v", err)
+	}
+	if err := s.RecordSession("bad", time.Unix(2, 0), 4, 40, 400, 0.04, "", 0, `{not valid json`); err != nil {
+		t.Fatalf("RecordSession bad: %v", err)
+	}
+	got, err := s.GetAllTimeCallsByLanguage()
+	if err != nil {
+		t.Fatalf("GetAllTimeCallsByLanguage: %v", err)
+	}
+	want := map[string]int64{"Go": 5}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("malformed-row aggregate mismatch:\n  got  %v\n  want %v", got, want)
 	}
 }
 

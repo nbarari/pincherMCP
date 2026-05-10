@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -134,6 +135,15 @@ type Server struct {
 	statsTokensUsed  int64
 	statsTokensSaved int64
 	statsLatencyMS   int64
+
+	// Per-language call counts (#240). Sync.Map keyed by language name
+	// (e.g. "Go", "Markdown") with *int64 values. Incremented per tool
+	// call when the response carries a recognisable language signal;
+	// flushed to the calls_by_language column on the sessions table
+	// every 10s. Sync.Map over a plain map+mutex because the access
+	// pattern is overwhelmingly increments + occasional snapshot, no
+	// deletes, and we don't want a hot lock under high call volume.
+	statsCallsByLanguage sync.Map
 
 	// mcpConnected is set to 1 when an MCP client fires onInit.
 	// Sessions are only flushed to DB when an MCP client is connected — this
@@ -245,10 +255,72 @@ func (s *Server) flushSession() {
 		httpURL = "http://" + displayAddr(httpURL) + s.basePath
 		httpPID = os.Getpid()
 	}
-	if err := s.store.RecordSession(s.persistentSessionID, s.sessionStartedAt, calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID); err != nil {
+	if err := s.store.RecordSession(s.persistentSessionID, s.sessionStartedAt, calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID, s.snapshotCallsByLanguage()); err != nil {
 		slog.Warn("pincher.session.flush.err", "err", err)
 	}
 }
+
+// snapshotCallsByLanguage serializes the in-memory per-language call
+// counter map to a stable-sorted JSON object. Sorted keys keep the
+// flushed string deterministic across goroutine ordering, which makes
+// `pincher stats` output reproducible and keeps the snapshot tests
+// (#33) from flapping. Returns "" when no per-language calls have
+// been recorded — the column then stays NULL rather than `{}`,
+// distinguishing pre-v15 rows from "v15 row, no language data yet".
+func (s *Server) snapshotCallsByLanguage() string {
+	type kv struct {
+		Lang  string
+		Count int64
+	}
+	var pairs []kv
+	s.statsCallsByLanguage.Range(func(k, v any) bool {
+		lang, _ := k.(string)
+		ptr, _ := v.(*int64)
+		if ptr == nil {
+			return true
+		}
+		count := atomic.LoadInt64(ptr)
+		if count > 0 {
+			pairs = append(pairs, kv{lang, count})
+		}
+		return true
+	})
+	if len(pairs) == 0 {
+		return ""
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Lang < pairs[j].Lang })
+	out := make(map[string]int64, len(pairs))
+	for _, p := range pairs {
+		out[p.Lang] = p.Count
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// recordCallLanguage increments the per-tool-call language counter by
+// 1. Called from jsonResultWithMeta when the response carries a
+// recognisable language signal. Empty lang is a no-op so callers don't
+// have to gate the call themselves.
+func (s *Server) recordCallLanguage(lang string) {
+	if lang == "" {
+		return
+	}
+	v, _ := s.statsCallsByLanguage.LoadOrStore(lang, new(int64))
+	ptr, _ := v.(*int64)
+	if ptr != nil {
+		atomic.AddInt64(ptr, 1)
+	}
+}
+
+// languageRE matches the first occurrence of `"language":"X"` in a
+// marshalled response payload. JSON guarantees a single quoting style,
+// so this is safe to scan against the rendered payload (#240). Picks
+// the FIRST language seen as the call's "primary language" — adequate
+// for bypass detection where any signal beats none.
+var languageRE = regexp.MustCompile(`"language"\s*:\s*"([^"]+)"`)
 
 // MCPServer returns the underlying *mcp.Server.
 func (s *Server) MCPServer() *mcp.Server { return s.mcp }
@@ -3626,6 +3698,18 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	atomic.AddInt64(&s.statsTokensUsed, int64(tokensUsed))
 	atomic.AddInt64(&s.statsTokensSaved, int64(tokensSaved))
 	atomic.AddInt64(&s.statsLatencyMS, latency)
+
+	// Per-language call attribution (#240). Scans the marshalled
+	// payload for the first `"language":"X"` occurrence; records the
+	// call against that language. Tools that don't yield a language
+	// field (architecture, list, schema, health, stats, guide) are
+	// not attributed and stay invisible to bypass detection — that's
+	// fine because the use case is "agent did X file-type work but
+	// pincher saw 0 X calls" and only the symbol-/search-bearing
+	// tools matter for that signal.
+	if m := languageRE.FindSubmatch(b); len(m) > 1 {
+		s.recordCallLanguage(string(m[1]))
+	}
 
 	// First call of a new session: flush immediately so the dashboard sees
 	// the session within milliseconds rather than waiting for the 10s ticker.

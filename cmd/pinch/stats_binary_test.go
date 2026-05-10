@@ -75,7 +75,7 @@ func TestStatsCLI_Binary_Reset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.RecordSession("session-binary", time.Now(), 1, 100, 200, 0.05, "", 0); err != nil {
+	if err := store.RecordSession("session-binary", time.Now(), 1, 100, 200, 0.05, "", 0, ""); err != nil {
 		t.Fatalf("record session: %v", err)
 	}
 	store.Close()

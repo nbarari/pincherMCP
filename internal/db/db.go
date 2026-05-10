@@ -850,6 +850,14 @@ END;`,
 	// indexed them); UpsertProject stamps the column on every future
 	// upsert so re-indexing populates it for real users naturally.
 	`ALTER TABLE projects ADD COLUMN schema_version_at_index INTEGER`,
+
+	// v15 → v16: per-language call counts on sessions (#240, reported
+	// by nbarari). JSON-encoded language→count map serialized on every
+	// session flush. NULL on rows that pre-date the column. Lets
+	// `pincher stats` surface "agent did 0 Markdown calls in a 2-hour
+	// doc-rewrite session" — bypass detection that closes the
+	// adoption-priming feedback loop.
+	`ALTER TABLE sessions ADD COLUMN calls_by_language TEXT`,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -2860,32 +2868,47 @@ func (s *Store) DeleteADR(projectID, key string) error {
 // `pincher web` discovery flow (#TBD). Pass "" / 0 when no HTTP server
 // is bound for this session — the row will still be queryable as a
 // pure-MCP session with no http_url advertised.
-func (s *Store) RecordSession(sessionID string, startedAt time.Time, calls, tokensUsed, tokensSaved int64, costAvoided float64, httpURL string, httpPID int) error {
+func (s *Store) RecordSession(sessionID string, startedAt time.Time, calls, tokensUsed, tokensSaved int64, costAvoided float64, httpURL string, httpPID int, callsByLanguage string) error {
+	// callsByLanguage is JSON-encoded {"Go":25,"Markdown":0,...} (#240).
+	// Empty string stored as SQL NULL so pre-v15 rows render distinct
+	// from "this session genuinely had no per-language data" (which
+	// would be `{}`).
+	var clbl any
+	if callsByLanguage != "" {
+		clbl = callsByLanguage
+	}
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO sessions(session_id, started_at, last_seen, calls, tokens_used, tokens_saved, cost_avoided, http_url, http_pid)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, startedAt.Unix(), time.Now().Unix(), calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID,
+		`INSERT OR REPLACE INTO sessions(session_id, started_at, last_seen, calls, tokens_used, tokens_saved, cost_avoided, http_url, http_pid, calls_by_language)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, startedAt.Unix(), time.Now().Unix(), calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID, clbl,
 	)
 	return err
 }
 
 // SessionRow holds per-session stats for historical display.
 type SessionRow struct {
-	SessionID   string
-	StartedAt   time.Time
-	LastSeen    time.Time
-	Calls       int64
-	TokensUsed  int64
-	TokensSaved int64
-	CostAvoided float64
-	HTTPURL     string
-	HTTPPID     int
+	SessionID       string
+	StartedAt       time.Time
+	LastSeen        time.Time
+	Calls           int64
+	TokensUsed      int64
+	TokensSaved     int64
+	CostAvoided     float64
+	HTTPURL         string
+	HTTPPID         int
+	// CallsByLanguage is the JSON-encoded language→count map persisted
+	// per session (#240). Empty string when the row pre-dates v15 or
+	// no per-language data was recorded. Callers parse via
+	// json.Unmarshal; the raw string is exposed for forward-compat
+	// (additional fields beyond a flat int map can land without a
+	// SessionRow struct change).
+	CallsByLanguage string
 }
 
 // GetSessions returns all recorded sessions ordered by start time descending.
 // Limit ≤ 0 returns all rows.
 func (s *Store) GetSessions(limit int) ([]SessionRow, error) {
-	q := `SELECT session_id, started_at, last_seen, calls, tokens_used, tokens_saved, cost_avoided, http_url, http_pid
+	q := `SELECT session_id, started_at, last_seen, calls, tokens_used, tokens_saved, cost_avoided, http_url, http_pid, calls_by_language
 	      FROM sessions ORDER BY started_at DESC`
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
@@ -2899,11 +2922,15 @@ func (s *Store) GetSessions(limit int) ([]SessionRow, error) {
 	for rows.Next() {
 		var r SessionRow
 		var startedUnix, lastSeenUnix int64
-		if err := rows.Scan(&r.SessionID, &startedUnix, &lastSeenUnix, &r.Calls, &r.TokensUsed, &r.TokensSaved, &r.CostAvoided, &r.HTTPURL, &r.HTTPPID); err != nil {
+		var clbl sql.NullString
+		if err := rows.Scan(&r.SessionID, &startedUnix, &lastSeenUnix, &r.Calls, &r.TokensUsed, &r.TokensSaved, &r.CostAvoided, &r.HTTPURL, &r.HTTPPID, &clbl); err != nil {
 			return nil, err
 		}
 		r.StartedAt = time.Unix(startedUnix, 0)
 		r.LastSeen = time.Unix(lastSeenUnix, 0)
+		if clbl.Valid {
+			r.CallsByLanguage = clbl.String
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -2942,6 +2969,38 @@ func (s *Store) GetAllTimeSavings() (calls, tokensUsed, tokensSaved int64, costA
 		 FROM sessions`,
 	).Scan(&calls, &tokensUsed, &tokensSaved, &costAvoided)
 	return
+}
+
+// GetAllTimeCallsByLanguage returns the cumulative per-language call
+// counts across every session that recorded the v16 calls_by_language
+// column (#240). Sessions with NULL or unparseable JSON are skipped
+// silently — a single corrupt row should not blank out the diagnostic
+// for every other session. Returns an empty (non-nil) map when no
+// session has ever recorded language data.
+func (s *Store) GetAllTimeCallsByLanguage() (map[string]int64, error) {
+	rows, err := s.db.Query(`SELECT calls_by_language FROM sessions WHERE calls_by_language IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	totals := make(map[string]int64)
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		var per map[string]int64
+		if err := json.Unmarshal([]byte(raw.String), &per); err != nil {
+			continue
+		}
+		for lang, n := range per {
+			totals[lang] += n
+		}
+	}
+	return totals, rows.Err()
 }
 
 // ResetSessions wipes every row from the sessions table and returns the

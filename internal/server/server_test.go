@@ -2641,7 +2641,7 @@ func TestServeHTTP_GetStats_Empty(t *testing.T) {
 func TestServeHTTP_GetStats_WithSession(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	// Record a fake session directly in the DB
-	if err := store.RecordSession("sess-1", time.Now(), 5, 1000, 2000, 0.10, "", 0); err != nil {
+	if err := store.RecordSession("sess-1", time.Now(), 5, 1000, 2000, 0.10, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	w := httpGet(t, srv, "/v1/stats")
@@ -2700,8 +2700,8 @@ func TestServeHTTP_GetSessions_Empty(t *testing.T) {
 
 func TestServeHTTP_GetSessions_WithData(t *testing.T) {
 	srv, store, _ := newTestServer(t)
-	store.RecordSession("sess-a", time.Now(), 3, 500, 1000, 0.05, "", 0)
-	store.RecordSession("sess-b", time.Now(), 7, 1500, 3000, 0.15, "", 0)
+	store.RecordSession("sess-a", time.Now(), 3, 500, 1000, 0.05, "", 0, "")
+	store.RecordSession("sess-b", time.Now(), 7, 1500, 3000, 0.15, "", 0, "")
 	w := httpGet(t, srv, "/v1/sessions")
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /v1/sessions: got %d, want 200", w.Code)
@@ -2859,7 +2859,7 @@ func TestSavedVsFileSizes_DuplicatePaths(t *testing.T) {
 func TestHandleStats_DBFallback(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	// Inject a session row directly; stats atomic counters stay at 0.
-	store.RecordSession("fallback-sess", time.Now(), 42, 9000, 18000, 0.90, "", 0)
+	store.RecordSession("fallback-sess", time.Now(), 42, 9000, 18000, 0.90, "", 0, "")
 
 	ctx := context.Background()
 	result, err := srv.handleStats(ctx, makeReq(map[string]any{}))
@@ -2875,8 +2875,8 @@ func TestHandleStats_DBFallback(t *testing.T) {
 
 func TestHandleStats_AllTime(t *testing.T) {
 	srv, store, _ := newTestServer(t)
-	store.RecordSession("s1", time.Now(), 10, 1000, 2000, 0.10, "", 0)
-	store.RecordSession("s2", time.Now(), 20, 3000, 6000, 0.30, "", 0)
+	store.RecordSession("s1", time.Now(), 10, 1000, 2000, 0.10, "", 0, "")
+	store.RecordSession("s2", time.Now(), 20, 3000, 6000, 0.30, "", 0, "")
 
 	ctx := context.Background()
 	result, err := srv.handleStats(ctx, makeReq(map[string]any{}))

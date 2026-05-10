@@ -58,10 +58,10 @@ func TestStatsCLI_BuildReport_WithSessions(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.RecordSession("s1", time.Unix(1, 0), 10, 100, 1000, 0.5, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 10, 100, 1000, 0.5, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession s1: %v", err)
 	}
-	if err := store.RecordSession("s2", time.Unix(3, 0), 5, 50, 500, 0.25, "", 0); err != nil {
+	if err := store.RecordSession("s2", time.Unix(3, 0), 5, 50, 500, 0.25, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession s2: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestStatsCLI_TextOutput_ContainsExpectedSections(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	if err := store.RecordSession("s1", time.Unix(1, 0), 100, 1000, 10000, 1.2345, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 100, 1000, 10000, 1.2345, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestStatsCLI_TextOutput_BoxAlignmentWithWideContent(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	// Seed a project whose value-line width forces dynamic resizing.
@@ -217,7 +217,7 @@ func TestStatsCLI_TextOutput_NoProjectsStillRenders(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	if err := store.RecordSession("s1", time.Unix(1, 0), 5, 50, 500, 0.05, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 5, 50, 500, 0.05, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 
@@ -246,6 +246,138 @@ func TestStatsCLI_TextOutput_NoProjectsStillRenders(t *testing.T) {
 	}
 }
 
+// TestStatsCLI_TextOutput_LanguagesSection (#240) verifies the
+// per-language tally renders between STORAGE and PROJECTS. Pins:
+//   - LANGUAGES header present when calls_by_language is non-empty
+//   - Sort order: count descending, lexical ascending tie-breaker
+//   - Box still closes (every line same rune-width) — guards against the
+//     section-insert breaking the dynamic box-width math from #238.
+func TestStatsCLI_TextOutput_LanguagesSection(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	// Two sessions whose JSON payloads sum across to give a well-known
+	// per-language tally with a tie (Markdown=3, Python=3) so we can
+	// pin the lexical tie-breaker.
+	if err := store.RecordSession("a", time.Unix(1, 0), 12, 100, 1000, 0.1, "", 0, `{"Go":7,"Markdown":3,"Python":2}`); err != nil {
+		t.Fatalf("RecordSession a: %v", err)
+	}
+	if err := store.RecordSession("b", time.Unix(2, 0), 4, 40, 400, 0.04, "", 0, `{"Python":1}`); err != nil {
+		t.Fatalf("RecordSession b: %v", err)
+	}
+
+	report, _ := buildStatsReport(store, dir)
+	out := formatStatsText(report)
+
+	if !strings.Contains(out, "LANGUAGES") {
+		t.Errorf("LANGUAGES header missing from output:\n%s", out)
+	}
+	for _, lang := range []string{"Go:", "Markdown:", "Python:"} {
+		if !strings.Contains(out, lang) {
+			t.Errorf("language label %q missing from output:\n%s", lang, out)
+		}
+	}
+
+	// Sort order: count desc with lex tie-break → Go(7), Markdown(3), Python(3).
+	// Find each label's position and assert ordering.
+	idxGo := strings.Index(out, "Go:")
+	idxMd := strings.Index(out, "Markdown:")
+	idxPy := strings.Index(out, "Python:")
+	if !(idxGo < idxMd && idxMd < idxPy) {
+		t.Errorf("language order wrong: Go=%d Markdown=%d Python=%d (want Go < Markdown < Python via count-desc + lex tie-break):\n%s",
+			idxGo, idxMd, idxPy, out)
+	}
+
+	// LANGUAGES inserted between STORAGE and PROJECTS (no projects here →
+	// PROJECTS not present, so just check STORAGE precedes LANGUAGES).
+	idxStorage := strings.Index(out, "STORAGE")
+	idxLang := strings.Index(out, "LANGUAGES")
+	if !(idxStorage < idxLang) {
+		t.Errorf("LANGUAGES section did not render between STORAGE and PROJECTS:\n%s", out)
+	}
+
+	// Box still closes — every line same rune-width.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	expectedWidth := len([]rune(lines[0]))
+	for i, ln := range lines {
+		if got := len([]rune(ln)); got != expectedWidth {
+			t.Errorf("line %d width = %d runes, want %d (LANGUAGES insert broke box alignment):\n%s",
+				i, got, expectedWidth, out)
+		}
+	}
+}
+
+// TestStatsCLI_TextOutput_LanguagesSectionAbsentWhenEmpty pins backward
+// compatibility: pre-v16 sessions (or v16 sessions with no language data)
+// must render exactly as before — no empty LANGUAGES box.
+func TestStatsCLI_TextOutput_LanguagesSectionAbsentWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	// Session recorded with empty calls_by_language → SQL NULL → not in aggregate.
+	if err := store.RecordSession("legacy", time.Unix(1, 0), 5, 50, 500, 0.05, "", 0, ""); err != nil {
+		t.Fatalf("RecordSession: %v", err)
+	}
+
+	report, _ := buildStatsReport(store, dir)
+	out := formatStatsText(report)
+
+	if strings.Contains(out, "LANGUAGES") {
+		t.Errorf("LANGUAGES header rendered despite empty per-language data:\n%s", out)
+	}
+}
+
+// TestStatsCLI_JSONShape_CallsByLanguage pins the JSON shape: when
+// per-language data is present, `all_time.calls_by_language` is a
+// flat string→int map. Dashboards and shell pipelines depend on this
+// shape — a future refactor that wraps the map in an object would
+// silently break them.
+func TestStatsCLI_JSONShape_CallsByLanguage(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.RecordSession("s1", time.Unix(1, 0), 5, 50, 500, 0.05, "", 0, `{"Go":3,"YAML":2}`); err != nil {
+		t.Fatalf("RecordSession: %v", err)
+	}
+
+	report, err := buildStatsReport(store, dir)
+	if err != nil {
+		t.Fatalf("buildStatsReport: %v", err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(encoded, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, encoded)
+	}
+	at, ok := parsed["all_time"].(map[string]any)
+	if !ok {
+		t.Fatalf("all_time is not an object:\n%s", encoded)
+	}
+	cbl, ok := at["calls_by_language"].(map[string]any)
+	if !ok {
+		t.Fatalf("calls_by_language is not an object (or missing):\n%s", encoded)
+	}
+	if got := cbl["Go"]; got != float64(3) {
+		t.Errorf("Go count = %v, want 3 (JSON numbers parse as float64)", got)
+	}
+	if got := cbl["YAML"]; got != float64(2) {
+		t.Errorf("YAML count = %v, want 2", got)
+	}
+}
+
 // TestStatsCLI_TextOutput_PathologicalLengthHitsCap exercises the
 // 100-char cap and the value-truncation path. Seeds a project with an
 // extreme symbol/file count + ridiculously long name so the natural
@@ -258,7 +390,7 @@ func TestStatsCLI_TextOutput_PathologicalLengthHitsCap(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	// Project name 90 chars + huge counts → natural value width would
@@ -306,7 +438,7 @@ func TestStatsCLI_Reset_DeletesAllSessions(t *testing.T) {
 
 	for i, id := range []string{"s1", "s2", "s3"} {
 		if err := store.RecordSession(id, time.Unix(int64(i), 0),
-			int64(10*(i+1)), 100, 1000, 0.1, "", 0); err != nil {
+			int64(10*(i+1)), 100, 1000, 0.1, "", 0, ""); err != nil {
 			t.Fatalf("RecordSession %s: %v", id, err)
 		}
 	}
@@ -348,7 +480,7 @@ func TestRunStatsCLI_FlagDispatch_JSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.RecordSession("s1", time.Unix(1, 0), 7, 70, 700, 0.21, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 7, 70, 700, 0.21, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	store.Close() // runStatsCLI opens its own handle.
@@ -388,7 +520,7 @@ func TestRunStatsCLI_ResetJSON_ShapeIsPinned(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	for i, id := range []string{"s1", "s2"} {
-		if err := store.RecordSession(id, time.Unix(int64(i), 0), 1, 1, 1, 0.1, "", 0); err != nil {
+		if err := store.RecordSession(id, time.Unix(int64(i), 0), 1, 1, 1, 0.1, "", 0, ""); err != nil {
 			t.Fatalf("RecordSession %s: %v", id, err)
 		}
 	}
@@ -422,7 +554,7 @@ func TestRunStatsCLI_ResetText_PrintsRowCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 1, 1, 0.1, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	store.Close()
@@ -500,7 +632,7 @@ func TestStatsCLI_Reset_PreservesSymbols(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("BulkUpsertSymbols: %v", err)
 	}
-	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 0, 0, 0, "", 0); err != nil {
+	if err := store.RecordSession("s1", time.Unix(1, 0), 1, 0, 0, 0, "", 0, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 

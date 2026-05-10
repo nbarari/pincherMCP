@@ -142,7 +142,7 @@ func TestFindLiveHTTPServer_NoRow(t *testing.T) {
 // TestFindLiveHTTPServer_DeadPID returns false when the row's PID is dead.
 func TestFindLiveHTTPServer_DeadPID(t *testing.T) {
 	store := newWebTestStore(t)
-	if err := store.RecordSession("sess-dead", time.Now().Add(-1*time.Hour), 1, 100, 200, 0.001, "http://127.0.0.1:65535", 999999); err != nil {
+	if err := store.RecordSession("sess-dead", time.Now().Add(-1*time.Hour), 1, 100, 200, 0.001, "http://127.0.0.1:65535", 999999, ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	if _, _, ok := findLiveHTTPServer(store); ok {
@@ -162,7 +162,7 @@ func TestFindLiveHTTPServer_LiveServer(t *testing.T) {
 	defer srv.Close()
 
 	store := newWebTestStore(t)
-	if err := store.RecordSession("sess-live", time.Now(), 1, 100, 200, 0.001, srv.URL, os.Getpid()); err != nil {
+	if err := store.RecordSession("sess-live", time.Now(), 1, 100, 200, 0.001, srv.URL, os.Getpid(), ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 
@@ -326,7 +326,7 @@ func TestFindLiveHTTPServer_StaleRowProbeFails(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	if err := store.RecordSession("sess-stale", time.Now().Add(-2*time.Hour), 1, 100, 200, 0.001, "http://"+addr, os.Getpid()); err != nil {
+	if err := store.RecordSession("sess-stale", time.Now().Add(-2*time.Hour), 1, 100, 200, 0.001, "http://"+addr, os.Getpid(), ""); err != nil {
 		t.Fatalf("RecordSession: %v", err)
 	}
 	if _, _, ok := findLiveHTTPServer(store); ok {

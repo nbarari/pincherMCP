@@ -8,6 +8,25 @@ minors.
 ## [Unreleased]
 
 ### Added
+- **Per-language call counts in `pincher stats`** (#240, schema v16).
+  Surfaces "is the agent calling pincher on the file types it
+  works with?" as a one-line check. The server tallies the
+  `language` field on every tool response in-memory (sync.Map of
+  atomic int64s keyed by language) and flushes the JSON-encoded
+  map to a new `calls_by_language` column on the sessions table
+  every 10 s alongside the existing call/token counters. The
+  `pincher stats` text and JSON outputs render a LANGUAGES
+  section between STORAGE and PROJECTS, sorted by count
+  descending with a lexical tie-breaker. Pre-v16 sessions or
+  v16 sessions with no language data render exactly as before —
+  no empty section, no shape change. Driven by an empirical
+  session-A vs session-B comparison nbarari measured (~$74k
+  tokens of value present-or-absent depending solely on whether
+  the agent invoked pincher); without per-language counts there
+  was no way to detect bypass on a known file type. Direction
+  Option A from the issue: counter columns on sessions, no
+  per-call log table — promotable later if richer analytics
+  warrant it.
 - **`pincher index` warns on nested-under-existing-project** (#235,
   reported by @nbarari). Indexing a subdirectory of an
   already-indexed project no longer silently stores symbols twice.

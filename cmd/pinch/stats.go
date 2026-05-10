@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kwad77/pincher/internal/db"
@@ -117,10 +118,16 @@ type StatsReport struct {
 
 // AllTimeSavings is the sum across every persisted session row.
 type AllTimeSavings struct {
-	Calls        int64   `json:"calls"`
-	TokensUsed   int64   `json:"tokens_used"`
-	TokensSaved  int64   `json:"tokens_saved"`
-	CostAvoided  float64 `json:"cost_avoided"`
+	Calls       int64   `json:"calls"`
+	TokensUsed  int64   `json:"tokens_used"`
+	TokensSaved int64   `json:"tokens_saved"`
+	CostAvoided float64 `json:"cost_avoided"`
+	// CallsByLanguage is the per-language call tally summed across every
+	// recorded session that carried the v16 calls_by_language column
+	// (#240). Surfaces "is the agent calling pincher on the file types it
+	// works with most" as a one-line check. Empty map when no session
+	// has recorded language data yet.
+	CallsByLanguage map[string]int64 `json:"calls_by_language,omitempty"`
 }
 
 // ProjectStats is a per-project file/symbol/edge breakdown.
@@ -153,6 +160,14 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 		return nil, fmt.Errorf("all-time savings: %w", err)
 	}
 
+	// callsByLanguage is best-effort: a query failure here shouldn't
+	// fail the whole stats report (the diagnostic is supplementary,
+	// not load-bearing for the cost/tokens summary).
+	callsByLang, err := store.GetAllTimeCallsByLanguage()
+	if err != nil {
+		callsByLang = nil
+	}
+
 	projects, err := store.ListProjects()
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
@@ -173,10 +188,11 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 		DataDir:  dir,
 		DBSizeKB: dbFileSizeKB(dir),
 		AllTime: AllTimeSavings{
-			Calls:       calls,
-			TokensUsed:  tokensUsed,
-			TokensSaved: tokensSaved,
-			CostAvoided: costAvoided,
+			Calls:           calls,
+			TokensUsed:      tokensUsed,
+			TokensSaved:     tokensSaved,
+			CostAvoided:     costAvoided,
+			CallsByLanguage: callsByLang,
 		},
 		Projects: projOut,
 	}, nil
@@ -209,6 +225,11 @@ func formatStatsText(r *StatsReport) string {
 	// widest content. Without this, large symbol counts (e.g. thinksmart's
 	// 447,201 syms / 39,276 files = 28-char value) overflow the previous
 	// 44-char fixed-width box and push the closing │ visually rightward.
+	//
+	// Section boundaries are tracked as indices rather than hardcoded so a
+	// future section insert (#240 added LANGUAGES between STORAGE and
+	// PROJECTS) only needs new boundary tracking, not rewiring of every
+	// downstream loop.
 	type row struct{ label, value string }
 	var rows []row
 
@@ -217,9 +238,40 @@ func formatStatsText(r *StatsReport) string {
 		row{"Tokens used:", commify(r.AllTime.TokensUsed)},
 		row{"Tokens saved:", "~" + commify(r.AllTime.TokensSaved)},
 		row{"Cost avoided:", fmt.Sprintf("$%.4f", r.AllTime.CostAvoided)},
+	)
+	allTimeEnd := len(rows)
+
+	rows = append(rows,
 		row{"Data dir:", r.DataDir}, // no truncation; box auto-sizes
 		row{"DB size:", commify(r.DBSizeKB) + " KB"},
 	)
+	storageEnd := len(rows)
+
+	// LANGUAGES rows (#240): one per language, sorted by count desc with a
+	// lexical tie-breaker so the diagnostic order is stable across runs.
+	// Only emitted when the underlying map is non-empty — pre-v16
+	// sessions render exactly the same as before.
+	if len(r.AllTime.CallsByLanguage) > 0 {
+		type langKV struct {
+			lang  string
+			count int64
+		}
+		pairs := make([]langKV, 0, len(r.AllTime.CallsByLanguage))
+		for lang, count := range r.AllTime.CallsByLanguage {
+			pairs = append(pairs, langKV{lang, count})
+		}
+		sort.Slice(pairs, func(i, j int) bool {
+			if pairs[i].count != pairs[j].count {
+				return pairs[i].count > pairs[j].count
+			}
+			return pairs[i].lang < pairs[j].lang
+		})
+		for _, p := range pairs {
+			rows = append(rows, row{p.lang + ":", commify(p.count)})
+		}
+	}
+	languagesEnd := len(rows)
+
 	for _, p := range r.Projects {
 		// Two-line project rendering: name on line 1, count value on line 2.
 		// Both contribute to width independently.
@@ -293,21 +345,28 @@ func formatStatsText(r *StatsReport) string {
 
 	b.WriteString("┌" + strings.Repeat("─", w) + "┐\n")
 	b.WriteString(header("ALL-TIME"))
-	b.WriteString(line(rows[0].label, rows[0].value))
-	b.WriteString(line(rows[1].label, rows[1].value))
-	b.WriteString(line(rows[2].label, rows[2].value))
-	b.WriteString(line(rows[3].label, rows[3].value))
+	for i := 0; i < allTimeEnd; i++ {
+		b.WriteString(line(rows[i].label, rows[i].value))
+	}
 
 	b.WriteString(sep)
 	b.WriteString(header("STORAGE"))
-	b.WriteString(line(rows[4].label, rows[4].value))
-	b.WriteString(line(rows[5].label, rows[5].value))
+	for i := allTimeEnd; i < storageEnd; i++ {
+		b.WriteString(line(rows[i].label, rows[i].value))
+	}
+
+	if storageEnd < languagesEnd {
+		b.WriteString(sep)
+		b.WriteString(header("LANGUAGES"))
+		for i := storageEnd; i < languagesEnd; i++ {
+			b.WriteString(line(rows[i].label, rows[i].value))
+		}
+	}
 
 	if len(r.Projects) > 0 {
 		b.WriteString(sep)
 		b.WriteString(header("PROJECTS"))
-		// Project rows start at index 6; each project contributes two rows.
-		for i := 6; i < len(rows); i++ {
+		for i := languagesEnd; i < len(rows); i++ {
 			b.WriteString(line(rows[i].label, rows[i].value))
 		}
 	}
