@@ -111,6 +111,21 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
+	// #310: fail fast when the path doesn't exist, rather than walking
+	// a missing root and silently returning {files: 0, symbols: 0}
+	// with the misleading "no indexable source files" diagnosis.
+	// Catches typo'd paths immediately so the agent can correct.
+	fi, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("path %q does not exist on disk", absPath)
+		}
+		return nil, fmt.Errorf("stat path %q: %w", absPath, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("path %q is not a directory", absPath)
+	}
+
 	projectID := db.ProjectIDFromPath(absPath)
 	projectName := db.ProjectNameFromPath(absPath)
 
