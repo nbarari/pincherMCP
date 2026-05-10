@@ -1821,7 +1821,11 @@ type HealthReport struct {
 // HealthCheck returns diagnostic information for the given project.
 // projectID may be empty, in which case Project and coverage are omitted.
 func (s *Store) HealthCheck(projectID string) (*HealthReport, error) {
-	report := &HealthReport{DBPath: s.Path}
+	// #328: pre-allocate Coverage so the JSON shape is stable. A nil
+	// slice marshals to `null`, which forces every consumer to null-check
+	// before iterating; an empty slice marshals to `[]`, which they can
+	// always range over safely. Same field, same endpoint — same shape.
+	report := &HealthReport{DBPath: s.Path, Coverage: []LanguageCoverage{}}
 
 	// Schema version
 	if err := s.db.QueryRow(`SELECT version FROM schema_version`).Scan(&report.SchemaVersion); err != nil {

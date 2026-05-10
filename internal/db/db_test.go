@@ -2353,6 +2353,31 @@ func TestHealthCheck_NoProject(t *testing.T) {
 	if report.Project != nil {
 		t.Errorf("Project should be nil for empty projectID")
 	}
+	// #328: Coverage must be a non-nil empty slice so JSON shape is stable.
+	if report.Coverage == nil {
+		t.Error("Coverage is nil; want non-nil empty slice for stable JSON shape (marshals to [] not null)")
+	}
+}
+
+// #328: An indexed project with zero symbols still returns Coverage as
+// an empty slice, never nil. JSON consumers can `range` it without
+// null-checking.
+func TestHealthCheck_EmptyProject_CoverageIsEmptySliceNotNil(t *testing.T) {
+	s := newTestStore(t)
+	p := testProject("empty1")
+	if err := s.UpsertProject(p); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	report, err := s.HealthCheck("empty1")
+	if err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
+	if report.Coverage == nil {
+		t.Fatal("Coverage is nil for empty project; want non-nil empty slice")
+	}
+	if len(report.Coverage) != 0 {
+		t.Errorf("Coverage length = %d, want 0 for project with no symbols", len(report.Coverage))
+	}
 }
 
 func TestHealthCheck_WithProject(t *testing.T) {
