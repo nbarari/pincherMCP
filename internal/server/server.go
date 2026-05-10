@@ -173,6 +173,15 @@ type Server struct {
 	// prevents the HTTP-only dashboard process from recording its own tool
 	// calls (POST /v1/architecture etc.) as fake MCP sessions in the DB.
 	mcpConnected int32
+
+	// binaryPath + binaryStartMTime support the stale-binary detector
+	// (#278). Captured once at New(). On every health call we re-stat
+	// the binary path; if its mtime moved forward, a newer binary
+	// landed on disk while this MCP server kept running with the
+	// old in-memory copy. The agent gets a one-line prompt to
+	// reconnect via /mcp.
+	binaryPath       string
+	binaryStartMTime time.Time
 }
 
 // New creates and registers all 14 MCP tools.
@@ -186,6 +195,16 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		version:             version,
 		persistentSessionID: fmt.Sprintf("sess-%d", now.UnixNano()),
 		sessionStartedAt:    now,
+	}
+	// Capture the running binary's path + initial mtime so the
+	// health stale-binary check (#278) can compare against the
+	// current on-disk mtime later. Failures here just leave the
+	// fields zero; health reports binary_stale=false in that case.
+	if exe, err := os.Executable(); err == nil {
+		s.binaryPath = exe
+		if info, statErr := os.Stat(exe); statErr == nil {
+			s.binaryStartMTime = info.ModTime()
+		}
 	}
 	s.mcp = mcp.NewServer(
 		&mcp.Implementation{Name: "pincher", Version: version},
@@ -3326,6 +3345,18 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 	data := map[string]any{
 		"schema_version": report.SchemaVersion,
 		"db_path":        report.DBPath,
+	}
+
+	// #278: stale-binary detection. If a newer pincher.exe landed on
+	// disk while this MCP server is still running with the old
+	// in-memory copy, surface a binary_stale=true flag with a
+	// reconnect hint. Best-effort — failures (Windows AV scan
+	// holding the file, exe path moved) silently report false.
+	if s.binaryPath != "" && !s.binaryStartMTime.IsZero() {
+		if info, err := os.Stat(s.binaryPath); err == nil && info.ModTime().After(s.binaryStartMTime) {
+			data["binary_stale"] = true
+			data["binary_stale_message"] = "Newer pincher binary on disk; restart the MCP server (/mcp reconnect) to pick up changes."
+		}
 	}
 	if report.Project != nil {
 		data["project"] = map[string]any{
