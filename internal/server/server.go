@@ -2916,16 +2916,60 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		}
 	}
 
+	// #338: ensure rows is never nil so JSON marshals as [] not null.
+	// The cypher Executor's Result.Rows defaults to nil when no MATCH
+	// rows; both the filtered and unfiltered branches above can leave it
+	// nil. Same fix shape as #328 / #330 / #332 / #334.
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+
 	responseJSON, _ := json.Marshal(rows)
+	meta := map[string]any{
+		"confidence_distribution": confidenceDistribution(confs),
+	}
+	// #338: when the result rows expose an `id` column (RETURN n.id, f.id,
+	// etc.), suggest a `context` follow-up on the top row. Mirrors the
+	// next_steps pattern in search/trace/changes/architecture so an agent
+	// doesn't have to re-derive the obvious next call from a query result.
+	if id := firstRowID(rows); id != "" {
+		meta["next_steps"] = []map[string]string{
+			{"tool": "context", "args": fmt.Sprintf(`{"id":"%s"}`, id),
+				"why": "read the top result's full source + imports — the typical follow-up after a query MATCH"},
+		}
+	}
 	data := map[string]any{
 		"columns": result.Columns,
 		"rows":    rows,
 		"total":   len(rows),
-		"_meta": map[string]any{
-			"confidence_distribution": confidenceDistribution(confs),
-		},
+		"_meta":   meta,
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(rows), responseJSON)), nil
+}
+
+// firstRowID returns the id of the first row in rows when any column
+// looks like a symbol id (`id`, `n.id`, `f.id`, ...). Used by handleQuery
+// to propose a context next_step when the user RETURNed an id column
+// (#338). Returns "" when no row carries an id we can use.
+func firstRowID(rows []map[string]any) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	r := rows[0]
+	// Direct `id` projection first.
+	if v, ok := r["id"].(string); ok && v != "" {
+		return v
+	}
+	// Aliased forms — Cypher `RETURN n.id` produces a column named `n.id`.
+	for k, v := range r {
+		if !strings.HasSuffix(k, ".id") {
+			continue
+		}
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // rowConfidence pulls the `extraction_confidence` column off a Cypher result
