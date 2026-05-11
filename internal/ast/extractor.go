@@ -216,8 +216,24 @@ func init() {
 			".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
 			".jsx": "JSX",
 		},
+		// The dispatcher stamps this confidence on every emitted symbol.
+		// When PINCHER_EXPERIMENTAL_JS_AST=1 is set and the AST extractor
+		// succeeds, the symbols are AST-exact; otherwise they fall back
+		// to the regex path's 0.85. We keep the registered confidence at
+		// 0.85 so the regex fallback is honest about its accuracy. When
+		// the flag flips default-on (planned for v0.14.0 after a clean
+		// two-cycle bake), we'll bump this to 1.0.
 		confidence: 0.85,
 		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
+			// #266: AST extraction behind PINCHER_EXPERIMENTAL_JS_AST=1.
+			// The AST path eliminates false positives that the regex
+			// extractor surfaced on dogfooded JS (#259/#260/#261); on
+			// parse failure or with the flag unset, the regex path runs.
+			if jsASTEnabled() {
+				if r, ok := extractJavaScriptAST(s, p); ok {
+					return r
+				}
+			}
 			return extractJavaScript(s, p)
 		},
 	})
