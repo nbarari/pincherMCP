@@ -1775,6 +1775,104 @@ func TestHandleContext_NoImports(t *testing.T) {
 	}
 }
 
+// #381: context follows CALLS edges (in-file callees), not just IMPORTS.
+// Pre-fix the tool description promised "everything it directly imports
+// /calls" but only IMPORTS were followed, so a function calling 3 in-file
+// helpers got back zero callees. Repros the dogfood case from #381 where
+// `parseFactor` calls `parseOrExpr`, `parseOneCondition`, and constructs
+// `condExpr` / `notExpr` — all in the same file.
+func TestHandleContext_IncludesInFileCallees(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	pid := "ctx-callees-proj"
+	repoDir := t.TempDir()
+	writeGoFile(t, repoDir, "pkg/parser.go",
+		"package pkg\n\nfunc parseFactor() {}\nfunc parseOrExpr() {}\nfunc parseOneCondition() {}\n")
+
+	store.UpsertProject(db.Project{ID: pid, Path: repoDir, Name: "ctxc", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "cc-factor", ProjectID: pid, FilePath: "pkg/parser.go", Name: "parseFactor",
+			QualifiedName: "pkg.parseFactor", Kind: "Function", Language: "Go",
+			StartByte: 14, EndByte: 36, StartLine: 3, EndLine: 3},
+		{ID: "cc-or", ProjectID: pid, FilePath: "pkg/parser.go", Name: "parseOrExpr",
+			QualifiedName: "pkg.parseOrExpr", Kind: "Function", Language: "Go",
+			StartByte: 37, EndByte: 59, StartLine: 4, EndLine: 4},
+		{ID: "cc-cond", ProjectID: pid, FilePath: "pkg/parser.go", Name: "parseOneCondition",
+			QualifiedName: "pkg.parseOneCondition", Kind: "Function", Language: "Go",
+			StartByte: 60, EndByte: 88, StartLine: 5, EndLine: 5},
+	})
+	store.BulkUpsertEdges([]db.Edge{
+		{ProjectID: pid, FromID: "cc-factor", ToID: "cc-or", Kind: "CALLS", Confidence: 1.0},
+		{ProjectID: pid, FromID: "cc-factor", ToID: "cc-cond", Kind: "CALLS", Confidence: 1.0},
+	})
+	srv.sessionID = pid
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{"id": "cc-factor"}))
+	if err != nil {
+		t.Fatalf("handleContext: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", decode(t, result))
+	}
+	body := decode(t, result)
+	callees, ok := body["callees"].([]any)
+	if !ok {
+		t.Fatalf("callees field missing or wrong type; body: %v", body)
+	}
+	if len(callees) != 2 {
+		t.Fatalf("callees count = %d, want 2 (parseOrExpr + parseOneCondition); body: %v", len(callees), body)
+	}
+	got := map[string]bool{}
+	for _, c := range callees {
+		entry, _ := c.(map[string]any)
+		got[entry["name"].(string)] = true
+	}
+	for _, want := range []string{"parseOrExpr", "parseOneCondition"} {
+		if !got[want] {
+			t.Errorf("expected callee %q in context response; got %v", want, got)
+		}
+	}
+}
+
+// De-duplication: a symbol that's BOTH imported and called must only
+// appear once. Imports are processed first, so the de-dupe map drops
+// the duplicate from the callees side.
+func TestHandleContext_DeduplicatesAcrossImportsAndCallees(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	pid := "ctx-dedup-proj"
+	repoDir := t.TempDir()
+	writeGoFile(t, repoDir, "pkg/svc.go", "package pkg\n\nfunc Compute() {}\n")
+
+	store.UpsertProject(db.Project{ID: pid, Path: repoDir, Name: "dd", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "dd-main", ProjectID: pid, FilePath: "pkg/svc.go", Name: "Compute",
+			QualifiedName: "pkg.Compute", Kind: "Function", Language: "Go",
+			StartByte: 14, EndByte: 32, StartLine: 3, EndLine: 3},
+		{ID: "dd-helper", ProjectID: pid, FilePath: "pkg/helper.go", Name: "Helper",
+			QualifiedName: "pkg.Helper", Kind: "Function", Language: "Go",
+			StartByte: 0, EndByte: 22, StartLine: 1, EndLine: 1},
+	})
+	// Helper is BOTH imported AND called from Compute.
+	store.BulkUpsertEdges([]db.Edge{
+		{ProjectID: pid, FromID: "dd-main", ToID: "dd-helper", Kind: "IMPORTS", Confidence: 1.0},
+		{ProjectID: pid, FromID: "dd-main", ToID: "dd-helper", Kind: "CALLS", Confidence: 1.0},
+	})
+	srv.sessionID = pid
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{"id": "dd-main"}))
+	if err != nil {
+		t.Fatalf("handleContext: %v", err)
+	}
+	body := decode(t, result)
+	imports, _ := body["imports"].([]any)
+	callees, _ := body["callees"].([]any)
+	if len(imports) != 1 {
+		t.Errorf("imports count = %d, want 1; body: %v", len(imports), body)
+	}
+	if len(callees) != 0 {
+		t.Errorf("callees count = %d, want 0 (de-duped against imports); body: %v", len(callees), body)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // parseFileURI edge cases
 // ─────────────────────────────────────────────────────────────────────────────

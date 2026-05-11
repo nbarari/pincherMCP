@@ -52,6 +52,7 @@ func TestHandleTrace_NoHops_HopsIsEmptyArrayNotNull(t *testing.T) {
 }
 
 // context on a symbol with no IMPORTS edges → "imports":[] not null.
+// Same JSON-shape stability fix that #381 also applies to "callees".
 func TestHandleContext_NoImports_ImportsIsEmptyArrayNotNull(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	pid := "ctx-null-test"
@@ -64,7 +65,7 @@ func TestHandleContext_NoImports_ImportsIsEmptyArrayNotNull(t *testing.T) {
 			QualifiedName: "main.Solo", Kind: "Function", Language: "Go",
 			StartByte: 0, EndByte: 30, StartLine: 1, EndLine: 3, ExtractionConfidence: 1.0},
 	})
-	// No IMPORTS edges seeded.
+	// No IMPORTS or CALLS edges seeded.
 
 	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{
 		"id": "p::main.Solo#Function",
@@ -73,14 +74,18 @@ func TestHandleContext_NoImports_ImportsIsEmptyArrayNotNull(t *testing.T) {
 		t.Fatalf("handleContext: %v", err)
 	}
 	body := decode(t, result)
-	if v, present := body["imports"]; !present {
-		t.Fatal("imports key missing from context response")
-	} else if v == nil {
-		t.Errorf("imports is null; want [] (non-nil empty array)")
+	for _, key := range []string{"imports", "callees"} {
+		if v, present := body[key]; !present {
+			t.Fatalf("%s key missing from context response", key)
+		} else if v == nil {
+			t.Errorf("%s is null; want [] (non-nil empty array)", key)
+		}
 	}
 	raw, _ := json.Marshal(body)
-	if strings.Contains(string(raw), `"imports":null`) {
-		t.Errorf("context JSON contains \"imports\":null; want \"imports\":[]\nfull: %s", raw)
+	for _, frag := range []string{`"imports":null`, `"callees":null`} {
+		if strings.Contains(string(raw), frag) {
+			t.Errorf("context JSON contains %s; want []\nfull: %s", frag, raw)
+		}
 	}
 }
 

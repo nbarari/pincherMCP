@@ -1605,7 +1605,7 @@ func (s *Server) registerTools() {
 	// 4. context
 	s.addTool(&mcp.Tool{
 		Name:        "context",
-		Description: "**Use before editing a function** to read it together with everything it directly imports/calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}]}`. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source.",
+		Description: "**Use before editing a function** to read it together with everything it directly imports and calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}], callees: [{source, ...}]}` — `imports` is cross-package dependencies (IMPORTS edges), `callees` is the in-package helpers it directly calls (CALLS edges). De-duplicated so a symbol that's both imported and called only appears once. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["id"],"properties":{
 				"id":{"type":"string","description":"Symbol ID to fetch with its imports."},
@@ -2199,17 +2199,22 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 	root, _ := s.resolveProjectRoot(sym.ProjectID)
 	source, _ := index.ReadSymbolSource(root, *sym)
 
-	// Find IMPORTS edges from this symbol
+	// Find IMPORTS edges from this symbol — cross-package dependencies.
 	importEdges, _ := s.store.EdgesFrom(sym.ID, []string{"IMPORTS"})
 	// #332: zero-len init so JSON shape is stable when the symbol has
 	// no imports (same fix as #328/#330).
 	imports := []map[string]any{}
 	var importPaths []string
+	seen := map[string]bool{sym.ID: true}
 	for _, e := range importEdges {
+		if seen[e.ToID] {
+			continue
+		}
 		imp, err := s.store.GetSymbol(e.ToID)
 		if err != nil || imp == nil {
 			continue
 		}
+		seen[e.ToID] = true
 		impSource, _ := index.ReadSymbolSource(root, *imp)
 		imports = append(imports, map[string]any{
 			"id":        imp.ID,
@@ -2221,12 +2226,45 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 		importPaths = append(importPaths, imp.FilePath)
 	}
 
-	// Savings = would have read the full source file + every import file; gave only symbols.
-	// Include the primary symbol's file in the baseline.
+	// Find CALLS edges — the symbol's directly-called helpers (#381).
+	// The tool description promises "everything it directly imports/calls";
+	// pre-fix only IMPORTS were followed, so an in-file refactor that
+	// reads `context` against a function calling 3 helpers got back zero
+	// callees and had to chase each one with a separate tool call. Now
+	// the response includes them in `callees`. De-duplicated against
+	// `imports` so a callee that's also imported only appears once.
+	callEdges, _ := s.store.EdgesFrom(sym.ID, []string{"CALLS"})
+	callees := []map[string]any{}
+	var calleePaths []string
+	for _, e := range callEdges {
+		if seen[e.ToID] {
+			continue
+		}
+		callee, err := s.store.GetSymbol(e.ToID)
+		if err != nil || callee == nil {
+			continue
+		}
+		seen[e.ToID] = true
+		calleeSource, _ := index.ReadSymbolSource(root, *callee)
+		callees = append(callees, map[string]any{
+			"id":        callee.ID,
+			"name":      callee.Name,
+			"kind":      callee.Kind,
+			"file_path": callee.FilePath,
+			"source":    calleeSource,
+		})
+		calleePaths = append(calleePaths, callee.FilePath)
+	}
+
+	// Savings = would have read the full source file + every import +
+	// every callee file; gave only symbols. Include the primary symbol's
+	// file in the baseline.
 	allPaths := append([]string{sym.FilePath}, importPaths...)
+	allPaths = append(allPaths, calleePaths...)
 	data := map[string]any{
 		"symbol":  map[string]any{"id": sym.ID, "name": sym.Name, "kind": sym.Kind, "source": source},
 		"imports": imports,
+		"callees": callees,
 	}
 	// Context returns the symbol + its callees (the outbound direction). The
 	// natural next move is the inbound direction — find the symbol's callers

@@ -74,7 +74,7 @@
   },
   {
     "name": "context",
-    "description": "**Use before editing a function** to read it together with everything it directly imports/calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}]}`. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source.",
+    "description": "**Use before editing a function** to read it together with everything it directly imports and calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}], callees: [{source, ...}]}` — `imports` is cross-package dependencies (IMPORTS edges), `callees` is the in-package helpers it directly calls (CALLS edges). De-duplicated so a symbol that's both imported and called only appears once. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source.",
     "input_schema": {
       "properties": {
         "id": {
