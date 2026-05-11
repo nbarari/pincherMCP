@@ -1927,6 +1927,11 @@ func TestRunGitDiff_NonGitDir(t *testing.T) {
 // TestRunGitDiff_IncludesUntrackedForUnstagedAndAll pins #6: a brand-new
 // untracked file is "uncommitted" by definition and belongs in
 // pre-commit safety analysis. `git diff` alone misses it.
+// #422: scope=`unstaged` is working-tree-modified ONLY — matches
+// `git diff --name-only` semantics and the tool description's documented
+// scope ladder. Only scope=`all` includes untracked. Pre-fix, both
+// `unstaged` and `all` folded untracked in, so `unstaged` returned
+// untracked dotfiles instead of the agent's actual edits.
 func TestRunGitDiff_IncludesUntrackedForUnstagedAndAll(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -1970,8 +1975,8 @@ func TestRunGitDiff_IncludesUntrackedForUnstagedAndAll(t *testing.T) {
 		wantUntracked  bool // untracked-new.txt must appear
 		wantStagedFile bool // staged-new.txt must appear
 	}{
-		{"unstaged", true, true, false},  // unstaged mods + untracked
-		{"all", true, true, true},        // every uncommitted thing
+		{"unstaged", true, false, false}, // #422: working-tree-modified ONLY; untracked excluded
+		{"all", true, true, true},        // every uncommitted thing (incl. untracked)
 		{"staged", false, false, true},   // only staged; untracked excluded by design
 	}
 	for _, c := range cases {

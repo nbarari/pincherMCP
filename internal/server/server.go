@@ -6025,13 +6025,19 @@ func runGitDiff(root, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// `git diff` only reports tracked changes. `unstaged` and `all` are
-	// the user's "what's not yet committed?" queries; an untracked new
-	// source file (a brand-new test file, a fresh handler, a new docs
-	// page) is uncommitted by definition and belongs in pre-commit
-	// safety analysis (#6). `staged` deliberately doesn't include
-	// untracked files — by definition they're not staged yet.
-	if scope == "" || scope == "unstaged" || scope == "all" {
+	// #422: `unstaged` reports working-tree-modified files only —
+	// matching `git diff --name-only` semantics and the tool
+	// description's documented scope ladder (`unstaged` / `staged` /
+	// `all` (includes untracked)). Pre-fix, both `unstaged` and `all`
+	// folded untracked files in, so an agent that asked for the
+	// modified-files diff before a commit saw untracked dotfiles
+	// instead — the `tests_to_run` list then read "nothing to test,
+	// ship it" even when real edits were waiting on tracked files.
+	//
+	// `all` remains the scope that includes untracked, which is the
+	// "what's NOT yet committed across the whole working tree?" view
+	// the agent reaches for when finalising a commit.
+	if scope == "all" {
 		untracked, lsErr := runGitLsUntracked(root)
 		if lsErr == nil && untracked != "" {
 			return string(out) + untracked, nil
