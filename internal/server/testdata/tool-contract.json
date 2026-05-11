@@ -87,6 +87,35 @@
     }
   },
   {
+    "name": "dead_code",
+    "description": "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision: `language=Go` (1.0-confidence AST extraction) + `kinds=Function,Method`. Lower `min_confidence` and broaden `kinds` at the cost of false positives from regex-tier extractors that under-resolve cross-file edges. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
+    "input_schema": {
+      "properties": {
+        "kinds": {
+          "description": "Comma-separated kinds to consider, e.g. 'Function,Method' (default), 'Function,Method,Class'. Setting/Variable/Section are excluded by default since dead-DATA has different semantics than dead-code.",
+          "type": "string"
+        },
+        "language": {
+          "description": "Language filter, e.g. 'Go'. Default: empty (all languages). Recommended: 'Go' until non-Go AST extractors land — regex extractors under-resolve cross-file CALLS so non-Go results have higher false-positive rates.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max symbols returned (default 100, max 500).",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum extraction_confidence (default 0.95 — biases to AST-extracted languages). Drop to 0.0 to include regex-tier languages (higher false-positive rate).",
+          "type": "number"
+        },
+        "project": {
+          "description": "Project name or ID. Defaults to session project.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "fetch",
     "description": "**Use to pull external reference material into the project knowledge base** — API docs, library READMEs, specs, RFCs. Fetches a URL, extracts its text, stores it as a searchable `Document` symbol. After fetching, use `search kind:Document` to find it, or `symbol` with the returned ID to retrieve the full text. The Document kind lives in the `docs` corpus, so `corpus=docs` searches surface it alongside Markdown sections.",
     "input_schema": {

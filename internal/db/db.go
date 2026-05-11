@@ -2211,6 +2211,76 @@ func (s *Store) GetSymbolsForFile(projectID, filePath string) ([]Symbol, error) 
 	return s.querySymbols(symSelectFrom+` WHERE project_id=? AND file_path=? ORDER BY start_byte`, projectID, filePath)
 }
 
+// GetDeadCode returns symbols with no inbound edges of any kind
+// (CALLS, REFERENCES, READS, WRITES, IMPORTS), filtered to internal
+// callable symbols that *should* have callers — i.e., not exported
+// (would be public API), not entry points (main/init), not test
+// functions (test runners call them externally).
+//
+// Caller-supplied filters:
+//   - kinds: SQL `IN`-list of symbol kinds. Pass nil/empty to default
+//     to {"Function", "Method"}; the only kinds where in-graph
+//     callers are extracted with high precision today.
+//   - language: optional single-language filter. Pass empty to span
+//     all languages — but be aware that regex-tier extractors (most
+//     non-Go languages) under-resolve cross-file CALLS edges, so
+//     dead-code results outside Go land at higher false-positive
+//     rates. Default 0.95 confidence floor encodes this.
+//   - minConfidence: extraction_confidence floor. 0.95 by default
+//     to bias toward Go AST + JSON/YAML/HCL parser-backed
+//     extractors. Drop to 0.0 to include regex-tier languages at
+//     known false-positive cost.
+//
+// SQL uses NOT EXISTS rather than LEFT JOIN ... IS NULL so the
+// edges table's (project_id, to_id) index dominates the plan.
+func (s *Store) GetDeadCode(projectID string, kinds []string, language string, minConfidence float64, limit int) ([]Symbol, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(kinds) == 0 {
+		kinds = []string{"Function", "Method"}
+	}
+	q := `
+		SELECT s.id, s.project_id, s.file_path, s.name, s.qualified_name, s.kind, s.language,
+		       s.start_byte, s.end_byte, s.start_line, s.end_line,
+		       s.signature, s.return_type, s.docstring, s.parent,
+		       s.complexity, s.is_exported, s.is_test, s.is_entry_point, s.file_hash,
+		       s.extraction_confidence
+		FROM symbols s
+		WHERE s.project_id = ?
+		  AND s.is_exported = 0
+		  AND s.is_entry_point = 0
+		  AND s.is_test = 0
+		  AND s.extraction_confidence >= ?
+		  AND s.kind IN (` + inPlaceholders(len(kinds)) + `)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM edges e
+		      WHERE e.project_id = s.project_id
+		        AND e.to_id = s.id
+		  )`
+	args := []any{projectID, minConfidence}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	if language != "" {
+		q += " AND s.language = ?"
+		args = append(args, language)
+	}
+	q += " ORDER BY s.file_path, s.start_line LIMIT ?"
+	args = append(args, limit)
+	return s.querySymbols(q, args...)
+}
+
+// inPlaceholders returns "?,?,...?" with n placeholders. Local copy
+// to avoid importing the cypher package (db is the lower layer).
+func inPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	s := strings.Repeat("?,", n)
+	return s[:len(s)-1]
+}
+
 // GetHotspots returns the most-called symbols (highest in-degree) for a project.
 func (s *Store) GetHotspots(projectID string, limit int) ([]Symbol, error) {
 	return s.querySymbols(`

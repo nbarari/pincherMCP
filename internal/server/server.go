@@ -1710,7 +1710,22 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleChanges)
 
-	// 9. architecture
+	// 9. dead-code
+	s.addTool(&mcp.Tool{
+		Name:        "dead_code",
+		Description: "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision: `language=Go` (1.0-confidence AST extraction) + `kinds=Function,Method`. Lower `min_confidence` and broaden `kinds` at the cost of false positives from regex-tier extractors that under-resolve cross-file edges. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
+		InputSchema: json.RawMessage(`{
+			"type":"object","properties":{
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project."},
+				"language":{"type":"string","description":"Language filter, e.g. 'Go'. Default: empty (all languages). Recommended: 'Go' until non-Go AST extractors land — regex extractors under-resolve cross-file CALLS so non-Go results have higher false-positive rates."},
+				"kinds":{"type":"string","description":"Comma-separated kinds to consider, e.g. 'Function,Method' (default), 'Function,Method,Class'. Setting/Variable/Section are excluded by default since dead-DATA has different semantics than dead-code."},
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (default 0.95 — biases to AST-extracted languages). Drop to 0.0 to include regex-tier languages (higher false-positive rate)."},
+				"limit":{"type":"integer","description":"Max symbols returned (default 100, max 500)."}
+			}
+		}`),
+	}, s.handleDeadCode)
+
+	// 10. architecture
 	s.addTool(&mcp.Tool{
 		Name:        "architecture",
 		Description: "**Call once at the start of unfamiliar work** to orient. Returns language breakdown, entry points, hotspot functions (most-called = highest change risk), and graph statistics. Hotspots default to production code only (test helpers are filtered); pass include_tests=true to surface them too. Much cheaper than reading files to understand the structure.",
@@ -3636,6 +3651,99 @@ func firstCodeSymbolName(syms []map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	start, tool, args := beginCall(req)
+	_ = ctx
+
+	projectID, errRes := s.mustProject(args)
+	if errRes != nil {
+		return errRes, nil
+	}
+
+	language := str(args, "language")
+	kindsRaw := str(args, "kinds")
+	var kinds []string
+	if kindsRaw != "" {
+		for _, k := range strings.Split(kindsRaw, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				kinds = append(kinds, k)
+			}
+		}
+	}
+	// 0.95 default biases toward AST-extracted languages (Go=1.0,
+	// JSON/YAML/HCL parser-backed). Caller can drop to 0.0 to include
+	// regex-tier languages at known false-positive cost (their CALLS
+	// edges under-resolve cross-file).
+	minConfidence := floatArg(args, "min_confidence", 0.95)
+	limit := intArg(args, "limit", 100)
+	if limit > 500 {
+		limit = 500
+	}
+
+	rawDead, err := s.store.GetDeadCode(projectID, kinds, language, minConfidence, limit*2)
+	if err != nil {
+		return errResult(fmt.Sprintf("dead_code: %v", err)), nil
+	}
+
+	// Post-filter: testdata fixtures (#393) and developer scratch
+	// paths shouldn't appear — they're either fixture inputs (not
+	// real code) or known-dead noise the developer doesn't need
+	// told. SQL can't filter these without a path-pattern column;
+	// LIMIT*2 from SQL + trim in Go is cheaper than a new column.
+	dead := []map[string]any{}
+	for _, sym := range rawDead {
+		if isDeveloperScratchPath(sym.FilePath) || isTestFixturePath(sym.FilePath) {
+			continue
+		}
+		dead = append(dead, map[string]any{
+			"id":         sym.ID,
+			"name":       sym.Name,
+			"kind":       sym.Kind,
+			"language":   sym.Language,
+			"file_path":  sym.FilePath,
+			"start_line": sym.StartLine,
+			"complexity": sym.Complexity,
+		})
+		if len(dead) >= limit {
+			break
+		}
+	}
+
+	data := map[string]any{
+		"dead_symbols": dead,
+		"total":        len(dead),
+		"filters": map[string]any{
+			"language":       language,
+			"kinds":          kinds,
+			"min_confidence": minConfidence,
+		},
+	}
+	if len(dead) > 0 {
+		// Surface the obvious next move: read the top dead symbol's
+		// source to confirm before deleting. trace inbound is the
+		// safety check — sometimes the graph misses a caller (regex
+		// extractor under-resolution) and the agent should verify
+		// before suggesting a deletion.
+		topID, _ := dead[0]["id"].(string)
+		topName, _ := dead[0]["name"].(string)
+		data["_meta"] = map[string]any{
+			"next_steps": []map[string]string{
+				{"tool": "symbol", "args": fmt.Sprintf(`{"id":"%s"}`, topID),
+					"why": "read the top dead symbol's source before recommending deletion — confirm the graph isn't missing an inbound edge"},
+				{"tool": "trace", "args": fmt.Sprintf(`{"name":"%s","direction":"inbound"}`, topName),
+					"why": "double-check inbound callers — name-based trace catches references the symbol-id graph might miss for regex-extracted languages"},
+			},
+		}
+	} else {
+		data["_meta"] = map[string]any{
+			"diagnosis": "no dead code at this confidence floor — tighten min_confidence or broaden kinds to find more candidates",
+		}
+	}
+
+	responseJSON, _ := json.Marshal(dead)
+	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(dead), responseJSON)), nil
 }
 
 func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
