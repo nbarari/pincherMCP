@@ -1,8 +1,8 @@
 # Homebrew formula for pincherMCP.
 #
-# Pinned to v0.16.0. The SHA256 values below are from the authoritative
+# Pinned to v0.17.0. The SHA256 values below are from the authoritative
 # SHA256SUMS file published with that release:
-# https://github.com/kwad77/pincher/releases/download/v0.16.0/SHA256SUMS
+# https://github.com/kwad77/pincher/releases/download/v0.17.0/SHA256SUMS
 #
 # Usage:
 #   brew tap kwad77/pincher https://github.com/kwad77/homebrew-pincher
@@ -17,28 +17,28 @@
 class Pincher < Formula
   desc "Codebase intelligence server for LLM agents (MCP stdio + HTTP REST)"
   homepage "https://github.com/kwad77/pincher"
-  version "0.16.0"
+  version "0.17.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/kwad77/pincher/releases/download/v#{version}/pincher-v#{version}-darwin-arm64.tar.gz"
-      sha256 "9e3f0c47515224e6e6fb7935c26d7c0dd0d4b31a49db61d02fc7e7b3cc6eb901"
+      sha256 "b605e6180e27d8fc7101b5eb43c14e4753b14b80263999fc0c0c47d4900d90d2"
     end
     on_intel do
       url "https://github.com/kwad77/pincher/releases/download/v#{version}/pincher-v#{version}-darwin-amd64.tar.gz"
-      sha256 "e36c0ec074258fe9a775a89051e7732656e77aa4c61c5ffcc8526b256d038ee2"
+      sha256 "67535c167b9723cdfca03d33834527cba44f1ba5b061b93eb3c56b0ee869746c"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/kwad77/pincher/releases/download/v#{version}/pincher-v#{version}-linux-arm64.tar.gz"
-      sha256 "af70afc6f9a0cccb6ee47e0ca95d3ce0abfea9726c56bc17231ce89bb172dc40"
+      sha256 "82603bb811823a0704fdb4995ed7941577affd13882684fdab3168c85fa13d48"
     end
     on_intel do
       url "https://github.com/kwad77/pincher/releases/download/v#{version}/pincher-v#{version}-linux-amd64.tar.gz"
-      sha256 "35e4a5ce798c8b6c6813e6b554744812ab6d2c508dd00f89e0881291eacd5b43"
+      sha256 "d7e3464a7d253986a4fcb38fcaf3daea34364bf34c3ab9a324f4cbfa97e0219e"
     end
   end
 
