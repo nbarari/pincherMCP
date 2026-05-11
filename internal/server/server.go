@@ -239,7 +239,7 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		handlers:            make(map[string]mcp.ToolHandler),
 		tools:               make(map[string]*mcp.Tool),
 		version:             version,
-		persistentSessionID: fmt.Sprintf("sess-%d", now.UnixNano()),
+		persistentSessionID: pickPersistentSessionID(now),
 		sessionStartedAt:    now,
 		exitFn:              os.Exit, // #352: substituted by tests
 		autoRestartDelay:    autoRestartExitDelay,
@@ -262,7 +262,52 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		},
 	)
 	s.registerTools()
+	// #420: when the supervisor supplied a stable PINCHER_SESSION_ID,
+	// reload prior counters from the sessions row so the session-level
+	// stats survive a supervised respawn. Flushes are INSERT OR REPLACE
+	// on the same key, so seeding atomics and then flushing won't
+	// double-count. Best-effort: if the row doesn't exist (first inner
+	// for this supervisor) or the read fails, atomics stay at zero.
+	if row, err := store.GetSessionByID(s.persistentSessionID); err == nil && row != nil {
+		atomic.StoreInt64(&s.statsCalls, row.Calls)
+		atomic.StoreInt64(&s.statsTokensUsed, row.TokensUsed)
+		atomic.StoreInt64(&s.statsTokensSaved, row.TokensSaved)
+		atomic.StoreInt64(&s.statsQueriesTotal, row.QueryMetrics.QueriesTotal)
+		atomic.StoreInt64(&s.statsQueriesZeroResult, row.QueryMetrics.QueriesZeroResult)
+		atomic.StoreInt64(&s.statsQueriesRetriedSucceeded, row.QueryMetrics.QueriesRetriedSucceeded)
+		atomic.StoreInt64(&s.statsTokensBurned, row.QueryMetrics.TokensBurnedOnFailures)
+		// Preserve the original session start so uptime/wall-clock
+		// math reflects the supervisor's lifetime, not the inner's.
+		if !row.StartedAt.IsZero() {
+			s.sessionStartedAt = row.StartedAt
+		}
+		// Restore per-language counters from the flushed JSON snapshot.
+		if row.CallsByLanguage != "" {
+			var byLang map[string]int64
+			if jsonErr := json.Unmarshal([]byte(row.CallsByLanguage), &byLang); jsonErr == nil {
+				for lang, count := range byLang {
+					v, _ := s.statsCallsByLanguage.LoadOrStore(lang, new(int64))
+					if ptr, ok := v.(*int64); ok && ptr != nil {
+						atomic.StoreInt64(ptr, count)
+					}
+				}
+			}
+		}
+	}
 	return s
+}
+
+// pickPersistentSessionID returns the session ID this process should use
+// when flushing to the sessions table. Under supervised mode the
+// supervisor passes PINCHER_SESSION_ID via env so that successive inner
+// processes share a single sessions row — counters then persist across
+// respawn (#420). Bare invocations fall back to a per-process timestamp
+// ID, preserving the legacy "sess-<unixnano>" shape.
+func pickPersistentSessionID(now time.Time) string {
+	if id := strings.TrimSpace(os.Getenv("PINCHER_SESSION_ID")); id != "" {
+		return id
+	}
+	return fmt.Sprintf("sess-%d", now.UnixNano())
 }
 
 // StartSessionFlusher launches a background goroutine that persists

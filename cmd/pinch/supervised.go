@@ -5,10 +5,26 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kwad77/pincher/internal/supervisor"
 )
+
+// ensureSessionIDEnv returns env with a PINCHER_SESSION_ID set if the
+// caller hadn't provided one. The supervisor stamps this once per
+// supervisor lifetime so all inner respawns share one sessions row
+// (#420). Pure function; the helper exists so the env-building logic
+// is unit-testable without spinning up the full supervisor.
+func ensureSessionIDEnv(env []string) []string {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PINCHER_SESSION_ID=") {
+			return env
+		}
+	}
+	return append(env, fmt.Sprintf("PINCHER_SESSION_ID=sup-%d", time.Now().UnixNano()))
+}
 
 // runSupervisedCLI is the `pincher supervised` entry point. It runs a
 // long-lived process that wraps an inner pincher MCP server with
@@ -33,7 +49,14 @@ func runSupervisedCLI(args []string) {
 
 	sup := supervisor.New(exe)
 	sup.InnerArgs = args
-	sup.Env = os.Environ()
+	// #420: stamp a stable PINCHER_SESSION_ID so successive inner
+	// processes share one sessions-table row. The inner reads this on
+	// startup and seeds atomic counters from the prior flush, so the
+	// SESSION stats survive supervised respawn instead of resetting
+	// to zero on every binary swap. Inherits an existing value when
+	// the user already set one (test harnesses, deliberate
+	// multi-supervisor sharing).
+	sup.Env = ensureSessionIDEnv(os.Environ())
 	sup.Stdin = os.Stdin
 	sup.Stdout = os.Stdout
 	sup.Stderr = os.Stderr

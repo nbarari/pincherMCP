@@ -435,6 +435,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"GetAllTimeCallsByLanguage": true,
 	"GetAllTimeQueryMetrics":    true,
 	"GetSessions":               true,
+	"GetSessionByID":            true,
 	"GetLatestHTTPSession":      true,
 	"ResolveStaleID":          true,
 	"TraceViaCTE":             true,

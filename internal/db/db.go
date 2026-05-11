@@ -3163,6 +3163,42 @@ type SessionRow struct {
 	QueryMetrics QueryMetrics
 }
 
+// GetSessionByID returns the sessions row for a specific session_id, or
+// (nil, nil) when no row exists yet. #420: used by the server on startup
+// to seed in-memory counters from prior flushes when a stable session
+// ID is supplied (e.g. via PINCHER_SESSION_ID under supervised mode).
+// Reader-pool routed — pure SELECT, never blocks writers.
+func (s *Store) GetSessionByID(sessionID string) (*SessionRow, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	q := `SELECT session_id, started_at, last_seen, calls, tokens_used, tokens_saved,
+	             cost_avoided, http_url, http_pid, calls_by_language,
+	             queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures
+	      FROM sessions WHERE session_id=? LIMIT 1`
+	var r SessionRow
+	var startedUnix, lastSeenUnix int64
+	var clbl sql.NullString
+	err := s.ro.QueryRow(q, sessionID).Scan(
+		&r.SessionID, &startedUnix, &lastSeenUnix, &r.Calls, &r.TokensUsed, &r.TokensSaved,
+		&r.CostAvoided, &r.HTTPURL, &r.HTTPPID, &clbl,
+		&r.QueryMetrics.QueriesTotal, &r.QueryMetrics.QueriesZeroResult,
+		&r.QueryMetrics.QueriesRetriedSucceeded, &r.QueryMetrics.TokensBurnedOnFailures,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.StartedAt = time.Unix(startedUnix, 0)
+	r.LastSeen = time.Unix(lastSeenUnix, 0)
+	if clbl.Valid {
+		r.CallsByLanguage = clbl.String
+	}
+	return &r, nil
+}
+
 // GetSessions returns all recorded sessions ordered by start time descending.
 // Limit ≤ 0 returns all rows.
 func (s *Store) GetSessions(limit int) ([]SessionRow, error) {

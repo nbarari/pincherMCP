@@ -8,6 +8,21 @@ minors.
 ## [Unreleased]
 
 ### Added
+- **Session counters survive supervised respawn
+  ([#420](https://github.com/kwad77/pincher/issues/420)).** `pincher
+  supervised` now stamps a stable `PINCHER_SESSION_ID` once per
+  supervisor lifetime and propagates it to every inner spawn. The
+  server reads the env var on startup and, if a `sessions` table row
+  already exists for that ID, seeds the in-memory counters
+  (`calls`/`tokens_used`/`tokens_saved`/`queries_*`/per-language map)
+  from the prior flush. Flushes use `INSERT OR REPLACE` on the same
+  key so no double-counting. Counters that previously reset to zero
+  on every binary swap now continue across respawn, surfacing the
+  cumulative value an agent expects across a single MCP session.
+  `sessionStartedAt` is also restored so uptime reflects supervisor
+  lifetime, not inner lifetime. Pairs with the v0.16.0 `Process up:`
+  line in stats (#420 partial fix, already merged).
+
 - **`pincher.supervisor.status` surfaces `tools/list_changed` delivery
   counters ([#429](https://github.com/kwad77/pincher/issues/429)).**
   Three new fields: `tools_list_changed_emitted`,
