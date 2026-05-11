@@ -7,6 +7,31 @@ minors.
 
 ## [Unreleased]
 
+## [v0.15.3] — 2026-05-11 — pinchQL comparison-operator pushdown
+
+Patch — closes the third silently-undercounting pushdown gap in
+the pinchQL engine (after #412 fixed `id`-equality and #430 fixed
+OR / paren / NOT trees).
+
+### Fixed
+- **Comparison operators (`>`, `<`, `>=`, `<=`, `<>`) now push to
+  SQL ([#434](https://github.com/kwad77/pincher/issues/434)).** The
+  pushdown gate excluded the comparison family, so a query like
+  `WHERE n.start_line > 4000` scanned the first `maxRows()*2 = 400`
+  rows from the symbols table and post-filtered in Go. When the
+  matching rows lived past that clamp (every late-file symbol on
+  any 4000+ line project), the result was silently 0. Same bug
+  class as #412 / #430.
+
+  Comparison operators now emit parameterised SQL (`col >= ?`).
+  SQLite affinity converts the bind arg to the column's declared
+  type, so numeric WHERE works against `start_line`, `end_line`,
+  `complexity`, `extraction_confidence`, and any future numeric
+  column with no extra plumbing. `<>` is special-cased to include
+  NULL rows (`col IS NULL OR col <> ?`) — matches the prior
+  in-Go semantics. Composes with the #430 OR pushdown so
+  `WHERE start_line > 4000 OR start_line < 10` is one SQL clause.
+
 ## [v0.15.2] — 2026-05-11 — pinchQL OR pushdown + changes scope validation
 
 Patch — two correctness fixes from the v0.15.0 dogfood loop.

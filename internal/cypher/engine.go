@@ -925,7 +925,7 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 				continue
 			}
 			col := cypherPropToCol(c.property)
-			if col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
+			if col != "" && pushableOp(c.op) {
 				appendWhereOp(&sqlQ, &args, "", col, c)
 			} else {
 				unpushed = append(unpushed, c)
@@ -1063,7 +1063,7 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 				continue
 			}
 			col := cypherPropToCol(c.property)
-			if col != "" && (c.op == "=" || c.op == "CONTAINS" || c.op == "STARTS WITH" || c.op == "ENDS WITH" || c.op == "IS NULL" || c.op == "IS NOT NULL") {
+			if col != "" && pushableOp(c.op) {
 				appendWhereOp(&sqlQ, &args, tableAlias+".", col, c)
 			} else {
 				unpushed = append(unpushed, c)
@@ -1634,19 +1634,50 @@ func appendWhereOp(sqlQ *string, args *[]any, prefix, col string, c condition) {
 	*sqlQ += " AND " + inner
 }
 
+// pushableOp reports whether condLeafToSQL knows how to render this
+// operator as SQL. Used by the AND-chain pushdown gate to decide
+// whether to emit SQL or post-filter in Go. Keep in sync with
+// condLeafToSQL's switch.
+func pushableOp(op string) bool {
+	switch op {
+	case "=", "<>", ">", "<", ">=", "<=",
+		"CONTAINS", "STARTS WITH", "ENDS WITH",
+		"IS NULL", "IS NOT NULL":
+		return true
+	}
+	return false
+}
+
 // condLeafToSQL returns the SQL fragment for a single leaf condition
 // without any leading boolean-connector glue, plus its bind args. The
 // fragment is wrapped with `NOT (...)` when c.negated is set so it
 // drops directly into a paren/OR tree from whereExprToSQL.
 //
-// Returns ok=false for unsupported operators (`=~`, `>`, `<`, `>=`,
-// `<=`, `<>`) — callers fall back to in-Go evaluation.
+// Returns ok=false for unsupported operators (`=~`) — callers fall
+// back to in-Go evaluation. Comparison operators (`>`, `<`, `>=`,
+// `<=`, `<>`) push as parameterised SQL — SQLite's column affinity
+// coerces the bind arg to the column's declared type, so `n.start_line
+// > "4000"` against an INTEGER column compares numerically (#434).
 func condLeafToSQL(prefix, col string, c condition) (string, []any, bool) {
 	var inner string
 	var args []any
 	switch c.op {
 	case "=":
 		inner = prefix + col + "=?"
+		args = append(args, c.value)
+	case "<>":
+		// #434: include rows where the column is NULL when comparing
+		// inequality. SQL's `col <> ?` is FALSE on NULL by tri-state
+		// logic; the in-Go evaluator (`actual != c.value` after a
+		// `fmt.Sprint(nil)` → "<nil>") returned TRUE for NULL rows,
+		// so preserve that semantics.
+		inner = "(" + prefix + col + " IS NULL OR " + prefix + col + "<>?)"
+		args = append(args, c.value)
+	case ">", "<", ">=", "<=":
+		// #434: comparison-operator pushdown. SQLite affinity converts
+		// the string bind arg to the column type, so a query like
+		// `WHERE n.start_line > 4000` works against an INTEGER column.
+		inner = prefix + col + c.op + "?"
 		args = append(args, c.value)
 	case "CONTAINS":
 		inner = prefix + col + " LIKE ?"
