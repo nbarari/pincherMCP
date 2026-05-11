@@ -800,6 +800,30 @@ func (s *Supervisor) respawn() error {
 	}
 
 	s.inner = p
+
+	// #407: notify the client that the tool surface MAY have changed.
+	// The new inner is potentially a different binary version (typical
+	// trigger: PINCHER_AUTO_RESTART_ON_DRIFT swapped the binary on
+	// disk and the previous inner exited cleanly). MCP clients that
+	// support `notifications/tools/list_changed` will re-issue
+	// `tools/list` and pick up new tools live; clients that don't
+	// understand the notification ignore it. The notification carries
+	// no payload — the client decides whether to re-list.
+	//
+	// We send unconditionally rather than diff the tool surface
+	// across respawns. False positives (probe-timeout respawns onto
+	// the same binary) cost the client one cheap `tools/list` call;
+	// false negatives (real binary swap, no notification) cost a full
+	// session restart to pick up new tools — much more expensive.
+	notif := []byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}` + "\n")
+	if _, err := s.Stdout.Write(notif); err != nil {
+		// Don't fail the respawn — the notification is best-effort.
+		// If the client can't read its stdin, the next pump iteration
+		// will catch the broken pipe and surface it through the
+		// normal shutdown path.
+		slog.Warn("supervisor.respawn.notify_tools_list_changed_failed", "err", err)
+	}
+
 	slog.Info("supervisor.respawn",
 		"init_replayed", initReplayed,
 		"quiet_window", quietWindow)
