@@ -913,6 +913,39 @@ END;`,
 	// Empty string on rows that pre-date this migration; rendered
 	// as "indexed by unknown binary version".
 	`ALTER TABLE projects ADD COLUMN binary_version TEXT NOT NULL DEFAULT ''`,
+
+	// v18 → v19: pending_edges — persisted per-file deferred edge
+	// candidates (#457). The indexer's CALLS / IMPORTS / READS / WRITES
+	// passes resolve cross-file by accumulating "from this file's
+	// extraction we saw a reference to NAME" rows and matching them
+	// against the symbol table once every file has been processed.
+	// Pre-v19, the accumulator was an in-memory slice scoped to a
+	// single Index() call — so watcher-driven incremental runs that
+	// only re-extracted CHANGED files had no candidates from skipped
+	// files, and edges from skipped files to changed files vanished
+	// (#427).
+	//
+	// Persisting per-file: the indexer DELETEs rows for a file before
+	// re-extracting it, then INSERTs the new candidates. Skipped (hash-
+	// matched) files keep their existing rows. At resolve time, the
+	// resolver SELECTs ALL rows for the project — so re-resolution
+	// operates on the FULL corpus of candidates, not just this run's.
+	//
+	// UNIQUE (project_id, from_file, kind, from_qn, to_name) lets us
+	// INSERT OR IGNORE without ever growing duplicate rows. Confidence
+	// is preserved per-candidate so resolveCalls can weight CALLS
+	// (0.7) above READS (0.5) below the resolution path.
+	`CREATE TABLE IF NOT EXISTS pending_edges (
+		project_id  TEXT    NOT NULL,
+		from_file   TEXT    NOT NULL,
+		kind        TEXT    NOT NULL,
+		from_qn     TEXT    NOT NULL,
+		to_name     TEXT    NOT NULL,
+		confidence  REAL    NOT NULL DEFAULT 1.0,
+		UNIQUE(project_id, from_file, kind, from_qn, to_name)
+	);
+	CREATE INDEX IF NOT EXISTS idx_pending_edges_project_kind ON pending_edges(project_id, kind);
+	CREATE INDEX IF NOT EXISTS idx_pending_edges_from_file ON pending_edges(project_id, from_file);`,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -2439,6 +2472,89 @@ func (s *Store) BulkUpsertEdges(edges []Edge) error {
 		}
 		return nil
 	})
+}
+
+// PendingEdge is a per-file deferred edge candidate persisted in the
+// pending_edges table (#457). Re-resolution after an incremental
+// watcher tick sources the FULL set from this table, so edges from
+// hash-skipped files to changed files no longer get dropped (#427).
+//
+// FromQN is the caller's qualified name (already known at extraction
+// time — guaranteed in-file). ToName is whatever the extractor saw
+// at the call site — may be a bare name, a qualified name, or a
+// `receiver.method` pair. The resolver does the lookup.
+type PendingEdge struct {
+	ProjectID  string
+	FromFile   string
+	Kind       string // CALLS | IMPORTS | READS | WRITES
+	FromQN     string
+	ToName     string
+	Confidence float64
+}
+
+// ReplacePendingEdgesForFile atomically deletes any existing
+// pending_edges rows for (project_id, from_file) and inserts the
+// caller's new set. INSERT OR IGNORE on the UNIQUE constraint —
+// duplicates within the input set silently dedup. Called by the
+// indexer's per-file goroutine after a successful extraction.
+//
+// On a hash-skipped file the indexer never re-extracts, so this is
+// not called, and the existing rows remain — that's the whole point
+// of persistence (#457).
+func (s *Store) ReplacePendingEdgesForFile(projectID, fromFile string, edges []PendingEdge) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM pending_edges WHERE project_id=? AND from_file=?`, projectID, fromFile); err != nil {
+			return err
+		}
+		if len(edges) == 0 {
+			return nil
+		}
+		stmt, err := tx.Prepare(`
+			INSERT OR IGNORE INTO pending_edges(project_id, from_file, kind, from_qn, to_name, confidence)
+			VALUES (?,?,?,?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for i := range edges {
+			e := &edges[i]
+			if _, err := stmt.Exec(projectID, fromFile, e.Kind, e.FromQN, e.ToName, e.Confidence); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeletePendingEdgesForFile is the GC hook for files removed from
+// disk (#326 tail-pass) — without it, rows from a deleted file's
+// last successful extraction would linger forever and re-resolve as
+// dangling candidates. Writer-routed (mutates).
+func (s *Store) DeletePendingEdgesForFile(projectID, fromFile string) error {
+	_, err := s.db.Exec(`DELETE FROM pending_edges WHERE project_id=? AND from_file=?`, projectID, fromFile)
+	return err
+}
+
+// LoadPendingEdges returns every persisted candidate for the project
+// of the given kind. Reader-routed — pure SELECT.
+func (s *Store) LoadPendingEdges(projectID, kind string) ([]PendingEdge, error) {
+	rows, err := s.ro.Query(
+		`SELECT project_id, from_file, kind, from_qn, to_name, confidence
+		 FROM pending_edges WHERE project_id=? AND kind=?`,
+		projectID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingEdge
+	for rows.Next() {
+		var e PendingEdge
+		if err := rows.Scan(&e.ProjectID, &e.FromFile, &e.Kind, &e.FromQN, &e.ToName, &e.Confidence); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // EdgesFrom returns all edges originating from a symbol ID.

@@ -1226,6 +1226,20 @@ func TestWatch_TriggersReindex(t *testing.T) {
 	}()
 
 	<-done
+	// #457 sensitivity: Watch spawns Index in a goroutine and
+	// returns when ctx cancels — but the spawned Index doesn't
+	// honour the cancellation and runs to completion. On Windows,
+	// t.Cleanup's TempDir RemoveAll races with the Index goroutine's
+	// still-open SQLite connection. Wait for the Indexer to settle
+	// before letting the test framework clean up.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !idx.anyActive() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// Just verify Watch terminates and doesn't panic.
 	// The store should still be functional.
 	_, err := store.ListProjects()

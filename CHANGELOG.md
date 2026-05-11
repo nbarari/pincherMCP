@@ -7,6 +7,24 @@ minors.
 
 ## [Unreleased]
 
+### Fixed
+- **Watcher incremental re-index drops cross-file Go CALLS edges
+  whenever the caller's file is hash-skipped — full fix
+  ([#427](https://github.com/kwad77/pincher/issues/427),
+  [#457](https://github.com/kwad77/pincher/issues/457)).** The v0.15.6
+  one-hop referencer invalidation (#456) only caught direct callers;
+  transitive ripples still dropped edges from files that were
+  hash-skipped because their content didn't change. Schema v19 adds
+  a `pending_edges` table that persists each file's deferred edge
+  candidates (CALLS / IMPORTS / READS / WRITES). The per-file
+  extraction goroutine `DELETE`s + bulk-`INSERT`s its candidates;
+  re-resolution at the end of each `Index()` call sources the FULL
+  set from the table (via `LoadPendingEdges`), so candidates from
+  hash-skipped files survive across runs. The tail-pass GC deletes
+  rows for files removed from disk so stale candidates don't leak.
+  Resolves the transitive edge-loss the v0.15.6 partial fix couldn't
+  reach; the watcher no longer needs `force=true` to stay correct.
+
 ### Added
 - **Session counters survive supervised respawn
   ([#420](https://github.com/kwad77/pincher/issues/420)).** `pincher

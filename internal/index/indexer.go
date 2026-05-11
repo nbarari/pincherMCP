@@ -421,6 +421,31 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				})
 			}
 
+			// #457: persist this file's deferred edge candidates so a
+			// future incremental re-index that hash-skips this file
+			// still has its IMPORTS / CALLS / READS / WRITES in the
+			// candidate pool. Without this, edges from a skipped file
+			// to a changed file get dropped on resolve.
+			fileDeferred := make([]db.PendingEdge, 0, len(deferredImports)+len(deferredCalls)+len(deferredReads))
+			appendDeferred := func(src []ast.ExtractedEdge) {
+				for _, e := range src {
+					fileDeferred = append(fileDeferred, db.PendingEdge{
+						ProjectID:  projectID,
+						FromFile:   relPath,
+						Kind:       e.Kind,
+						FromQN:     e.FromQN,
+						ToName:     e.ToName,
+						Confidence: e.Confidence,
+					})
+				}
+			}
+			appendDeferred(deferredImports)
+			appendDeferred(deferredCalls)
+			appendDeferred(deferredReads)
+			if err := idx.store.ReplacePendingEdgesForFile(projectID, relPath, fileDeferred); err != nil {
+				slog.Warn("pincher.pending_edges.replace.err", "file", relPath, "err", err)
+			}
+
 			refreshCounts := false
 			bufMu.Lock()
 			symBuf = append(symBuf, syms...)
@@ -466,30 +491,25 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	}
 	bufMu.Unlock()
 
-	// Resolve deferred IMPORTS edges against the full symbol table. Both
-	// endpoints (FromQN and ToName) are Module qualified names; we look up
-	// the first matching Module symbol per QN. External imports (qualified
-	// name not indexed as a Module) simply don't resolve and are dropped,
-	// matching today's behaviour for unresolved edges.
-	if n := idx.resolveImports(projectID, pendingImport); n > 0 {
+	// #457: resolve deferred edges against the FULL persisted candidate
+	// pool, not just this run's in-memory pendingX slices. The DB rows
+	// include hash-skipped files' candidates from prior runs — which
+	// fixes #427's transitive edge-loss on incremental re-indexes.
+	// LoadPendingEdges returns nil/[] on the first index (no prior
+	// rows), at which point the resolve passes are effectively no-ops.
+	allImports := loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
+	if n := idx.resolveImports(projectID, allImports); n > 0 {
 		totalEdges += n
 	}
 
-	// Resolve deferred Go CALLS edges against the full symbol table. Without
-	// this pass, cross-file Go calls (e.g. test files calling db.Open) would
-	// be silently dropped because the per-file nameToID only sees one file's
-	// symbols. See LATENT_ISSUES #4 in pincher-followups for the original
-	// observation.
-	if n := idx.resolveCalls(projectID, pendingCalls); n > 0 {
+	allCalls := loadOrFallback(idx, projectID, "CALLS", pendingCalls)
+	if n := idx.resolveCalls(projectID, allCalls); n > 0 {
 		totalEdges += n
 	}
 
-	// Resolve deferred Go READS edges against the full symbol table.
-	// Only persists edges where the resolved target is a Variable
-	// symbol — this is the natural filter for the over-emission from
-	// extractGoReads (function names, types, local vars all get dropped
-	// here without needing scope analysis at extraction time). #247 #3.
-	if n := idx.resolveReads(projectID, pendingReads); n > 0 {
+	allReads := loadOrFallback(idx, projectID, "READS", pendingReads)
+	allReads = append(allReads, loadOrFallback(idx, projectID, "WRITES", nil)...)
+	if n := idx.resolveReads(projectID, allReads); n > 0 {
 		totalEdges += n
 	}
 
@@ -512,6 +532,13 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			}
 			if err := idx.store.DeleteFileHash(projectID, stored); err != nil {
 				slog.Warn("pincher.index.gc.delete_hash.err", "err", err, "file", stored)
+			}
+			// #457: drop any pending_edges rows that pointed out from
+			// the removed file so re-resolution doesn't try to bind
+			// dangling FromQN→ToName candidates against the now-shrunk
+			// symbol set.
+			if err := idx.store.DeletePendingEdgesForFile(projectID, stored); err != nil {
+				slog.Warn("pincher.index.gc.delete_pending_edges.err", "err", err, "file", stored)
 			}
 			totalDeleted++
 		}
@@ -1143,6 +1170,31 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		return 0
 	}
 	return len(edges)
+}
+
+// loadOrFallback returns the project's persisted pending_edges of the
+// given kind (#457). When the load fails (e.g. on a corrupt DB or a
+// brand-new project before the first row lands), it falls back to
+// this run's in-memory candidates so resolve still produces *some*
+// graph rather than silently emitting zero edges. Fallback is
+// strictly looser than the persisted path — it can only undercount
+// cross-file edges from prior runs, not introduce new false positives.
+func loadOrFallback(idx *Indexer, projectID, kind string, fallback []ast.ExtractedEdge) []ast.ExtractedEdge {
+	rows, err := idx.store.LoadPendingEdges(projectID, kind)
+	if err != nil {
+		slog.Warn("pincher.pending_edges.load.err", "kind", kind, "err", err)
+		return fallback
+	}
+	out := make([]ast.ExtractedEdge, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ast.ExtractedEdge{
+			FromQN:     r.FromQN,
+			ToName:     r.ToName,
+			Kind:       r.Kind,
+			Confidence: r.Confidence,
+		})
+	}
+	return out
 }
 
 // isStdlibReceiver reports whether `name` looks like a Go stdlib
