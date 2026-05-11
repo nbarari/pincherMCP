@@ -2077,7 +2077,7 @@ func (s *Server) registerTools() {
 	// 17. neighborhood
 	s.addTool(&mcp.Tool{
 		Name:        "neighborhood",
-		Description: "**Use for in-file refactor planning** — given a seed symbol ID, returns every symbol in the same file (signatures + line ranges) ordered by source position. One round-trip vs N `symbol` calls or one whole-file `Read`. Paginated: defaults to 50 neighbors per call (limit/offset), with the next page surfaced in `_meta.next_steps` when the file has more. Default response excludes `source`; pass `include_source=true` to also fetch each neighbor's body.",
+		Description: "**Returns same-file symbols, NOT graph adjacency.** Despite the name (#498), this tool answers \"what other symbols live in the same file as the seed?\" — useful for in-file refactor planning. For graph adjacency (callers / callees / readers / writers), use `trace direction=both` instead. Given a seed symbol ID, returns every symbol in the same file (signatures + line ranges) ordered by source position. One round-trip vs N `symbol` calls or one whole-file `Read`. Paginated: defaults to 50 neighbors per call (limit/offset), with the next page surfaced in `_meta.next_steps` when the file has more. Default response excludes `source`; pass `include_source=true` to also fetch each neighbor's body.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["id"],"properties":{
 				"id":{"type":"string","description":"Stable symbol ID of the seed. The neighborhood is every symbol that shares its file."},

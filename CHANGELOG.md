@@ -20,6 +20,18 @@ minors.
   iter-4 promised, scoped down to the single feature that fits in
   the existing `_meta` envelope.
 
+### Changed
+- **neighborhood: description rewritten to lead with what it ISN'T
+  ([#498](https://github.com/kwad77/pincher/issues/498)).** The name
+  suggests graph adjacency; the tool returns same-file symbols. Agents
+  reach for it expecting `trace direction=both` semantics and get a
+  paginated file dump instead. The fix is descriptive (cheap, no
+  rename, no breaking change): lead the description with "Returns
+  same-file symbols, NOT graph adjacency", point at `trace` for what
+  they actually want. Pairs with #500's unknown-args warnings —
+  passing `depth=1` (the natural-but-wrong arg) now surfaces in
+  `_meta.warnings`. Full rename / alias deferred to a future release.
+
 ### Fixed
 - **All tools: unknown args surface in `_meta.warnings` instead of
   silent ignore ([#499](https://github.com/kwad77/pincher/issues/499)).**
