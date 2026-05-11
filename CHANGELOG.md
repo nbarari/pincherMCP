@@ -7,6 +7,17 @@ minors.
 
 ## [Unreleased]
 
+## [v0.16.0] — 2026-05-11 — structural perf + dogfood haul
+
+Minor — schema v19, watcher correctness, pinchQL property surface, BFS
+planner, supervised-respawn observability, and seven dogfood-driven
+precision fixes. Eight new MCP-tool features unlocked by the property
+surface (canonical "find undocumented exported APIs" query) and BFS
+planner inversion. The release closes 20 issues from the v0.15.x
+backlog; #423 (function-typed field call resolution) bumped to v0.17.0
+since it requires receiver-type tracking — a substantial extractor
+change to be tackled in its own dogfood loop.
+
 ### Fixed
 - **Watcher incremental re-index drops cross-file Go CALLS edges
   whenever the caller's file is hash-skipped — full fix
