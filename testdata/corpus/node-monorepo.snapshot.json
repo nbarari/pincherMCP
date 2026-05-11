@@ -2,14 +2,16 @@
   "avg_confidence_by_kind": {
     "Class": 0.975,
     "Function": 0.975,
+    "Method": 0.975,
     "Section": 0.9125,
-    "Setting": 1
+    "Setting": 1,
+    "Variable": 0.95
   },
   "edge_count_by_kind": {},
   "extraction_failures_by_reason": {},
   "files_blocked": 3,
-  "files_indexed": 4,
-  "files_seen": 7,
+  "files_indexed": 5,
+  "files_seen": 8,
   "schema_version": 22,
   "search_relevance": [
     {
@@ -32,9 +34,11 @@
     }
   ],
   "symbol_count_by_kind": {
-    "Class": 1,
-    "Function": 1,
+    "Class": 2,
+    "Function": 2,
+    "Method": 5,
     "Section": 4,
-    "Setting": 11
+    "Setting": 11,
+    "Variable": 2
   }
 }

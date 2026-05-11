@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>pincherMCP · Dashboard</title>
+  <link rel="stylesheet" href="/v1/dashboard.css">
+</head>
+<body>
+<header>
+  <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+    <circle cx="18" cy="18" r="17" stroke="url(#hg)" stroke-width="2"/>
+    <line x1="10" y1="10" x2="26" y2="26" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="26" y1="10" x2="10" y2="26" stroke="#a371f7" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="18" cy="18" r="4" fill="#58a6ff"/>
+    <defs><linearGradient id="hg" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#58a6ff"/><stop offset="1" stop-color="#a371f7"/></linearGradient></defs>
+  </svg>
+  <div>
+    <h1>pincher<span>MCP</span> <span style="font-size:12px;font-weight:400" id="ver"></span></h1>
+    <p>Codebase intelligence · Token savings dashboard</p>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+    <span class="badge badge-green" id="health-badge">● checking…</span>
+    <span class="badge badge-blue" id="last-refresh">—</span>
+    <button class="header-btn" id="auth-btn" title="Set HTTP bearer token (required when pincher is started with --http-key)" data-action="promptForKey">Auth</button>
+  </div>
+</header>
+
+<div id="auth-notice" class="auth-notice" role="status">
+  <span class="auth-notice-icon">🔓</span>
+  <div class="auth-notice-body">
+    <strong>No HTTP auth in place.</strong>
+    Pincher is bound without <code>--http-key</code> — fine for localhost,
+    but bind a bearer token if you ever expose this beyond loopback.
+    <a href="https://github.com/kwad77/pincher/blob/master/docs/REFERENCE.md#http-rest-api" target="_blank" rel="noopener">Reference</a>.
+  </div>
+  <button class="auth-notice-dismiss" data-action="dismissAuthNotice" title="Dismiss">&#x2715;</button>
+</div>
+
+<nav class="tab-bar">
+  <button class="tab-btn active" data-action="showTab" data-args='["overview"]'>Overview</button>
+  <button class="tab-btn" data-action="showTab" data-args='["projects"]'>Projects</button>
+  <button class="tab-btn" data-action="showTab" data-args='["search"]'>Search</button>
+  <button class="tab-btn" data-action="showTab" data-args='["adrs"]'>ADRs</button>
+  <button class="tab-btn" data-action="showTab" data-args='["sessions"]'>Sessions</button>
+</nav>
+
+<!-- OVERVIEW -->
+<div id="tab-overview" class="tab-pane active">
+<main>
+  <div id="error-box"></div>
+  <p class="section-title" id="session-title">Session</p>
+  <div class="grid grid-4" id="session-cards"><div class="loading">Loading…</div></div>
+  <p class="section-title">All-Time ROI</p>
+  <div class="grid grid-4" id="alltime-cards"><div class="loading">Loading…</div></div>
+  <div id="projection-banner"></div>
+  <p class="section-title">Token Savings History</p>
+  <div class="sparkline-card">
+    <div class="sparkline-meta">
+      <span class="sparkline-title">Tokens saved per session</span>
+      <span class="sparkline-legend" id="sparkline-legend">—</span>
+    </div>
+    <svg id="sparkline-svg" viewBox="0 0 800 80" preserveAspectRatio="none">
+      <text x="400" y="45" text-anchor="middle" fill="#8b949e" font-size="12">Loading…</text>
+    </svg>
+  </div>
+</main>
+</div>
+
+<!-- PROJECTS -->
+<div id="tab-projects" class="tab-pane">
+<main>
+  <p class="section-title">Indexed Projects</p>
+  <div class="proj-toolbar">
+    <input class="search-input" id="proj-filter" type="text" placeholder="Filter by name or path…" data-action-input="renderProjects"/>
+    <label class="toolbar-check" title="Hide projects with zero symbols and zero edges">
+      <input type="checkbox" id="proj-hide-empty" data-action-change="renderProjects"/> Hide empty
+    </label>
+    <button class="btn secondary" id="proj-cleanup-btn" data-action="cleanupEmpty">Remove all empty</button>
+    <span class="toolbar-count" id="proj-count">&nbsp;</span>
+  </div>
+  <div class="grid grid-2" id="projects-grid"><div class="loading">Loading…</div></div>
+  <div class="detail-panel" id="proj-detail-panel">
+    <div class="detail-panel-title">
+      <span id="proj-detail-name">Project Details</span>
+      <button class="detail-close" data-action="closeDetail" title="Close">&#x2715;</button>
+    </div>
+    <div id="proj-detail-body"><div class="loading">Loading…</div></div>
+  </div>
+</main>
+</div>
+
+<!-- SEARCH -->
+<div id="tab-search" class="tab-pane">
+<main>
+  <p class="section-title">Symbol Search</p>
+  <div class="search-bar">
+    <input class="search-input" id="search-q" type="text" placeholder="Search symbols… (e.g. handleSearch, auth*, &quot;token validation&quot;)" data-action-enter="doSearch"/>
+    <select class="search-select" id="search-kind">
+      <option value="">All kinds</option>
+      <option>Function</option><option>Method</option><option>Class</option>
+      <option>Interface</option><option>Type</option><option>Variable</option>
+    </select>
+    <select class="search-select" id="search-proj"><option value="">All projects</option></select>
+    <button class="search-btn" data-action="doSearch">Search</button>
+  </div>
+  <div id="search-results"></div>
+</main>
+</div>
+
+<!-- ADRs -->
+<div id="tab-adrs" class="tab-pane">
+<main>
+  <p class="section-title">Architecture Decision Records</p>
+  <div class="adr-toolbar">
+    <select class="adr-select" id="adr-proj" data-action-change="onADRProjectChange"><option value="">Select a project…</option></select>
+    <button class="btn secondary" data-action="toggleADRForm">+ Add Entry</button>
+  </div>
+  <div class="adr-form" id="adr-form">
+    <input id="adr-key" type="text" placeholder="Key (e.g. PURPOSE, STACK, PATTERNS)"/>
+    <textarea id="adr-val" placeholder="Value…"></textarea>
+    <div class="adr-form-actions">
+      <button class="btn" data-action="saveADR">Save</button>
+      <button class="btn secondary" data-action="toggleADRForm">Cancel</button>
+    </div>
+  </div>
+  <div id="adr-list"><div class="empty">Select a project to view its ADRs.</div></div>
+</main>
+</div>
+
+<!-- SESSIONS -->
+<div id="tab-sessions" class="tab-pane">
+<main>
+  <p class="section-title">Session History</p>
+  <div id="sessions-table-wrap"><div class="loading">Loading…</div></div>
+</main>
+</div>
+
+<div class="footer">pincherMCP · <a href="/v1/openapi.json" target="_blank">OpenAPI</a> · <a href="/v1/health" target="_blank">Health</a></div>
+<div class="toast" id="toast"></div>
+
+<script src="/v1/dashboard.js" defer></script>
+</body>
+</html>

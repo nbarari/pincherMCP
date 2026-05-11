@@ -191,20 +191,33 @@ func TestJSAST_FlagOff_FallsThroughToRegex(t *testing.T) {
 	}
 }
 
-// jsASTEnabled reads the env var on every call so test set/unset cycles
-// don't require re-registering the extractor. Pin the contract.
+// jsASTEnabled reads the env vars on every call so test set/unset
+// cycles don't require re-registering the extractor. Pre-flip this
+// pinned the opt-IN semantics; post-#562 (v0.20.0 default-on) it pins
+// both opt-out channels and the legacy-opt-in becoming a no-op.
 func TestJSASTEnabled_ReadsEnvOnEachCall(t *testing.T) {
+	// Default-on: no env vars set → AST enabled.
+	t.Setenv("PINCHER_DISABLE_JS_AST", "")
 	t.Setenv("PINCHER_EXPERIMENTAL_JS_AST", "")
-	if jsASTEnabled() {
-		t.Error("expected disabled when env unset")
+	if !jsASTEnabled() {
+		t.Error("expected enabled by default (post-#562 flip)")
 	}
+	// Canonical opt-out.
+	t.Setenv("PINCHER_DISABLE_JS_AST", "1")
+	if jsASTEnabled() {
+		t.Error("expected disabled when PINCHER_DISABLE_JS_AST=1")
+	}
+	t.Setenv("PINCHER_DISABLE_JS_AST", "")
+	// Legacy opt-in env var is a no-op when set to 1 — already on.
 	t.Setenv("PINCHER_EXPERIMENTAL_JS_AST", "1")
 	if !jsASTEnabled() {
-		t.Error("expected enabled when env=1")
+		t.Error("expected still enabled when legacy var=1")
 	}
+	// Legacy var doubles as opt-OUT when set to 0 — kept for one
+	// release in case users baked it into their config.
 	t.Setenv("PINCHER_EXPERIMENTAL_JS_AST", "0")
 	if jsASTEnabled() {
-		t.Error("expected disabled when env=0 (only =1 enables)")
+		t.Error("expected disabled when legacy var=0 (opt-out compat)")
 	}
 }
 

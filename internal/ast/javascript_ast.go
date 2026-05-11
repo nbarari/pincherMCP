@@ -23,14 +23,31 @@ import (
 // regex match past it is the right declaration. Nested class methods
 // search inside the class's byte range only.
 //
-// Behind PINCHER_EXPERIMENTAL_JS_AST=1; default off until v0.14.0 per
-// the maintainer direction in #266 (two-cycle bake before flipping).
-// Falls back to the existing regex extractor on parse failure.
+// Default-on as of v0.20.0 (#562 closed the four #557 polish bugs +
+// the const-object-literal descent gap). Falls back to the existing
+// regex extractor on parse failure (parseJSWithRecovery returns ok=false).
+//
+// Opt-out via `PINCHER_DISABLE_JS_AST=1` for one release in case a
+// user hits an AST-mode regression we missed; planned removal in v0.21.
+// The legacy `PINCHER_EXPERIMENTAL_JS_AST` env var is still honored
+// (no-op when default is on, opt-out when set to "0") so anyone with
+// it baked into their config doesn't see surprise behavior.
 
-// jsASTEnabled reads the env var on every call so tests can flip the
+// jsASTEnabled reads the env vars on every call so tests can flip the
 // flag with t.Setenv without re-registering the extractor.
+//
+// Resolution order:
+//  1. `PINCHER_DISABLE_JS_AST=1` → false (explicit opt-out wins)
+//  2. `PINCHER_EXPERIMENTAL_JS_AST=0` → false (legacy explicit-off)
+//  3. otherwise → true (default-on)
 func jsASTEnabled() bool {
-	return os.Getenv("PINCHER_EXPERIMENTAL_JS_AST") == "1"
+	if os.Getenv("PINCHER_DISABLE_JS_AST") == "1" {
+		return false
+	}
+	if os.Getenv("PINCHER_EXPERIMENTAL_JS_AST") == "0" {
+		return false
+	}
+	return true
 }
 
 // extractJavaScriptAST parses source with tdewolff and emits symbols +
@@ -378,8 +395,9 @@ func (w *jsASTWalker) emitVarDecl(vd *js.VarDecl, isExported bool) {
 		if !ok {
 			continue
 		}
+		bindingQN := w.qnFor(name, "")
 		w.appendSymbol(ExtractedSymbol{
-			Name: name, QualifiedName: w.qnFor(name, ""),
+			Name: name, QualifiedName: bindingQN,
 			Kind:      kind,
 			StartByte: sb, EndByte: eb,
 			StartLine:  offsetToLine(w.lineOffsets, sb),
@@ -387,6 +405,27 @@ func (w *jsASTWalker) emitVarDecl(vd *js.VarDecl, isExported bool) {
 			Signature:  w.signatureFromSource(sb),
 			IsExported: isExported,
 		})
+		// Descend into object-literal initializers so patterns like
+		// `const handlers = { onClick: ..., onChange: () => {} }` get
+		// their methods extracted. Without this, `export const X =
+		// {…}` (the modern config-object pattern: ESLint flat config,
+		// Vue options, React reducers, redux slices) silently drops
+		// every nested method. The regex extractor accidentally caught
+		// `name: function` and `name: () =>` shapes here; AST without
+		// this descent would regress on those — flip-blocking.
+		//
+		// Save+restore cursor: locateVar moved it to the END of the
+		// binding statement, but locateObjectMember scans forward
+		// from cursor, so we need to rewind to the binding start to
+		// find the inner methods. Same pattern as emitClass.
+		if be.Default != nil {
+			savedCursor := w.cursor
+			w.cursor = sb
+			w.walkExprForObjectMethods(be.Default, bindingQN, 0)
+			if w.cursor < savedCursor {
+				w.cursor = savedCursor
+			}
+		}
 	}
 }
 
