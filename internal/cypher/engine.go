@@ -417,6 +417,15 @@ func (p *parser) parseQuery() (*queryAST, error) {
 			if err != nil {
 				return nil, err
 			}
+			// #433: chained-edge patterns like (a)-[]->(b)-[]->(c)
+			// used to silently parse the second edge as garbage and
+			// return null `c.*` projections. Reject explicitly and
+			// point at the variable-length workaround.
+			if p.peek().value == "-" || p.peek().value == "<" {
+				return nil, fmt.Errorf(
+					"pinchQL: chained edge patterns ((a)-[]->(b)-[]->(c)) are not supported. " +
+						"Use the variable-length form for fixed-length paths: (a)-[*2..2]->(c)")
+			}
 			q.patterns = append(q.patterns, pat)
 
 		case "WHERE":
@@ -474,6 +483,18 @@ func (p *parser) parseQuery() (*queryAST, error) {
 				n, _ := strconv.Atoi(p.next().value)
 				q.limit = n
 			}
+
+		case "WITH":
+			// #433: WITH is a real Cypher projection-pipeline keyword
+			// pinchQL doesn't support, but the tokenizer marks it as a
+			// keyword (so STARTS WITH / ENDS WITH work). Bare WITH at
+			// top level used to fall through and silently consume the
+			// rest of the chain, making `WITH n WHERE ...` look like
+			// it ran the WHERE while in fact the WHERE never gated
+			// anything. Reject explicitly.
+			return nil, fmt.Errorf(
+				"pinchQL: WITH clause is not supported. " +
+					"Use a single MATCH ... WHERE ... RETURN; chain via subsequent calls")
 
 		default:
 			p.next() // skip unknown tokens
