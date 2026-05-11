@@ -2546,6 +2546,14 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if query == "" {
 		return errResult("query is required (and must contain non-whitespace characters)"), nil
 	}
+	// #489: catch an unmatched double-quote before it leaks through to
+	// FTS5 as "SQL logic error: unterminated string". Phrase queries
+	// (`"login flow"`) are a real feature, so the natural agent retry
+	// after a 0-result single-token search is to add quotes — surface
+	// the matching-pair requirement instead of an SQL parser error.
+	if strings.Count(query, `"`)%2 != 0 {
+		return errResult(`unbalanced quote in query — phrase queries need a matched pair, e.g. query="login flow". To match a literal quote character, drop the surrounding quotes.`), nil
+	}
 	projectArg := str(args, "project")
 	kind := str(args, "kind")
 	language := str(args, "language")

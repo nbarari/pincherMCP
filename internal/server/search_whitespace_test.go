@@ -56,3 +56,63 @@ func errorBody(r *mcp.CallToolResult) string {
 	}
 	return ""
 }
+
+// TestHandleSearch_UnbalancedQuote_RejectedWithFriendlyError pins
+// #489: a single `"` (or any odd-count quote) used to leak SQLite's
+// "unterminated string (1)" error to the agent. Phrase queries are a
+// real feature, so the natural retry after a 0-result search is to
+// add quotes — surface the matching-pair requirement instead of an
+// SQL parser detail.
+func TestHandleSearch_UnbalancedQuote_RejectedWithFriendlyError(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.sessionID = "uq-test"
+	srv.sessionRoot = "/tmp/uq-test"
+
+	// Odd-count quote cases. Balanced-but-malformed queries like `"a "b`
+	// are not in scope here — those produce different FTS5 errors and
+	// will be handled in a separate phrase-syntax sanitizer.
+	for _, q := range []string{`"`, `"login`, `login"`, `"""`} {
+		t.Run(q, func(t *testing.T) {
+			result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+				"query": q,
+			}))
+			if err != nil {
+				t.Fatalf("handleSearch: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("expected IsError=true for unbalanced-quote query %q", q)
+			}
+			body := errorBody(result)
+			if !strings.Contains(body, "unbalanced quote") {
+				t.Errorf("expected friendly 'unbalanced quote' error; got %q", body)
+			}
+			if strings.Contains(body, "SQL logic error") || strings.Contains(body, "unterminated string") {
+				t.Errorf("leaky low-level error in response: %q", body)
+			}
+		})
+	}
+}
+
+// TestHandleSearch_BalancedQuote_RunsThrough pins the inverse: a
+// well-formed phrase query (matched pair) must NOT trigger the
+// pre-flight rejection.
+func TestHandleSearch_BalancedQuote_RunsThrough(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.sessionID = "bq-test"
+	srv.sessionRoot = "/tmp/bq-test"
+
+	// We don't care about results — just that the call doesn't
+	// IsError with the pre-flight unbalanced-quote message.
+	result, err := srv.handleSearch(context.Background(), makeReq(map[string]any{
+		"query": `"login flow"`,
+	}))
+	if err != nil {
+		t.Fatalf("handleSearch: %v", err)
+	}
+	if result.IsError {
+		body := errorBody(result)
+		if strings.Contains(body, "unbalanced quote") {
+			t.Errorf("balanced phrase query was rejected by the unbalanced-quote check; body=%q", body)
+		}
+	}
+}
