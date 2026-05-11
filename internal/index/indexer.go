@@ -1222,11 +1222,12 @@ func loadOrFallback(idx *Indexer, projectID, kind string, fallback []ast.Extract
 	out := make([]ast.ExtractedEdge, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, ast.ExtractedEdge{
-			FromQN:     r.FromQN,
-			ToName:     r.ToName,
-			Kind:       r.Kind,
-			FromFile:   r.FromFile,
-			Confidence: r.Confidence,
+			FromQN:       r.FromQN,
+			ToName:       r.ToName,
+			Kind:         r.Kind,
+			FromFile:     r.FromFile,
+			Confidence:   r.Confidence,
+			ReceiverType: r.ReceiverType,
 		})
 	}
 	return out
@@ -1461,6 +1462,99 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) 
 		return canonical
 	}
 
+	// #423 piece 3: receiver-type-aware resolution. Load all
+	// struct_fields rows once and index them by struct QN so the
+	// inner loop can look up `recv.field` types in O(1). When the
+	// load fails (corrupt DB, brand-new project) we silently skip
+	// receiver-type resolution — the existing fallbacks still run.
+	// Map shape: structQN → fieldName → fieldType (Go-syntax).
+	fieldsByStructQN := map[string]map[string]string{}
+	if rows, err := idx.store.LoadStructFields(projectID); err == nil {
+		for _, f := range rows {
+			// struct_id format is "<file>::<QN>#<Kind>"; recover the QN.
+			structQN := ""
+			if i := strings.Index(f.StructID, "::"); i >= 0 {
+				rest := f.StructID[i+2:]
+				if j := strings.LastIndex(rest, "#"); j > 0 {
+					structQN = rest[:j]
+				}
+			}
+			if structQN == "" {
+				continue
+			}
+			m := fieldsByStructQN[structQN]
+			if m == nil {
+				m = map[string]string{}
+				fieldsByStructQN[structQN] = m
+			}
+			m[f.FieldName] = f.FieldType
+		}
+	} else {
+		slog.Warn("pincher.struct_fields.load.err", "err", err)
+	}
+
+	// resolveByReceiverType implements #423: when an unresolved CALLS
+	// candidate carries a receiver-type hint, try to bind it precisely
+	// before the project-wide receiver-method fallback. Two shapes:
+	//
+	//   1. ToName = "recv.Method"        — direct method on the receiver
+	//   2. ToName = "recv.field.Method"  — chained through a struct field
+	//
+	// Both cases derive the package from the caller's FromQN (same-
+	// package only — qualified types like `*foo.Bar` are skipped until
+	// import-graph awareness lands). The lookup uses the structured
+	// (parent QN, method name) pair, so it doesn't suffer from the
+	// polymorphic-method false-bind that the existing fallback guards
+	// against with isPolymorphicInterfaceMethodName.
+	resolveByReceiverType := func(toName, receiverType, fromQN string) string {
+		if receiverType == "" || toName == "" || fromQN == "" {
+			return ""
+		}
+		// Caller's package = first dot-segment of FromQN. Methods are
+		// QN'd as `pkg.<recvType>.<name>`, so the package is segment 0.
+		pkg := fromQN
+		if i := strings.Index(pkg, "."); i > 0 {
+			pkg = pkg[:i]
+		}
+		bareRecv := strings.TrimPrefix(receiverType, "*")
+		// Skip qualified receiver types (e.g. `*foo.Bar`) — without
+		// import-graph info we can't map "foo" to its actual package.
+		if strings.Contains(bareRecv, ".") {
+			return ""
+		}
+		structQN := pkg + "." + bareRecv
+		segments := strings.Split(toName, ".")
+		switch len(segments) {
+		case 2:
+			// recv.Method — Method's QN is `pkg.<recvType>.<method>`
+			// using the receiver-type expression as written (Go's QN
+			// builder includes the * for pointer receivers).
+			methodQN := pkg + "." + receiverType + "." + segments[1]
+			return lookupQN(methodQN)
+		case 3:
+			// recv.field.Method — look up field type via struct_fields.
+			fieldType, ok := fieldsByStructQN[structQN][segments[1]]
+			if !ok {
+				return ""
+			}
+			bareField := strings.TrimPrefix(fieldType, "*")
+			// Same-package only for v0.19 — qualified field types
+			// (`io.Writer`, `*foo.Bar`) need import-graph awareness.
+			if strings.Contains(bareField, ".") {
+				return ""
+			}
+			// Try both pointer and value receiver QNs since the field's
+			// Go type doesn't tell us how the method was declared.
+			for _, recvForm := range []string{"*" + bareField, bareField} {
+				methodQN := pkg + "." + recvForm + "." + segments[2]
+				if id := lookupQN(methodQN); id != "" {
+					return id
+				}
+			}
+		}
+		return ""
+	}
+
 	seen := make(map[string]bool)
 	edges := make([]db.Edge, 0, len(pending))
 	for _, e := range pending {
@@ -1474,6 +1568,11 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) 
 		toID := lookupQN(e.ToName)
 		if toID == "" && !strings.Contains(e.ToName, ".") {
 			toID = lookupName(e.ToName)
+		}
+		// #423 piece 3: precise receiver-type binding before the
+		// looser project-wide receiver-method fallback.
+		if toID == "" {
+			toID = resolveByReceiverType(e.ToName, e.ReceiverType, e.FromQN)
 		}
 		// #285: receiver-method calls (e.g. `idx.Index(...)`) produce
 		// ToName="idx.Index" which never matches a real qualified name
