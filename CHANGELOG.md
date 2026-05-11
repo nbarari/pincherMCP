@@ -8,6 +8,18 @@ minors.
 ## [Unreleased]
 
 ### Fixed
+- **Variable-length BFS timed out at 10s when only the end-target had a
+  predicate ([#426](https://github.com/kwad77/pincher/issues/426)).**
+  `MATCH (a)-[:CALLS*1..3]->(b) WHERE b.name="X"` enumerated up to 100
+  fromVar candidates and ran a 3-hop recursive CTE per start — fan-out
+  exploded on a 2k-Function corpus and tripped the deadline before any
+  results came back. Planner now detects the asymmetric-selectivity
+  shape (constant predicate on toVar, none on fromVar) and inverts the
+  walk: seed from the b-match, walk inbound, project the result in
+  original orientation. Same answer, milliseconds instead of seconds.
+  Mirrors the speed of the equivalent `trace direction=inbound` call
+  that previously had to be hand-translated.
+
 - **`index` diagnosis conflated benign symbol-neutral re-indexes with
   extractor bugs ([#425](https://github.com/kwad77/pincher/issues/425)).**
   When `skipped > 0 AND files > 0 AND symbols == 0` — the normal case where

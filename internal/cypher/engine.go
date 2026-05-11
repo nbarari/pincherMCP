@@ -1313,7 +1313,22 @@ type bfsHop struct {
 // N×depth×width round-trip loop into a single query per start node.
 // UNION ALL + depth < maxHops guarantees termination even in cyclic graphs.
 // GROUP BY id + MIN(depth) returns each reachable node once at its shortest depth.
+//
+// #426: planner inverts walk direction when only the end predicate is
+// selective. `MATCH (a)-[:CALLS*1..3]->(b) WHERE b.name="X"` with no
+// fromVar predicate would otherwise enumerate up to 100 a-candidates
+// and run a CTE per start, fanning out 3 hops each — 10s timeout on
+// real corpora. With inversion the same query walks inbound from the
+// single b match, completing in milliseconds.
 func (e *Executor) runBFS(ctx context.Context, q *queryAST, pat pattern) (*Result, error) {
+	inverted := shouldInvertBFS(q, pat)
+	startVar := pat.fromVar
+	startKind := pat.fromKind
+	if inverted {
+		startVar = pat.toVar
+		startKind = pat.toKind
+	}
+
 	// Find start nodes
 	startQ := "SELECT " + symCols + " FROM symbols WHERE 1=1"
 	var startArgs []any
@@ -1322,18 +1337,18 @@ func (e *Executor) runBFS(ctx context.Context, q *queryAST, pat pattern) (*Resul
 		startQ += " AND project_id=?"
 		startArgs = append(startArgs, e.ProjectID)
 	}
-	if pat.fromKind != "" {
+	if startKind != "" {
 		startQ += " AND kind=?"
-		startArgs = append(startArgs, pat.fromKind)
+		startArgs = append(startArgs, startKind)
 	}
-	// Start-node prefilter pushes fromVar equalities into SQL. Only safe
+	// Start-node prefilter pushes start-var equalities into SQL. Only safe
 	// when pushdownAllowed(q) — otherwise an OR or paren-grouped WHERE
 	// could incorrectly exclude valid start nodes (e.g.
 	// `WHERE a.name='X' OR a.name='Y'` flat-pushed as ANDed equalities
 	// returns zero start nodes). q.where still drives the per-row match.
 	if pushdownAllowed(q) {
 		for _, c := range q.conditions {
-			if c.variable != pat.fromVar {
+			if c.variable != startVar {
 				continue
 			}
 			col := cypherPropToCol(c.property)
@@ -1374,17 +1389,29 @@ func (e *Executor) runBFS(ctx context.Context, q *queryAST, pat pattern) (*Resul
 	reCache := make(map[string]*regexp.Regexp)
 	var resultRows []map[string]any
 	for _, start := range startNodes {
-		hops, err := e.bfsViaCTE(ctx, start.ID, edgeKinds, pat.minHops, maxDepth, e.ProjectID, e.maxRows())
+		hops, err := e.bfsViaCTE(ctx, start.ID, edgeKinds, pat.minHops, maxDepth, e.ProjectID, e.maxRows(), inverted)
 		if err != nil {
 			return nil, fmt.Errorf("bfs traversal from %q: %w", start.ID, err)
 		}
 		for _, hop := range hops {
 			m := make(map[string]any)
-			for k, v := range symRowToMap(pat.fromVar, start) {
-				m[k] = v
-			}
-			for k, v := range symRowToMap(pat.toVar, hop.node) {
-				m[k] = v
+			// #426: when inverted, the CTE walks inbound from the
+			// toVar match — so each hop *is* a fromVar candidate.
+			// Project results in original orientation regardless.
+			if inverted {
+				for k, v := range symRowToMap(pat.fromVar, hop.node) {
+					m[k] = v
+				}
+				for k, v := range symRowToMap(pat.toVar, start) {
+					m[k] = v
+				}
+			} else {
+				for k, v := range symRowToMap(pat.fromVar, start) {
+					m[k] = v
+				}
+				for k, v := range symRowToMap(pat.toVar, hop.node) {
+					m[k] = v
+				}
 			}
 			m["_hop"] = hop.depth
 			if !matchesWhere(m, q.where, reCache) {
@@ -1400,10 +1427,51 @@ done:
 	return buildResult(resultRows, q)
 }
 
+// shouldInvertBFS reports whether a variable-length MATCH (a)->(b) plan
+// should walk inbound from b instead of outbound from a. Heuristic:
+// invert when there is at least one constant predicate on toVar and no
+// constant predicate on fromVar. Selectivity is not measured — the
+// existence of a toVar predicate is a strong-enough signal because the
+// uninverted plan otherwise fans out from up to 100 fromVar candidates
+// (a 3-hop CALLS BFS hits the 10s deadline on a 2k-symbol corpus).
+//
+// Pushdown gates: only invert when the WHERE clause is a flat AND chain
+// (pushdownAllowed). OR / paren-grouped WHERE clauses may reference
+// fromVar implicitly even when no direct equality predicate appears.
+func shouldInvertBFS(q *queryAST, pat pattern) bool {
+	if pat.toVar == "" || pat.fromVar == "" {
+		return false
+	}
+	if !pushdownAllowed(q) {
+		return false
+	}
+	var hasToConst, hasFromConst bool
+	for _, c := range q.conditions {
+		col := cypherPropToCol(c.property)
+		if col == "" {
+			continue
+		}
+		if c.op != "=" {
+			continue
+		}
+		switch c.variable {
+		case pat.fromVar:
+			hasFromConst = true
+		case pat.toVar:
+			hasToConst = true
+		}
+	}
+	return hasToConst && !hasFromConst
+}
+
 // bfsViaCTE uses a single recursive CTE to find all nodes reachable from startID
 // within [minHops, maxHops] steps along edges of the given kinds.
 // This replaces the old Go BFS loop that issued one SQL call per node per depth.
-func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string, minHops, maxHops int, projectID string, maxRows int) ([]bfsHop, error) {
+//
+// #426: inbound=true flips the recursive step from "follow from_id→to_id"
+// to "follow to_id→from_id" so the planner can walk caller graphs in
+// reverse without re-shaping the query.
+func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string, minHops, maxHops int, projectID string, maxRows int, inbound bool) ([]bfsHop, error) {
 	in := inPlaceholders(len(kinds))
 
 	projectFilter := ""
@@ -1411,14 +1479,18 @@ func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string
 		projectFilter = " AND e.project_id = ?"
 	}
 
+	// recursive step: outbound walks e.from_id → e.to_id, inbound flips.
+	recursiveStep := "SELECT e.to_id, r.depth + 1 FROM reach r JOIN edges e ON e.from_id = r.id"
+	if inbound {
+		recursiveStep = "SELECT e.from_id, r.depth + 1 FROM reach r JOIN edges e ON e.to_id = r.id"
+	}
+
 	// UNION ALL + WHERE depth < maxHops terminates even on cyclic graphs.
 	// GROUP BY id + MIN(depth) returns each reachable node once at shortest path.
 	cteQ := `WITH RECURSIVE reach(id, depth) AS (
 		SELECT ?, 0
 		UNION ALL
-		SELECT e.to_id, r.depth + 1
-		FROM reach r
-		JOIN edges e ON e.from_id = r.id AND e.kind IN (` + in + `)` + projectFilter + `
+		` + recursiveStep + ` AND e.kind IN (` + in + `)` + projectFilter + `
 		WHERE r.depth < ?
 	)
 	SELECT s.id, s.project_id, s.file_path, s.name, s.qualified_name, s.kind, s.language,
