@@ -7,6 +7,58 @@ minors.
 
 ## [Unreleased]
 
+## [v0.21.0] — 2026-05-11 — function-value-binding edges + build-tag fan-out + admin tools on MCP/HTTP
+
+Minor — the v0.21 theme is **closing the dead_code FP triangle's last leg + cross-platform call-graph correctness + finishing the API parity work started in v0.20.** Function values bound to struct fields (`s.handler = fn`) no longer false-flag the bound function as dead; build-tag duplicate-implementation siblings (`web_windows.go` / `web_unix.go` pattern) both surface as inbound-reachable instead of just the lex-smallest variant; and `doctor` / `rebuild-fts` / `self-test` graduate from CLI-only to MCP+HTTP, exposed via the dynamic dispatcher built in v0.20. A CLI↔MCP parity gate prevents future user-facing CLI commands from being silently CLI-only.
+
+No schema change — all v0.21 work runs on schema v23.
+
+### Added
+- **Function-value-binding CALLS edges
+  ([#565](https://github.com/kwad77/pincher/issues/565),
+  [#570](https://github.com/kwad77/pincher/pull/570)).** Closes the
+  third leg of the dead_code FP triangle (after #423 receiver-type in
+  v0.19 and #493 interface-dispatch in v0.20). When `s.handler = fn`
+  binds a function value to a struct field, the binding pass now
+  emits a low-confidence (0.4) CALLS edge from the surrounding
+  function to `fn` so dead_code stops false-flagging `fn` as having
+  no callers. Polymorphic-method blocklist applies to the binding
+  pass too — `s.action = strFn` doesn't false-bind every project-local
+  String method.
+- **Build-tag duplicate-implementation siblings get full inbound edges
+  ([#566](https://github.com/kwad77/pincher/issues/566),
+  [#572](https://github.com/kwad77/pincher/pull/572)).** Pre-fix
+  `pickCanonical` chose the lex-smallest variant when multiple files
+  defined the same QN — the `web_windows.go` / `web_unix.go` /
+  `web_darwin.go` pattern meant only `web_darwin.go`'s
+  `platformPIDAlive` got an inbound CALLS edge from `launch()`; the
+  windows + unix variants surfaced as dead. Cheap filename-based
+  heuristic (`isBuildTagSibling`) detects siblings during
+  `resolveCalls` and fans out the edge to ALL variants. Makes
+  cross-platform Go projects' dead_code reports honest.
+- **Run added to the polymorphic-method blocklist
+  ([#567](https://github.com/kwad77/pincher/issues/567),
+  [#571](https://github.com/kwad77/pincher/pull/571)).** `cmd.Run()`
+  on `*exec.Cmd`, `srv.Run()` on `*http.Server`, and goroutine pool
+  `Run()` shapes were false-binding to any in-project Method named
+  `Run` via the trailing-component fallback. Adds Run to
+  `isPolymorphicInterfaceMethodName` symmetric across both the
+  call-pass and binding-pass — the trace inbound on `(*Supervisor).Run`
+  drops from 6 noisy callers to the 1 real one.
+- **doctor / rebuild_fts / self_test as MCP tools
+  ([#558](https://github.com/kwad77/pincher/issues/558) phase 2,
+  [#573](https://github.com/kwad77/pincher/pull/573)).** The three
+  CLI-only admin commands now register as MCP tools and surface
+  through `/v1/<tool>` via the dynamic dispatcher built in v0.20.
+  Dashboards and ops automations can poll diagnostic state without
+  shelling out. `rebuild_fts` defaults to dry-run (returns row count);
+  pass `confirm=true` to trigger the rebuild.
+- **CLI↔MCP parity gate (#558 phase 3, #573).**
+  `TestCLISurface_HasMCPParity` enforces that every user-facing CLI
+  subcommand has an MCP equivalent, with an explicit ops-only
+  carve-out (`web`, `supervised`, `update`, `project`, `health-check`).
+  Future CLI-only data commands fail CI. Closes #558.
+
 ## [v0.20.0] — 2026-05-11 — JS AST default-on + interface-dispatch precision + parity foundation
 
 Minor — the v0.20 theme is **multi-language coverage Tier 1 + the dead_code FP triangle's third leg + API drift gates.** JS files now extract through the pure-Go AST extractor by default (was opt-in via `PINCHER_EXPERIMENTAL_JS_AST=1`), surfacing classes with their methods, correctly classifying arrow-bound consts as Functions, and respecting ES2015+ export semantics. The `dead_code` precision arc that started in v0.18 (init/TestMain/main filter) and v0.19 (receiver-type field-method resolution) closes with interface-dispatch satisfaction analysis — methods reachable only via interface dispatch stop showing as dead. The HTTP REST gateway gets a parity gate so newly-added MCP tools can never silently disappear from the OpenAPI spec again.
