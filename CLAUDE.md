@@ -34,6 +34,19 @@ gh pr create --milestone v0.10.0 ...
 gh issue edit <PR#> --milestone v0.10.0  # after the fact
 ```
 
+### Release-prep checklist (every release, no skipping)
+
+The release-prep PR (the one before tagging) MUST touch all four below. CHANGELOG-only is the historical mistake — the README is what users hit first via the GitHub repo landing page, and stale roadmap claims erode trust faster than missing CHANGELOG entries.
+
+1. **`CHANGELOG.md`** — new section under `[Unreleased]` with the version's headline + Added/Fixed entries linking issues.
+2. **`README.md` roadmap table** — bump the previous `🚧 in flight` row to `✅ shipped`, add a new row for the version about to ship with its theme one-liner, optionally add the next `🚧 in flight` row.
+3. **`README.md` Known limitations** — rewrite any item whose fix lands in this version into past tense; recommend the upgrade.
+4. **Version-sensitive claims in README leading paragraph** — tool count, schema version, coverage badge if it moved meaningfully (>1%).
+
+If a release ships without README touched, the user's first reaction is "the README didn't say anything about it" and follow-up cleanup PRs read as forgetting, not catching up. Do it inline.
+
+After tag pushes, the auto-bump workflow handles the Homebrew formula and Docker image — those don't go in the release-prep PR itself.
+
 ## CI conventions
 
 - **Always-ignore advisory job:** `Benchmark regression (advisory)` runs with `continue-on-error: true` and fails on most PRs (variance on shared runners). **Do not re-check, do not re-run, do not block on it** unless this PR intentionally changes a hot path.
