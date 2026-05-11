@@ -8,6 +8,16 @@ minors.
 ## [Unreleased]
 
 ### Fixed
+- **All tools: unknown args surface in `_meta.warnings` instead of
+  silent ignore ([#499](https://github.com/kwad77/pincher/issues/499)).**
+  Pre-fix, calling `neighborhood id=... depth=1` silently dropped the
+  `depth` arg (it isn't in `neighborhood`'s schema) and returned a
+  same-file paginated result the agent didn't expect. Same failure
+  family as #473 (typo'd pinchQL properties): silent ignore is the
+  bug; surfacing the typo + listing accepted args is the fix. Per-tool
+  arg allow-lists are computed once from the registered InputSchema
+  on first call. Adds zero overhead when args are valid (pure map
+  lookups).
 - **changes: blast radius now intersects diff hunks with symbol line
   ranges ([#502](https://github.com/kwad77/pincher/issues/502)).**
   Pre-fix, every symbol in any changed file was treated as "changed"

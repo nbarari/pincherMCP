@@ -76,6 +76,13 @@ type Server struct {
 	// of a tool surfaces as a deliberate, reviewable diff.
 	tools   map[string]*mcp.Tool
 	version string
+
+	// toolArgKeys is the per-tool allow-list of declared input args
+	// (#499). Computed lazily under toolArgKeysOnce on first
+	// unknownArgs call so the cost is paid once per process, not per
+	// request.
+	toolArgKeys     map[string]map[string]bool
+	toolArgKeysOnce sync.Once
 	httpKey  string // optional bearer token; empty = no auth required
 
 	// httpAllowOpen is the explicit opt-in to bind HTTP on a non-loopback
@@ -1766,6 +1773,72 @@ func (s *Server) addTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 	s.mcp.AddTool(tool, handler)
 	s.handlers[tool.Name] = handler
 	s.tools[tool.Name] = tool
+}
+
+// toolArgKeysFor returns the set of argument keys declared in tool's
+// InputSchema.properties — used by unknownArgs to detect typos / unknown
+// args (#499). Lazily parses once per tool; cached on s.toolArgKeys.
+// Returns nil when the tool isn't registered or its schema can't be
+// parsed (caller treats nil as "skip the check, don't false-positive").
+func (s *Server) toolArgKeysFor(tool string) map[string]bool {
+	s.toolArgKeysOnce.Do(func() {
+		s.toolArgKeys = make(map[string]map[string]bool, len(s.tools))
+		for name, t := range s.tools {
+			raw, ok := t.InputSchema.(json.RawMessage)
+			if !ok {
+				// All registered tools today supply json.RawMessage;
+				// future helper-built schemas would land here. Fall
+				// back to marshal-then-unmarshal rather than skip.
+				b, err := json.Marshal(t.InputSchema)
+				if err != nil {
+					continue
+				}
+				raw = b
+			}
+			var schema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			}
+			if err := json.Unmarshal(raw, &schema); err != nil {
+				continue
+			}
+			keys := make(map[string]bool, len(schema.Properties))
+			for k := range schema.Properties {
+				keys[k] = true
+			}
+			s.toolArgKeys[name] = keys
+		}
+	})
+	return s.toolArgKeys[tool]
+}
+
+// unknownArgs returns warning strings for any args key NOT declared in
+// the tool's InputSchema.properties (#499). The same failure-as-pedagogy
+// pattern as #473's pinchQL warnings: silent ignore is the bug; surfacing
+// the typo is the fix. Returns nil when the tool's schema can't be
+// resolved (don't false-positive on schema parse errors).
+func (s *Server) unknownArgs(tool string, args map[string]any) []string {
+	allowed := s.toolArgKeysFor(tool)
+	if allowed == nil || len(args) == 0 {
+		return nil
+	}
+	var warnings []string
+	for k := range args {
+		if !allowed[k] {
+			// Build a sorted hint of accepted keys so the warning is
+			// actionable (agent can self-correct on the next call).
+			accepted := make([]string, 0, len(allowed))
+			for a := range allowed {
+				accepted = append(accepted, a)
+			}
+			sort.Strings(accepted)
+			warnings = append(warnings, fmt.Sprintf(
+				"unknown arg %q for tool %q — accepted: %s",
+				k, tool, strings.Join(accepted, ", "),
+			))
+		}
+	}
+	sort.Strings(warnings) // deterministic order for tests
+	return warnings
 }
 
 func (s *Server) registerTools() {
@@ -6058,6 +6131,17 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	meta["tokens_used"] = tokensUsed
 	meta["tokens_saved"] = tokensSaved
 	meta["latency_ms"] = latency
+
+	// #499: surface unknown args from this call. The fix is to teach
+	// the agent that pincher saw the typo'd / made-up arg and ignored
+	// it, instead of silently behaving as if the arg didn't exist
+	// (the same failure-as-pedagogy pattern as #473's pinchQL warnings).
+	// Merge with any pre-existing warnings (the cypher engine puts its
+	// own here) — never overwrite.
+	if w := s.unknownArgs(tool, args); len(w) > 0 {
+		existing, _ := meta["warnings"].([]string)
+		meta["warnings"] = append(existing, w...)
+	}
 	// No cost_avoided / $-figures: we don't know the user's model or their
 	// pricing. Tokens are concrete and defensible; dollars are a guess.
 	// Human-readable savings line. Trains agents + users that pincher is
