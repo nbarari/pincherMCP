@@ -154,30 +154,36 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	// Tokens saved estimate: the alternative is a Read of the whole
 	// file. Use the file's actual size so the metric reflects the real
 	// per-call benefit on large files (where neighborhood pays off most).
-	fileSizeBytes := avgFileSize
+	// On repeat access this session, the file is already in context —
+	// charge 0 (#478).
 	if root == "" {
 		if r, rerr := s.resolveProjectRoot(projectID); rerr == nil {
 			root = r
 		}
 	}
-	if root != "" {
-		if fi, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(seed.FilePath))); statErr == nil {
-			fileSizeBytes = int(fi.Size())
+	tokensSaved := 0
+	if s.markFileAccessed(projectID, seed.FilePath) {
+		fileSizeBytes := avgFileSize
+		if root != "" {
+			if fi, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(seed.FilePath))); statErr == nil {
+				fileSizeBytes = int(fi.Size())
+			}
 		}
+		// The neighborhood response itself approximates file size only
+		// when include_source=true; for the default (signatures only)
+		// the response is much smaller, so the saving is
+		// correspondingly large.
+		responseBytes := 0
+		for _, n := range neighbors {
+			if sig, ok := n["signature"].(string); ok {
+				responseBytes += len(sig)
+			}
+			if src, ok := n["source"].(string); ok {
+				responseBytes += len(src)
+			}
+		}
+		tokensSaved = max(0, fileSizeBytes-responseBytes) / charsPerToken
 	}
-	// The neighborhood response itself approximates file size only when
-	// include_source=true; for the default (signatures only) the
-	// response is much smaller, so the saving is correspondingly large.
-	responseBytes := 0
-	for _, n := range neighbors {
-		if sig, ok := n["signature"].(string); ok {
-			responseBytes += len(sig)
-		}
-		if src, ok := n["source"].(string); ok {
-			responseBytes += len(src)
-		}
-	}
-	tokensSaved := max(0, fileSizeBytes-responseBytes) / charsPerToken
 
 	data := map[string]any{
 		"seed_id":   seed.ID,

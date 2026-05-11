@@ -194,3 +194,83 @@ func TestSymbolsBatch_DocumentSymbolsSkipped(t *testing.T) {
 		t.Errorf("Document-only batch tokens_saved=%d, want small (no file-read baseline applies)", got)
 	}
 }
+
+// TestSymbols_AccessedFilesDedup_RepeatCallChargesZero pins #478: once
+// a file has been delivered to the agent via any pincher tool this
+// session, the next call touching the same file must NOT claim a fresh
+// full-file baseline. The agent already has the file in context; a
+// second read would be a partial Read at most. Charge zero for the
+// repeat access so the cumulative tokens_saved counter stops linearly
+// inflating with redundant lookups.
+func TestSymbols_AccessedFilesDedup_RepeatCallChargesZero(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	root := t.TempDir()
+	srv.sessionRoot = root
+
+	if err := os.WriteFile(filepath.Join(root, "big.go"), []byte(strings.Repeat("// padding line\n", 500)), 0o644); err != nil {
+		t.Fatalf("seed big.go: %v", err)
+	}
+
+	store.UpsertProject(db.Project{ID: "p1", Path: root, Name: "p1", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "s1", ProjectID: "p1", FilePath: "big.go", Name: "Foo", QualifiedName: "pkg.Foo",
+			Kind: "Function", Language: "Go", StartByte: 0, EndByte: 50, StartLine: 1, EndLine: 1},
+		{ID: "s2", ProjectID: "p1", FilePath: "big.go", Name: "Bar", QualifiedName: "pkg.Bar",
+			Kind: "Function", Language: "Go", StartByte: 60, EndByte: 110, StartLine: 2, EndLine: 2},
+	})
+
+	first, err := srv.handleSymbols(context.Background(), makeReq(map[string]any{"ids": []any{"s1"}}))
+	if err != nil || first.IsError {
+		t.Fatalf("first handleSymbols: err=%v result=%v", err, decode(t, first))
+	}
+	firstSaved := metaTokensSaved(t, decode(t, first))
+	if firstSaved <= 0 {
+		t.Fatalf("first call tokens_saved=%d, want > 0 (full-file baseline)", firstSaved)
+	}
+
+	second, err := srv.handleSymbols(context.Background(), makeReq(map[string]any{"ids": []any{"s2"}}))
+	if err != nil || second.IsError {
+		t.Fatalf("second handleSymbols: err=%v result=%v", err, decode(t, second))
+	}
+	secondSaved := metaTokensSaved(t, decode(t, second))
+	if secondSaved != 0 {
+		t.Errorf("second call tokens_saved=%d, want 0 (file already in agent context after first call)", secondSaved)
+	}
+}
+
+// TestSymbol_AccessedFilesDedup pins the single-symbol path of #478.
+// handleSymbol uses a separate per-file Stat formula (not the shared
+// savedVsFileSizesSession helper), so it needs its own coverage.
+func TestSymbol_AccessedFilesDedup(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	root := t.TempDir()
+	srv.sessionRoot = root
+
+	if err := os.WriteFile(filepath.Join(root, "big.go"), []byte(strings.Repeat("// padding line\n", 500)), 0o644); err != nil {
+		t.Fatalf("seed big.go: %v", err)
+	}
+
+	store.UpsertProject(db.Project{ID: "p1", Path: root, Name: "p1", IndexedAt: time.Now()})
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: "s1", ProjectID: "p1", FilePath: "big.go", Name: "Foo", QualifiedName: "pkg.Foo",
+			Kind: "Function", Language: "Go", StartByte: 0, EndByte: 50, StartLine: 1, EndLine: 1},
+	})
+
+	first, err := srv.handleSymbol(context.Background(), makeReq(map[string]any{"id": "s1"}))
+	if err != nil || first.IsError {
+		t.Fatalf("first handleSymbol: err=%v result=%v", err, decode(t, first))
+	}
+	firstSaved := metaTokensSaved(t, decode(t, first))
+	if firstSaved <= 0 {
+		t.Fatalf("first call tokens_saved=%d, want > 0", firstSaved)
+	}
+
+	second, err := srv.handleSymbol(context.Background(), makeReq(map[string]any{"id": "s1"}))
+	if err != nil || second.IsError {
+		t.Fatalf("second handleSymbol: err=%v result=%v", err, decode(t, second))
+	}
+	secondSaved := metaTokensSaved(t, decode(t, second))
+	if secondSaved != 0 {
+		t.Errorf("second call tokens_saved=%d, want 0 (file already in agent context)", secondSaved)
+	}
+}

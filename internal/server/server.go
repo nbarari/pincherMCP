@@ -217,6 +217,17 @@ type Server struct {
 	// overwhelmingly reads + occasional writes, no deletes during
 	// hot loops; the same shape statsCallsByLanguage uses above.
 	projectIDCache sync.Map
+
+	// accessedFiles is the per-session set of file paths the agent has
+	// already received content for via a pincher tool (#478). Used by
+	// savedVsFileSizesSession to drop the baseline from full_file_read
+	// to partial_read on repeat access: the second `context`/`symbol`
+	// call against the same file does NOT claim a fresh full-file
+	// saving, because the file is already in the agent's context window.
+	// Keyed by "{projectID}|{relPath}" to keep paths from different
+	// projects disjoint. Values are struct{}{}. Process-lifetime; never
+	// pruned — sessions die on respawn.
+	accessedFiles sync.Map
 }
 
 // projectIDCacheEntry is the cached resolution of a project arg.
@@ -2183,15 +2194,20 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 
 	// Estimate token savings vs. reading the whole file.
-	// Baseline: agent would read the entire file to find this symbol.
-	fileSizeBytes := avgFileSize // conservative fallback
-	if root != "" {
-		if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(sym.FilePath))); err == nil {
-			fileSizeBytes = int(fi.Size())
+	// Baseline: agent would read the entire file to find this symbol on
+	// first access. On repeat access this session, the file is already in
+	// context — charge 0 (#478).
+	tokensSaved := 0
+	if s.markFileAccessed(sym.ProjectID, sym.FilePath) {
+		fileSizeBytes := avgFileSize // conservative fallback
+		if root != "" {
+			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(sym.FilePath))); err == nil {
+				fileSizeBytes = int(fi.Size())
+			}
 		}
+		symbolBytes := sym.EndByte - sym.StartByte
+		tokensSaved = max(0, fileSizeBytes-symbolBytes) / charsPerToken
 	}
-	symbolBytes := sym.EndByte - sym.StartByte
-	tokensSaved := max(0, fileSizeBytes-symbolBytes) / charsPerToken
 
 	allFields := map[string]any{
 		"id":                    sym.ID,
@@ -2399,7 +2415,7 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 		"symbols": results,
 		"count":   len(results),
 	}
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(root, filePaths, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(resolvedProjectID, root, filePaths, responseJSON)), nil
 }
 
 func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2502,7 +2518,7 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 	}
 	data = projectFields(data, fieldSet)
 	responseJSON, _ := json.Marshal(data)
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(root, allPaths, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(sym.ProjectID, root, allPaths, responseJSON)), nil
 }
 
 func suggestContextNextSteps(sym db.Symbol) []map[string]string {
@@ -2755,7 +2771,7 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	for _, r := range results {
 		filePaths = append(filePaths, r.Symbol.FilePath)
 	}
-	tokensSaved := savedVsFileSizes(root, filePaths, responseJSON)
+	tokensSaved := s.savedVsFileSizesSession(projectID, root, filePaths, responseJSON)
 
 	// Histogram of result confidences for the response envelope.
 	confs := make([]float64, 0, len(results))
@@ -3835,7 +3851,7 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// projection lets callers drop e.g. `risk_summary` when they
 	// only want the hop list.
 	data = projectFields(data, parseFieldsArg(str(args, "fields")))
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFileSizes(traceRoot, tracedPaths, responseJSON)), nil
+	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(projectID, traceRoot, tracedPaths, responseJSON)), nil
 }
 
 func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -5817,6 +5833,50 @@ func savedVsFileSizes(root string, filePaths []string, payloadBytes []byte) int 
 			continue
 		}
 		seen[fp] = true
+		if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(fp))); err == nil {
+			total += int(fi.Size())
+		} else {
+			total += avgFileSize
+		}
+	}
+	return max(0, total/charsPerToken-db.ApproxTokens(string(payloadBytes)))
+}
+
+// markFileAccessed records that the agent has received content for (projectID,
+// relPath) via a pincher tool this session. Returns true if this is the first
+// access (the agent did NOT already have the file in context) and false
+// otherwise. The caller decides what baseline to charge: full-file-read on
+// fresh access, zero on repeat (file is already in context). See #478.
+//
+// projectID may be empty for tools that don't carry one (e.g. cross-project
+// search); the empty key is still namespaced so it never collides with a real
+// project ID.
+func (s *Server) markFileAccessed(projectID, relPath string) bool {
+	key := projectID + "|" + relPath
+	_, loaded := s.accessedFiles.LoadOrStore(key, struct{}{})
+	return !loaded
+}
+
+// savedVsFileSizesSession is the per-session-dedup variant of savedVsFileSizes.
+// For each de-duplicated path that the agent has NOT yet received from a
+// pincher tool this session, charge the full file size. For paths the agent
+// has already received, charge zero — they are already in the context window
+// and reading them again would not have meant another full Read.
+//
+// This closes the largest source of inflation in tokens_saved (ADR
+// SAVINGS_HONESTY source #2). A 10-symbol-from-1-file workflow now claims a
+// 1-file baseline, not 10×.
+func (s *Server) savedVsFileSizesSession(projectID, root string, filePaths []string, payloadBytes []byte) int {
+	total := 0
+	seen := make(map[string]bool)
+	for _, fp := range filePaths {
+		if seen[fp] {
+			continue
+		}
+		seen[fp] = true
+		if !s.markFileAccessed(projectID, fp) {
+			continue
+		}
 		if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(fp))); err == nil {
 			total += int(fi.Size())
 		} else {
