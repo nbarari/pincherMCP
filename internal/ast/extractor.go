@@ -67,6 +67,15 @@ type ExtractedSymbol struct {
 	// 1.0 = AST-exact (Go). 0.85 = stable regex (Python, TS, Rust, Java).
 	// 0.70 = approximate regex (Ruby, PHP, C, C++, C#, Kotlin, Swift).
 	ExtractionConfidence float64
+	// Fields is populated for struct (Class) symbols: map of
+	// field name → field type expression as a Go-syntax string
+	// (e.g. {"stdin": "io.Writer", "cmd": "*exec.Cmd"}). Empty for
+	// non-struct symbols. Used by the #423 resolver to follow
+	// `recv.field.method` call patterns — look up the receiver's
+	// struct, find the field's type, resolve the method on that type.
+	// Embedded fields (no name in source) are keyed by their type's
+	// last segment (e.g. `sync.Mutex` → key "Mutex").
+	Fields map[string]string
 }
 
 // ExtractedEdge is a raw call/import relationship found during extraction.
@@ -82,6 +91,13 @@ type ExtractedEdge struct {
 	// commonly `main.main` across `package main` subcommand dirs.
 	FromFile   string
 	Confidence float64
+	// ReceiverType is set when this edge was extracted from inside a
+	// Go method body — the method's receiver type expression (e.g.
+	// "*Supervisor" for `func (s *Supervisor) M()`). Empty for edges
+	// from plain functions or non-Go languages. The #423 resolver
+	// uses it to disambiguate field-shaped ToName like "stdin.Write"
+	// by intersecting with the struct's Fields map.
+	ReceiverType string
 }
 
 // FileResult holds all symbols and edges extracted from one file.
@@ -460,7 +476,14 @@ func extractGo(source []byte, relPath, modulePath string) *FileResult {
 
 			// Extract calls from function body
 			if d.Body != nil {
-				calls := extractGoCalls(d.Body, sym.QualifiedName)
+				// #423: thread the receiver type through so each CALLS
+				// edge can carry it. Empty for plain functions; the
+				// resolver only acts on it when present.
+				receiverType := ""
+				if d.Recv != nil && len(d.Recv.List) > 0 {
+					receiverType = goTypeToString(d.Recv.List[0].Type)
+				}
+				calls := extractGoCalls(d.Body, sym.QualifiedName, receiverType)
 				result.Edges = append(result.Edges, calls...)
 				// #247 #3: identifier references for READS edges. Walks
 				// the same body — costs an extra ast.Inspect pass per
@@ -542,9 +565,13 @@ func goGenDeclToSymbols(d *ast.GenDecl, fset *token.FileSet, source []byte, line
 			startPos := fset.Position(sp.Pos())
 			endPos := fset.Position(sp.End())
 			kind := "Type"
-			switch sp.Type.(type) {
+			var fields map[string]string
+			switch t := sp.Type.(type) {
 			case *ast.StructType:
 				kind = "Class"
+				// #423: capture field-name → field-type so the resolver
+				// can follow `recv.field.method` calls.
+				fields = extractGoStructFields(t)
 			case *ast.InterfaceType:
 				kind = "Interface"
 			}
@@ -562,6 +589,7 @@ func goGenDeclToSymbols(d *ast.GenDecl, fset *token.FileSet, source []byte, line
 				EndLine:       endPos.Line,
 				Docstring:     doc,
 				IsExported:    ast.IsExported(sp.Name.Name),
+				Fields:        fields,
 			})
 		case *ast.ValueSpec:
 			// #247 #3: package-level `var` and `const` declarations as
@@ -605,7 +633,7 @@ func goGenDeclToSymbols(d *ast.GenDecl, fset *token.FileSet, source []byte, line
 	return syms
 }
 
-func extractGoCalls(body *ast.BlockStmt, callerQN string) []ExtractedEdge {
+func extractGoCalls(body *ast.BlockStmt, callerQN, receiverType string) []ExtractedEdge {
 	var edges []ExtractedEdge
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -615,10 +643,11 @@ func extractGoCalls(body *ast.BlockStmt, callerQN string) []ExtractedEdge {
 		callee := goCalleeToString(call.Fun)
 		if callee != "" {
 			edges = append(edges, ExtractedEdge{
-				FromQN:     callerQN,
-				ToName:     callee,
-				Kind:       "CALLS",
-				Confidence: 0.7, // unresolved, lower confidence
+				FromQN:       callerQN,
+				ToName:       callee,
+				Kind:         "CALLS",
+				Confidence:   0.7, // unresolved, lower confidence
+				ReceiverType: receiverType,
 			})
 		}
 		return true
@@ -824,6 +853,70 @@ func goCalleeToString(expr ast.Expr) string {
 	default:
 		return ""
 	}
+}
+
+// extractGoStructFields walks a struct type's field list and returns
+// a map of field name → field type expression as a Go-syntax string
+// (#423). Used by the resolver to follow `recv.field.method` calls:
+// for `s.stdin.Write()` inside `func (s *Supervisor) ...`, look up
+// `*Supervisor`'s field `stdin`, find its type `io.Writer`, then
+// resolve `Write` against `io.Writer`'s methods.
+//
+// Embedded fields (no name in source — `sync.Mutex`, `*log.Logger`)
+// are keyed by their type's last identifier segment so calls like
+// `s.Mutex.Lock()` resolve.
+//
+// Returns nil for an empty / nil field list — keeps the symbol's
+// JSON shape clean (omitempty).
+func extractGoStructFields(st *ast.StructType) map[string]string {
+	if st == nil || st.Fields == nil || len(st.Fields.List) == 0 {
+		return nil
+	}
+	fields := map[string]string{}
+	for _, f := range st.Fields.List {
+		if f == nil || f.Type == nil {
+			continue
+		}
+		typeStr := goTypeToString(f.Type)
+		if len(f.Names) == 0 {
+			// Embedded — use the type's last identifier segment as the
+			// field name (Go's promoted-field naming rule).
+			if shortName := embeddedFieldName(f.Type); shortName != "" {
+				fields[shortName] = typeStr
+			}
+			continue
+		}
+		for _, name := range f.Names {
+			if name == nil || name.Name == "" || name.Name == "_" {
+				continue
+			}
+			fields[name.Name] = typeStr
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// embeddedFieldName returns the field name an embedded struct field
+// gets (Go's "promoted field" rule): the last identifier segment of
+// the type expression. `sync.Mutex` → "Mutex"; `*log.Logger` →
+// "Logger"; `io.Reader` → "Reader". Returns "" for unsupported
+// shapes (generics with type params, function types).
+func embeddedFieldName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return embeddedFieldName(t.X)
+	case *ast.SelectorExpr:
+		return t.Sel.Name
+	case *ast.IndexExpr:
+		// Generic embedding: `Foo[T]` → "Foo".
+		return embeddedFieldName(t.X)
+	}
+	return ""
 }
 
 func goTypeToString(expr ast.Expr) string {
