@@ -6274,7 +6274,26 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 		meta = map[string]any{}
 	}
 	meta["tokens_used"] = tokensUsed
-	meta["tokens_saved"] = tokensSaved
+	// #477: stamp the baseline method so consumers can tell what kind
+	// of work each tool replaces. "none" tools (architecture, schema,
+	// list, ...) emit tokens_saved=null and don't accumulate to stats —
+	// they have no Read/Grep alternative, so a numeric saving would be
+	// fabricated, not measured. "full_file_read" / "partial_read" tools
+	// stamp an honest int.
+	baselineMethod := baselineMethodForTool[tool]
+	if baselineMethod == "" {
+		// Default for tools added without an explicit classification —
+		// safer to assume the tool replaces a Read than to silently
+		// suppress savings tracking. The classification gate test in
+		// the test suite catches drift.
+		baselineMethod = baselineMethodFullFileRead
+	}
+	meta["baseline_method"] = baselineMethod
+	if baselineMethod == baselineMethodNone {
+		meta["tokens_saved"] = nil
+	} else {
+		meta["tokens_saved"] = tokensSaved
+	}
 	meta["latency_ms"] = latency
 
 	// #499: surface unknown args from this call. The fix is to teach
@@ -6292,9 +6311,9 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// Human-readable savings line. Trains agents + users that pincher is
 	// cheaper than reading files; a one-liner per response is the most
 	// effective place to surface it (per #138/#139/#140 adoption thread).
-	// Suppressed when nothing was saved (admin tools like list/health/stats
-	// where the comparison "vs reading files" doesn't apply).
-	if tokensSaved > 0 {
+	// Suppressed when baseline_method is "none" (no honest comparison
+	// to draw) and when no tokens were saved on a measurable tool.
+	if baselineMethod != baselineMethodNone && tokensSaved > 0 {
 		meta["savings"] = fmt.Sprintf("saved ~%s tokens vs reading files (used %s, %dms)",
 			humanInt(tokensSaved), humanInt(tokensUsed), latency)
 	}
@@ -6302,9 +6321,14 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 
 	// Accumulate session stats. On the very first call, flush immediately so
 	// the dashboard sees the new session within milliseconds, not after 10s.
+	// #477: skip the tokens_saved increment for "none" tools — adding 0
+	// would be a no-op anyway, but being explicit guards against future
+	// callers passing a non-zero tokensSaved by mistake.
 	newCalls := atomic.AddInt64(&s.statsCalls, 1)
 	atomic.AddInt64(&s.statsTokensUsed, int64(tokensUsed))
-	atomic.AddInt64(&s.statsTokensSaved, int64(tokensSaved))
+	if baselineMethod != baselineMethodNone {
+		atomic.AddInt64(&s.statsTokensSaved, int64(tokensSaved))
+	}
 	atomic.AddInt64(&s.statsLatencyMS, latency)
 
 	// Per-language call attribution (#240). Scans the marshalled
@@ -6399,9 +6423,18 @@ func (s *Server) textResultWithMeta(text string, start time.Time, tool string, a
 	s.maybeRecordSlowQuery(tool, args, latency)
 	tokensUsed := db.ApproxTokens(text)
 
+	// #477: same baseline-method gate as jsonResultWithMeta. Tools
+	// stamped "none" (admin/orientation) skip the savings tracker.
+	baselineMethod := baselineMethodForTool[tool]
+	if baselineMethod == "" {
+		baselineMethod = baselineMethodFullFileRead
+	}
+
 	newCalls := atomic.AddInt64(&s.statsCalls, 1)
 	atomic.AddInt64(&s.statsTokensUsed, int64(tokensUsed))
-	atomic.AddInt64(&s.statsTokensSaved, int64(tokensSaved))
+	if baselineMethod != baselineMethodNone {
+		atomic.AddInt64(&s.statsTokensSaved, int64(tokensSaved))
+	}
 	atomic.AddInt64(&s.statsLatencyMS, latency)
 
 	if newCalls == 1 {
@@ -6410,13 +6443,72 @@ func (s *Server) textResultWithMeta(text string, start time.Time, tool string, a
 
 	// Append a compact meta line so callers still see accounting info.
 	// No $-figures (#476 SAVINGS_HONESTY): we don't know the user's model.
-	full := text + fmt.Sprintf("\n  tokens used %-6d  tokens saved %-6d  latency %d ms\n", tokensUsed, tokensSaved, latency)
+	// #477: render `tokens saved —` for "none" tools so the field is
+	// distinguishable from a tool that genuinely saved zero on this call.
+	var savedRender string
+	if baselineMethod == baselineMethodNone {
+		savedRender = "—"
+	} else {
+		savedRender = fmt.Sprintf("%-6d", tokensSaved)
+	}
+	full := text + fmt.Sprintf("\n  tokens used %-6d  tokens saved %s  latency %d ms\n", tokensUsed, savedRender, latency)
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: full}},
 	}
 	// #364: same restart hook as jsonResultWithMeta — see comment there.
 	s.checkAutoRestart()
 	return result
+}
+
+// baselineMethod constants describe the kind of work each tool replaces
+// for an LLM agent. Stamped on every response in `_meta.baseline_method`
+// so consumers can distinguish honest savings from "no comparison
+// possible" (#477).
+const (
+	// baselineMethodFullFileRead — the tool returns content the agent
+	// would otherwise have read from one or more source files. Token
+	// savings are computed against real file sizes (deduped per-session).
+	baselineMethodFullFileRead = "full_file_read"
+	// baselineMethodPartialRead — second access to the same file in
+	// the session. The agent already has the file in context window;
+	// the saving is incremental, not a full file replay. Tracked via
+	// the per-session accessedFiles set added in #478. (Currently no
+	// tools stamp this directly — savedVsFileSizesSession returns 0
+	// for repeat hits, which is the same outcome.)
+	baselineMethodPartialRead = "partial_read"
+	// baselineMethodNone — admin / orientation tool with no Read or
+	// Grep alternative. tokens_saved is null (not 0) and the savings
+	// human-readable line is suppressed — there's no honest baseline
+	// to draw against.
+	baselineMethodNone = "none"
+)
+
+// baselineMethodForTool maps each registered tool name to the kind of
+// work it replaces (#477). Adding a new tool MUST update this map; the
+// classification gate test catches drift. Tools not present in the map
+// fall back to baselineMethodFullFileRead — safer than silent suppression.
+var baselineMethodForTool = map[string]string{
+	// Tools that replace direct file reads.
+	"symbol":       baselineMethodFullFileRead,
+	"symbols":      baselineMethodFullFileRead,
+	"context":      baselineMethodFullFileRead,
+	"search":       baselineMethodFullFileRead,
+	"query":        baselineMethodFullFileRead,
+	"trace":        baselineMethodFullFileRead,
+	"changes":      baselineMethodFullFileRead,
+	"dead_code":    baselineMethodFullFileRead,
+	"neighborhood": baselineMethodFullFileRead,
+	// Admin / orientation / write-side tools — no Read/Grep alternative.
+	"index":        baselineMethodNone,
+	"architecture": baselineMethodNone,
+	"schema":       baselineMethodNone,
+	"list":         baselineMethodNone,
+	"adr":          baselineMethodNone,
+	"health":       baselineMethodNone,
+	"stats":        baselineMethodNone,
+	"fetch":        baselineMethodNone, // ingests external URL — not a Read replacement
+	"guide":        baselineMethodNone,
+	"init":         baselineMethodNone,
 }
 
 // humanInt formats an int with thousands separators ("14200" -> "14,200").

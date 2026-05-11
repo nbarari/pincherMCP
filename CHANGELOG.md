@@ -7,6 +7,25 @@ minors.
 
 ## [Unreleased]
 
+### Added
+- **`_meta.baseline_method` stamp on every tool response
+  ([#477](https://github.com/kwad77/pincher/issues/477)).** Three values:
+  `"full_file_read"` for tools that replace a Read of source files
+  (search/symbol/symbols/context/trace/changes/dead_code/neighborhood/
+  query), `"partial_read"` for repeat-access (per-session dedup'd via
+  the #478 accessedFiles set), and `"none"` for admin / orientation
+  tools that have no Read alternative (architecture/schema/list/stats/
+  health/guide/adr/init/index/fetch). Tools stamped `"none"` emit
+  `tokens_saved: null` (not 0) and suppress the `savings:` human-
+  readable line — there's no honest baseline to draw against, so the
+  field is explicitly absent rather than zeroed. The session stats
+  accumulator also skips them, so cumulative `tokens_saved` no longer
+  silently includes "saved zero on architecture, repeated 100×"
+  contributions. Closes the SAVINGS_HONESTY thread that started in
+  v0.17.0 (#476/#478/#479). New classification gate test
+  (`TestBaselineMethodForTool_AllRegisteredToolsClassified`)
+  prevents future tools from drifting unclassified.
+
 ## [v0.18.0] — 2026-05-11 — failure-as-pedagogy v2 + dopamine + tool-output trust
 
 Minor — the v0.18 theme is **failure-as-pedagogy v2 + dopamine + tool-output trust.** v0.17 made every silent zero in pinchQL teach the agent (#473); v0.18 extends that pedagogy across the entire tool surface (tool args, property values, MATCH labels, search regex), adds an occasional dopamine signal so the agent + user see the savings tier they crossed, and tightens two failure surfaces — `dead_code` no longer cries wolf on Go runtime-invoked symbols, and `changes` no longer inflates blast radius into an unfittable payload when a single function changes in a large file.
