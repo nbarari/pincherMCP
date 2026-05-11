@@ -3558,7 +3558,44 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"total":   len(rows),
 		"_meta":   meta,
 	}
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(rows), responseJSON)), nil
+	// Honest savings: when the query projected a file_path column, the
+	// agent's alternative was reading those files. Harvest distinct
+	// paths and use savedVsFileSizesSession. When no file_path column
+	// was projected, we can't honestly claim a file-read alternative —
+	// pass 0 rather than fabricating count × avgFileSize.
+	queryPaths := harvestRowFilePaths(rows)
+	tokensSaved := 0
+	if len(queryPaths) > 0 && !allowAllProjects {
+		root, _ := s.resolveProjectRoot(projectID)
+		tokensSaved = s.savedVsFileSizesSession(projectID, root, queryPaths, responseJSON)
+	}
+	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
+}
+
+// harvestRowFilePaths walks pinchQL result rows and collects distinct
+// values from any column whose key looks like a file-path projection
+// (`file_path` exact, or `<alias>.file_path` like `n.file_path`).
+// Returns nil when no such column is present — caller treats that as
+// "no honest file-read alternative" and passes tokensSaved=0.
+func harvestRowFilePaths(rows []map[string]any) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, r := range rows {
+		for k, v := range r {
+			if k == "file_path" || strings.HasSuffix(k, ".file_path") {
+				if s, ok := v.(string); ok && s != "" {
+					if _, dup := seen[s]; !dup {
+						seen[s] = struct{}{}
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // firstRowID returns the id of the first row in rows when any column
@@ -3983,7 +4020,6 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 	}
 
 	responseJSON, _ := json.Marshal(impacted)
-	totalTracedSyms := len(changedSymbols) + len(impacted)
 	data := map[string]any{
 		"changed_files":   changedFiles,
 		"changed_symbols": changedSymNames,
@@ -4012,7 +4048,22 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 	// changed_symbols/impacted lists. `fields=summary,tests_to_run`
 	// drops ~80% of the response when the diff impacts many symbols.
 	data = projectFields(data, parseFieldsArg(str(args, "fields")))
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(totalTracedSyms, responseJSON)), nil
+	// Honest savings baseline: the agent's alternative was reading every
+	// changed file plus every transitively-impacted symbol's file. Sum
+	// real file sizes (de-duped + per-session dedup'd) rather than the
+	// fabricated count × avgFileSize savedVsFullRead used to claim.
+	changedPaths := make([]string, 0, len(changedSymbols)+len(impacted))
+	for _, sym := range changedSymbols {
+		if sym.FilePath != "" {
+			changedPaths = append(changedPaths, sym.FilePath)
+		}
+	}
+	for _, item := range impacted {
+		if fp, ok := item["file_path"].(string); ok && fp != "" {
+			changedPaths = append(changedPaths, fp)
+		}
+	}
+	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(projectID, root, changedPaths, responseJSON)), nil
 }
 
 // suggestChangesNextSteps picks 1-2 follow-up actions for handleChanges
@@ -4205,7 +4256,17 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 
 	responseJSON, _ := json.Marshal(dead)
-	return s.jsonResultWithMeta(data, start, tool, args, savedVsFullRead(len(dead), responseJSON)), nil
+	// Honest savings: the agent's alternative was reading every file
+	// containing a dead symbol. Sum real file sizes (de-duped + per-
+	// session dedup'd) instead of fabricating count × avgFileSize.
+	root, _ := s.resolveProjectRoot(projectID)
+	deadPaths := make([]string, 0, len(dead))
+	for _, d := range dead {
+		if fp, ok := d["file_path"].(string); ok && fp != "" {
+			deadPaths = append(deadPaths, fp)
+		}
+	}
+	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(projectID, root, deadPaths, responseJSON)), nil
 }
 
 func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -5814,17 +5875,9 @@ const avgFileSize = 20_000
 // token. Used only for baseline estimates where we don't have the actual text.
 const charsPerToken = 4
 
-// savedVsFullRead returns estimated tokens saved: (N symbols × avgFileSize) minus
-// the actual payload size. The baseline is "read the whole file per symbol",
-// which is what an agent does without a code graph.
-func savedVsFullRead(count int, payloadBytes []byte) int {
-	baselineTokens := count * avgFileSize / charsPerToken
-	return max(0, baselineTokens-db.ApproxTokens(string(payloadBytes)))
-}
-
 // savedVsFileSizes returns estimated tokens saved using actual file sizes looked
-// up from the filesystem. More accurate than savedVsFullRead for tools that
-// know which files are being accessed.
+// up from the filesystem. Used by tests; production handlers should call
+// savedVsFileSizesSession (the per-session-dedup variant, #478).
 func savedVsFileSizes(root string, filePaths []string, payloadBytes []byte) int {
 	total := 0
 	seen := make(map[string]bool)
