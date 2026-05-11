@@ -7,6 +7,93 @@ minors.
 
 ## [Unreleased]
 
+## [v0.13.0] — 2026-05-10 — JS AST + tool surface expansion + dogfood-driven precision
+
+Headline: a pure-Go JavaScript AST extractor lands behind a feature flag,
+two new MCP tools join the surface (`changes scope=base:<branch>` and
+`dead_code`), and the dogfood pass that surfaced four precision fixes
+also caught the supervisor's Ubuntu CI flake. Total tool count: 20
+(was 18 in v0.12.0).
+
+### Added
+- **JS AST extractor (behind `PINCHER_EXPERIMENTAL_JS_AST=1`)
+  ([#266](https://github.com/kwad77/pincher/issues/266) / [#388](https://github.com/kwad77/pincher/pull/388)).**
+  Hybrid approach: `tdewolff/parse/v2/js` gives canonical kind + name;
+  regex recovers byte positions tdewolff doesn't expose. Handles
+  non-spec top-level `return` via IIFE wrap-recovery; preserves
+  shorthand object methods that tdewolff parses with `Property.Name=nil`.
+  Behind a flag while the AST shape stabilises against real-world
+  corpora; flips to default-on once the v0.13 → v0.14 dogfood pass
+  confirms zero regressions vs the regex extractor.
+
+- **`changes scope=base:<branch>` — pre-PR blast-radius preview
+  ([#394](https://github.com/kwad77/pincher/pull/394)).** Three-dot
+  `git diff <branch>...HEAD` semantics — answers "what does this PR
+  introduce" before the PR exists. Branch-name validation rejects
+  flag-injection-shape (`-rf`), range syntax (`a..b`), and shell
+  metachars before the subprocess runs.
+
+- **Multi-project `query` via `project=*`
+  ([#395](https://github.com/kwad77/pincher/pull/395)).** `search`
+  has supported `project=*` since v0.4-ish; `query` did not, blocking
+  cross-repo graph queries like "which services import library X?"
+  The Cypher Executor gains an `AllowAllProjects` flag for explicit
+  opt-in; the empty-ProjectID safety guard stays as defense-in-depth
+  for in-code callers that forget to scope.
+
+- **New `dead_code` MCP tool
+  ([#396](https://github.com/kwad77/pincher/pull/396)).** Surfaces
+  symbols with zero inbound edges (CALLS / READS / WRITES /
+  REFERENCES / IMPORTS) that aren't exported, aren't entry points,
+  and aren't tests — the inverse of `architecture` hotspots. The
+  first pincher tool that surfaces *removable* code, not just
+  navigable code. Defaults bias toward precision
+  (`min_confidence=0.95`, `kinds=Function,Method`); testdata fixtures
+  and scratch paths post-filtered.
+
+### Fixed
+- **`architecture` no longer reports testdata fixtures as entry points
+  ([#392](https://github.com/kwad77/pincher/issues/392) / [#393](https://github.com/kwad77/pincher/pull/393)).**
+  The indexer correctly flags `testdata/corpus/.../main.go` as
+  `is_entry_point=1` (it declares `package main`), but it's a
+  pinned-corpus fixture, not an entrypoint of *this* project. New
+  `isTestFixturePath` helper filters fixture-input directories
+  (`testdata/`, `__fixtures__/`, `fixtures/`) from both `entry_points`
+  and `hotspots`. Fixture symbols stay searchable via `search` /
+  `query` — the filter is orientation-only.
+
+- **`trace` filters test files + testdata fixtures by default
+  ([#398](https://github.com/kwad77/pincher/issues/398) / [#399](https://github.com/kwad77/pincher/pull/399)).**
+  A single inbound trace of `Open` returned **127 hops**, ~95% of them
+  test functions. Same noise problem #305 + #393 solved for
+  architecture; this brings trace in line. `include_tests=true` opts
+  back into the legacy mixed list. Also fixes adjacent name-
+  resolution bug: `sortTraceCandidates` now ranks fixtures behind
+  tests, so `name=Open` resolves to `db.Open` instead of
+  `testdata/corpus/.../auth.Open`.
+
+- **Supervisor flake on Ubuntu CI
+  ([#383](https://github.com/kwad77/pincher/issues/383) / [#390](https://github.com/kwad77/pincher/pull/390)).**
+  `TestSupervisor_ClientStdinEOFReturns` raced: closing the fake
+  inner from the test goroutine immediately after launching `Run`
+  let the inner pump see EOF on the pre-closed stdout 6× before the
+  client pump caught the client-stdin EOF, tripping the respawn
+  circuit breaker. The "probe_timeout 50ms" lines in the failure
+  trace were misdirection from a parallel test bleeding into the
+  global slog stream. Removing the racy `fake.Close()` (Run's
+  `shutdownInner` already closes inner pipes) made the test
+  deterministic across 200× stress runs under contention.
+
+### Performance
+- **CI Windows test job: ~7min → ~3:30
+  ([#391](https://github.com/kwad77/pincher/pull/391)).** Bumped
+  Windows `-p` from 1 to 2 — the original SQLite-contention
+  justification didn't hold (tests use unique temp dirs per package).
+  Also dropped the redundant standalone `go vet` step (`go test`
+  runs vet by default). All OS jobs got 20-31% faster as a side
+  benefit; Coverage gate dropped ~20%. Net effect across the v0.13.0
+  PR cycle: 5 PRs from open to merge in ~10 minutes per round.
+
 ## [v0.12.0] — 2026-05-10 — pinchQL parens + dogfood-driven cleanup
 
 One feature, five fixes — every fix surfaced by a single full-surface
