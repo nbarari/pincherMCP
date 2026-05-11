@@ -36,7 +36,11 @@ func newTestDB(t *testing.T) *sql.DB {
 			is_exported INTEGER DEFAULT 0,
 			is_entry_point INTEGER DEFAULT 0,
 			complexity INTEGER DEFAULT 0,
-			extraction_confidence REAL NOT NULL DEFAULT 1.0
+			extraction_confidence REAL NOT NULL DEFAULT 1.0,
+			signature TEXT,
+			return_type TEXT,
+			docstring TEXT,
+			is_test INTEGER DEFAULT 0
 		);
 		CREATE TABLE edges (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -76,9 +76,12 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 
 // symCols is the canonical SELECT column list for the symbols table.
 // Keep in sync with db.symSelectFrom and cypher.symRow.
+// #438: signature, return_type, docstring, is_test exposed so pinchQL
+// WHERE clauses can address them — IS NULL / IS NOT NULL previously
+// matched all-or-none because the row map didn't carry the column.
 const symCols = `id, project_id, file_path, name, qualified_name, kind, language,
 	start_byte, end_byte, start_line, end_line, is_exported, is_entry_point, complexity,
-	extraction_confidence`
+	extraction_confidence, signature, return_type, docstring, is_test`
 
 // inPlaceholders returns a comma-separated "?,?,..." string for n items.
 func inPlaceholders(n int) string {
@@ -930,6 +933,13 @@ type symRow struct {
 	IsEntryPoint         bool
 	Complexity           int
 	ExtractionConfidence float64
+	// #438: scanned as sql.NullString so an unset column stays nil
+	// in symRowToMap rather than coercing to "". IS NULL in pinchQL
+	// then evaluates against an absent value the way Cypher expects.
+	Signature  sql.NullString
+	ReturnType sql.NullString
+	Docstring  sql.NullString
+	IsTest     bool
 }
 
 func (e *Executor) maxRows() int {
@@ -1185,10 +1195,10 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 	sqlQ := `SELECT
 		a.id, a.project_id, a.file_path, a.name, a.qualified_name, a.kind, a.language,
 		a.start_byte, a.end_byte, a.start_line, a.end_line, a.is_exported, a.is_entry_point, a.complexity,
-		a.extraction_confidence,
+		a.extraction_confidence, a.signature, a.return_type, a.docstring, a.is_test,
 		b.id, b.project_id, b.file_path, b.name, b.qualified_name, b.kind, b.language,
 		b.start_byte, b.end_byte, b.start_line, b.end_line, b.is_exported, b.is_entry_point, b.complexity,
-		b.extraction_confidence,
+		b.extraction_confidence, b.signature, b.return_type, b.docstring, b.is_test,
 		e.kind, e.confidence
 		FROM edges e
 		JOIN symbols a ON a.id = e.from_id
@@ -1495,7 +1505,7 @@ func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string
 	)
 	SELECT s.id, s.project_id, s.file_path, s.name, s.qualified_name, s.kind, s.language,
 		s.start_byte, s.end_byte, s.start_line, s.end_line, s.is_exported, s.is_entry_point, s.complexity,
-		s.extraction_confidence, MIN(r.depth) AS min_depth
+		s.extraction_confidence, s.signature, s.return_type, s.docstring, s.is_test, MIN(r.depth) AS min_depth
 	FROM reach r
 	JOIN symbols s ON s.id = r.id
 	WHERE r.depth >= ? AND r.id != ?
@@ -1521,17 +1531,18 @@ func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string
 	var hops []bfsHop
 	for rows.Next() {
 		var n symRow
-		var isExp, isEntry int64
+		var isExp, isEntry, isTest int64
 		var depth int
 		if err := rows.Scan(
 			&n.ID, &n.ProjectID, &n.FilePath, &n.Name, &n.QualifiedName, &n.Kind, &n.Language,
 			&n.StartByte, &n.EndByte, &n.StartLine, &n.EndLine, &isExp, &isEntry, &n.Complexity,
-			&n.ExtractionConfidence, &depth,
+			&n.ExtractionConfidence, &n.Signature, &n.ReturnType, &n.Docstring, &isTest, &depth,
 		); err != nil {
 			return nil, err
 		}
 		n.IsExported = isExp != 0
 		n.IsEntryPoint = isEntry != 0
+		n.IsTest = isTest != 0
 		hops = append(hops, bfsHop{node: &n, depth: depth})
 	}
 	return hops, rows.Err()
@@ -1784,42 +1795,45 @@ func toFloatForOrderBy(v any) (float64, bool) {
 
 func scanSymRow(rows *sql.Rows) (*symRow, error) {
 	var n symRow
-	var isExp, isEntry int64
+	var isExp, isEntry, isTest int64
 	if err := rows.Scan(
 		&n.ID, &n.ProjectID, &n.FilePath, &n.Name, &n.QualifiedName, &n.Kind, &n.Language,
 		&n.StartByte, &n.EndByte, &n.StartLine, &n.EndLine, &isExp, &isEntry, &n.Complexity,
-		&n.ExtractionConfidence,
+		&n.ExtractionConfidence, &n.Signature, &n.ReturnType, &n.Docstring, &isTest,
 	); err != nil {
 		return nil, err
 	}
 	n.IsExported = isExp != 0
 	n.IsEntryPoint = isEntry != 0
+	n.IsTest = isTest != 0
 	return &n, nil
 }
 
 func scanJoinRow(rows *sql.Rows) (a, b *symRow, edgeKind string, conf float64, err error) {
 	a = &symRow{}
 	b = &symRow{}
-	var isExpA, isEntryA, isExpB, isEntryB int64
+	var isExpA, isEntryA, isTestA, isExpB, isEntryB, isTestB int64
 	err = rows.Scan(
 		&a.ID, &a.ProjectID, &a.FilePath, &a.Name, &a.QualifiedName, &a.Kind, &a.Language,
 		&a.StartByte, &a.EndByte, &a.StartLine, &a.EndLine, &isExpA, &isEntryA, &a.Complexity,
-		&a.ExtractionConfidence,
+		&a.ExtractionConfidence, &a.Signature, &a.ReturnType, &a.Docstring, &isTestA,
 		&b.ID, &b.ProjectID, &b.FilePath, &b.Name, &b.QualifiedName, &b.Kind, &b.Language,
 		&b.StartByte, &b.EndByte, &b.StartLine, &b.EndLine, &isExpB, &isEntryB, &b.Complexity,
-		&b.ExtractionConfidence,
+		&b.ExtractionConfidence, &b.Signature, &b.ReturnType, &b.Docstring, &isTestB,
 		&edgeKind, &conf,
 	)
 	a.IsExported = isExpA != 0
 	a.IsEntryPoint = isEntryA != 0
+	a.IsTest = isTestA != 0
 	b.IsExported = isExpB != 0
 	b.IsEntryPoint = isEntryB != 0
+	b.IsTest = isTestB != 0
 	return
 }
 
 func symRowToMap(varName string, n *symRow) map[string]any {
 	prefix := varName + "."
-	return map[string]any{
+	m := map[string]any{
 		prefix + "id":             n.ID,
 		prefix + "name":           n.Name,
 		prefix + "qualified_name": n.QualifiedName,
@@ -1832,9 +1846,30 @@ func symRowToMap(varName string, n *symRow) map[string]any {
 		prefix + "end_byte":       n.EndByte,
 		prefix + "is_exported":            n.IsExported,
 		prefix + "is_entry_point":         n.IsEntryPoint,
+		prefix + "is_test":                n.IsTest,
 		prefix + "complexity":             n.Complexity,
 		prefix + "extraction_confidence":  n.ExtractionConfidence,
 	}
+	// #438: nullable text columns. Use nil rather than "" so
+	// `WHERE n.docstring IS NULL` distinguishes unset from empty,
+	// matching SQL/Cypher semantics. The in-Go evaluator's IS NULL
+	// check tests for nil specifically.
+	if n.Signature.Valid {
+		m[prefix+"signature"] = n.Signature.String
+	} else {
+		m[prefix+"signature"] = nil
+	}
+	if n.ReturnType.Valid {
+		m[prefix+"return_type"] = n.ReturnType.String
+	} else {
+		m[prefix+"return_type"] = nil
+	}
+	if n.Docstring.Valid {
+		m[prefix+"docstring"] = n.Docstring.String
+	} else {
+		m[prefix+"docstring"] = nil
+	}
+	return m
 }
 
 // appendWhereOp appends a SQL condition for a pushed-down Cypher WHERE clause.
@@ -2072,6 +2107,16 @@ func cypherPropToCol(prop string) string {
 		return "is_exported"
 	case "is_entry_point":
 		return "is_entry_point"
+	case "is_test":
+		return "is_test"
+	case "signature":
+		// #438: nullable TEXT columns. SQL pushdown of `IS NULL` /
+		// `IS NOT NULL` / `=` works directly against the column.
+		return "signature"
+	case "return_type":
+		return "return_type"
+	case "docstring":
+		return "docstring"
 	default:
 		return ""
 	}

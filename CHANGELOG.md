@@ -40,6 +40,20 @@ minors.
   Mirrors the speed of the equivalent `trace direction=inbound` call
   that previously had to be hand-translated.
 
+- **pinchQL couldn't see `docstring`, `signature`, `return_type`, or
+  `is_test` properties — `WHERE n.docstring IS NULL` matched every
+  Function, `IS NOT NULL` matched none
+  ([#438](https://github.com/kwad77/pincher/issues/438)).** The cypher
+  engine's row map didn't carry those columns even though they live in
+  the `symbols` table. `n.docstring` evaluated to undefined for every
+  hit, so the in-Go IS NULL path took the all-match branch. Fix loads
+  the four columns through every code path (node scan, JOIN, BFS) and
+  exposes them in `symRowToMap` as nullable values so IS NULL / IS NOT
+  NULL distinguish unset from empty. `cypherPropToCol` now pushes them
+  to SQL too, so the predicate filters at the table rather than after
+  the scan LIMIT. Unlocks the canonical "find undocumented exported
+  APIs" query.
+
 - **`index` diagnosis conflated benign symbol-neutral re-indexes with
   extractor bugs ([#425](https://github.com/kwad77/pincher/issues/425)).**
   When `skipped > 0 AND files > 0 AND symbols == 0` — the normal case where
