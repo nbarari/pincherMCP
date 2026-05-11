@@ -539,6 +539,35 @@ func isTestFixturePath(filePath string) bool {
 	return false
 }
 
+// isRuntimeInvokedGoSymbol returns true when the symbol's name marks
+// it as a Go function the language runtime invokes via reflection or
+// implicit registration — so the static CALLS graph cannot see the
+// caller and the symbol is necessarily a false positive in dead_code
+// (#492).
+//
+// The list is conservative and language-gated:
+//   - init: called by Go runtime at package load. Cannot be called
+//     explicitly. Always reachable when its package is imported.
+//   - TestMain: invoked by `go test` discovery; ditto.
+//   - main: entry point, but main() always also lives in a `package
+//     main` file — Go won't compile without it. is_entry_point should
+//     already cover this, but belt-and-suspenders.
+//
+// Method-set members called via interface dispatch (String, Error,
+// MarshalJSON, etc.) deliberately NOT included here — those need a
+// separate interface-satisfaction pass (#493) because the same name
+// in a non-interface-method context is legitimately checkable.
+func isRuntimeInvokedGoSymbol(language, name string) bool {
+	if language != "Go" {
+		return false
+	}
+	switch name {
+	case "init", "TestMain", "main":
+		return true
+	}
+	return false
+}
+
 // sortTraceCandidates ranks symbols for trace's name-resolution
 // heuristic (#319). Callers expect `trace name="main"` to land on
 // the binary's actual entry function, not a scratch file's
@@ -4255,6 +4284,9 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 	dead := []map[string]any{}
 	for _, sym := range rawDead {
 		if isDeveloperScratchPath(sym.FilePath) || isTestFixturePath(sym.FilePath) {
+			continue
+		}
+		if isRuntimeInvokedGoSymbol(sym.Language, sym.Name) {
 			continue
 		}
 		dead = append(dead, map[string]any{

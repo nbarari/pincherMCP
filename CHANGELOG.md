@@ -7,6 +7,19 @@ minors.
 
 ## [Unreleased]
 
+### Fixed
+- **dead_code precision: Go init / TestMain / main filtered
+  ([#492](https://github.com/kwad77/pincher/issues/492)).** The static
+  CALLS graph cannot see runtime-invoked callers (Go init() called at
+  package load, TestMain called by `go test` discovery, main called
+  by the runtime). These symbols are necessarily false positives in
+  dead_code — they have no inbound edges by definition, yet are
+  always reachable. Filter is language-gated (Go only) and name-list
+  bounded to avoid hiding legitimately-dead symbols in other
+  languages. Interface-dispatch false positives ([#493]) need a
+  separate satisfaction-analysis pass; not addressed here.
+
+>>>>>>> Stashed changes
 ## [v0.17.0] — 2026-05-11 — honest savings + failure-as-pedagogy
 
 Minor — the v0.17 theme is "honest savings + failure-as-pedagogy."
