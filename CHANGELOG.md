@@ -7,6 +7,75 @@ minors.
 
 ## [Unreleased]
 
+## [v0.20.0] — 2026-05-11 — JS AST default-on + interface-dispatch precision + parity foundation
+
+Minor — the v0.20 theme is **multi-language coverage Tier 1 + the dead_code FP triangle's third leg + API drift gates.** JS files now extract through the pure-Go AST extractor by default (was opt-in via `PINCHER_EXPERIMENTAL_JS_AST=1`), surfacing classes with their methods, correctly classifying arrow-bound consts as Functions, and respecting ES2015+ export semantics. The `dead_code` precision arc that started in v0.18 (init/TestMain/main filter) and v0.19 (receiver-type field-method resolution) closes with interface-dispatch satisfaction analysis — methods reachable only via interface dispatch stop showing as dead. The HTTP REST gateway gets a parity gate so newly-added MCP tools can never silently disappear from the OpenAPI spec again.
+
+Schema v23 — adds the `interface_methods` table for the dead_code interface-reachability heuristic.
+
+### Added
+- **JS AST extractor flipped to default-on
+  ([#562](https://github.com/kwad77/pincher/issues/562),
+  [#563](https://github.com/kwad77/pincher/pull/563)).** Tier 1 of the
+  v0.20 multi-language coverage sequence. `.js` / `.mjs` / `.cjs` now
+  extract through `tdewolff/parse/v2/js` instead of the regex
+  extractor — produces Class symbols with their child Methods,
+  promotes arrow-bound consts (`const f = () => {}`) to the Function
+  kind, descends `const handlers = {onClick: () => {...}}` patterns
+  to surface object-method symbols, and applies ES2015+ module
+  semantics (only `export`-prefixed decls are exported). Opt-out via
+  `PINCHER_DISABLE_JS_AST=1`; the legacy `PINCHER_EXPERIMENTAL_JS_AST=0`
+  is honored for one release as a compat path. Both env vars go away
+  in v0.21.
+- **Interface-dispatch dead_code precision
+  ([#493](https://github.com/kwad77/pincher/issues/493),
+  [#564](https://github.com/kwad77/pincher/pull/564)).** Closes the
+  third leg of the dead_code FP triangle (after #423 receiver-type
+  field-method resolution in v0.19 and #492 init/TestMain/main filter
+  in v0.18). New `interface_methods` table populated from Go
+  Interface symbols' declared method-name sets (schema v23). The
+  dead_code SQL excludes Methods whose name matches any interface
+  method declared in the same project — cheap heuristic that
+  over-includes (a Method named String gets spared even if no
+  interface uses it) but the dead_code direction prefers
+  false-negatives over false-positives (suggesting deletion of a
+  method actually called via interface dispatch breaks runtime
+  silently). Cypher engine's `whereExpr.eval` family — the canonical
+  repro from #493 — stops showing as dead.
+- **OpenAPI spec dynamic from registered handlers + parity gate
+  ([#558](https://github.com/kwad77/pincher/issues/558) phase 1,
+  [#560](https://github.com/kwad77/pincher/pull/560)).** The
+  hardcoded 15-tool slice in `openAPISpec` was silently dropping 4
+  registered tools (`dead_code`, `guide`, `neighborhood`, `init`)
+  even though they were reachable via the generic `/v1/<tool>`
+  dispatcher — invisible to OpenAPI consumers (Postman imports,
+  Cursor, copilots). Spec now iterates `s.handlers` in sorted
+  order; per-tool description + InputSchema pulled from the
+  registered `mcp.Tool` so OpenAPI mirrors what the agent sees in
+  `tools/list`. New `TestOpenAPI_ParityWithRegisteredHandlers`
+  fails CI when a future tool is added without surfacing in the
+  spec.
+
+### Fixed
+- **JS AST extractor — four polish bugs blocking promote-to-default
+  ([#557](https://github.com/kwad77/pincher/pull/557)).** Arrow
+  functions and function expressions assigned to a binding now
+  promote the binding's kind to Function (was Variable, breaking
+  call-graph reachability); top-level decls only flag
+  `IsExported=true` when prefixed with `export` (ES2015+ semantics);
+  object-literal arrow methods (`onClick: (ev) => ...` — React
+  event-handler shape) now extract; same binding never double-emits
+  Function + Variable.
+
+### Schema
+- **v22 → v23**: new `interface_methods` table
+  `(project_id, interface_id, method_name)` PK with reverse-lookup
+  index on `(project_id, method_name)`. Cascade-deleted by
+  `DeleteSymbolsForFile`. No re-index required after upgrade — the
+  table is populated incrementally as files are re-extracted; the
+  next `pincher index --force` (or any per-file change picked up by
+  the watcher) populates the table for a project.
+
 ## [v0.19.0] — 2026-05-11 — receiver-type tracking + savings honesty
 
 Minor — the v0.19 theme is **deeper resolution + honest counters.** Receiver-type tracking lets `dead_code` stop false-positiving methods called via struct fields (the `Server.idx.Watch` family); the polymorphic-method blocklist (Close/String/Run) no longer over-drops calls when we know the receiver type. `_meta.baseline_method` makes every response state which Read it replaced — or honestly say "none" instead of fabricating a zero.
