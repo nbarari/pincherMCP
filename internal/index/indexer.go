@@ -1352,6 +1352,15 @@ func isPolymorphicInterfaceMethodName(name string) bool {
 	// errors.Is / errors.As / errors.Unwrap target methods
 	case "Is", "As", "Unwrap":
 		return true
+	// #567: `Run` is canonical for *exec.Cmd, *http.Server, *cron.Cron,
+	// goroutine pools, worker structs, lifecycle handlers — extremely
+	// common name. Without this, every `cmd.Run()` (`*exec.Cmd`) call
+	// in a Go project false-binds to any in-project Method named Run.
+	// The #423 receiver-type resolver can still bind same-package
+	// `s.runner.Run()` precisely via the struct_fields lookup, so the
+	// blocklist's side effect is largely contained.
+	case "Run":
+		return true
 	}
 	return false
 }

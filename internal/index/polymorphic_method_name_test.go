@@ -57,12 +57,16 @@ func TestIsPolymorphicInterfaceMethodName(t *testing.T) {
 		{"As", true},
 		{"Unwrap", true},
 
+		// #567: Run added — canonical for *exec.Cmd, *http.Server,
+		// goroutine pools, lifecycle handlers. Flipped from `false`
+		// in v0.21.0 after dogfood surfaced cmd.Run() false-binds.
+		{"Run", true},
+
 		// Project-specific names should NOT be filtered.
 		{"UpsertProject", false},
 		{"BulkUpsertSymbols", false},
 		{"Index", false},
 		{"Extract", false},
-		{"Run", false},
 		{"resolveCalls", false},
 		// Empty string — defensive.
 		{"", false},
