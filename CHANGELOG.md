@@ -7,6 +7,35 @@ minors.
 
 ## [Unreleased]
 
+## [v0.15.1] — 2026-05-11 — FTS5 sanitizer hardening
+
+Patch — extends `sanitizeFTS5Query` (added by #289) to cover the full
+family of FTS5-special characters that were still raising raw
+`fts5: syntax error` to callers.
+
+### Fixed
+- **FTS5 sanitizer covers parens, slash, at-sign, brackets, braces,
+  comma, `!`, `?`, apostrophe, and bare boolean operators
+  ([#424](https://github.com/kwad77/pincher/issues/424)).** Common
+  search shapes that used to crash with `SQL logic error: fts5: syntax
+  error near "..."`:
+  - Call expressions: `parse(query)`, `http.Get(`, `json.Marshal(rows)`
+  - MCP method names / paths: `notifications/tools/list_changed`, `pkg/sub`
+  - Annotations / decorators: `@deprecated`, `@Component`, `@Override`
+  - Boolean prose: `handle AND NOT context`, `foo OR bar`
+  - Apostrophe inside tokens: `don't`
+
+  Per-token wrap now triggers on any of `(`, `)`, `,`, `[`, `]`, `{`,
+  `}`, `@`, `!`, `?`, `/`, `'` anywhere in the token (in addition to
+  `.`, `-`, `:` between alphanumerics from #289 / #356). When a bare
+  uppercase FTS5 boolean operator (`NOT`, `AND`, `OR`) appears as a
+  standalone token in a multi-token query, the entire query is
+  phrase-wrapped so FTS5's operator parser stays out of it. Apostrophes
+  inside wrapped spans are stripped to avoid the `unterminated string`
+  case. Already-quoted queries (`"login flow"`) still pass through
+  verbatim; lowercase `and`/`or` aren't FTS5 operators and pass through
+  unchanged.
+
 ## [v0.15.0] — 2026-05-10 — Autoresearcher dogfood loop enablers
 
 Headline: three precision wins that make the autoresearcher dogfood loop

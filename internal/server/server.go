@@ -2848,23 +2848,34 @@ func verifyEmptySearchCause(
 }
 
 // sanitizeFTS5Query auto-quotes whitespace-separated tokens that
-// contain characters FTS5 treats as syntactic (`.`, `-`). Without this,
-// natural identifier queries like `os.Stat` or `my-component` raise a
-// raw "fts5: syntax error" the caller can't recover from without
-// learning FTS5 quoting (#289).
+// contain characters FTS5 treats as syntactic. Without this, natural
+// identifier queries like `os.Stat`, `parse(query)`, or `@deprecated`
+// raise a raw "fts5: syntax error" the caller can't recover from
+// without learning FTS5 quoting (#289, #424).
 //
-// The function is intentionally conservative — it only wraps a token
-// when an alphanumeric character sits on both sides of the special
-// char (`os.Stat`, `my-component`). That preserves:
+// Two passes:
+//
+//  1. Per-token wrapping for chars that are illegal inside a bare
+//     token but harmless inside a phrase quote: `.`, `-`, `:` (between
+//     alphanumerics), plus `(`, `)`, `,`, `[`, `]`, `{`, `}`, `@`,
+//     `!`, `?`, `/`, `'` anywhere in the token (#424).
+//
+//  2. Whole-query wrapping when a bare FTS5 boolean operator (NOT,
+//     AND, OR — uppercase, FTS5 is case-sensitive) appears as a
+//     standalone token in a multi-token query. That's the only
+//     reliable signal the user typed "handle AND NOT context" as
+//     prose rather than as an operator expression. We quote the whole
+//     thing as a phrase rather than try to surgically wrap operators —
+//     a phrase search of the original text is what the user wanted.
+//
+// Preserved as-is:
 //   - Explicit quoted phrases ("login flow") — early return on the
-//     first `"` so anything quoted is passed through verbatim.
+//     first `"` so anything quoted passes through verbatim.
 //   - Wildcards (`auth*`, `os.Stat*` becomes `"os.Stat"*`).
-//   - Column-prefix syntax (`name:value`, `kind:Function` — the colon
-//     is FTS5-legitimate, only `.` and `-` get wrapped).
-//   - Boolean operators (AND, OR, NOT) — those are bare keywords with
-//     no special chars, so they don't match the wrap predicate.
-//   - Already-correct queries with no special chars (most identifier
-//     searches).
+//   - Column-prefix syntax (`name:value`) — the colon between
+//     alphanumerics gets wrapped per token, which is fine; intentional
+//     `colname:term` with no alphanum-colon-alphanum gap survives.
+//   - Already-correct queries with no special chars.
 func sanitizeFTS5Query(q string) string {
 	if q == "" {
 		return q
@@ -2875,6 +2886,13 @@ func sanitizeFTS5Query(q string) string {
 		return q
 	}
 	tokens := strings.Fields(q)
+	if len(tokens) > 1 && containsBareFTS5Operator(tokens) {
+		// Phrase-wrap the whole query so FTS5's operator parser stays
+		// out of it. Strip apostrophes — they'd terminate the phrase
+		// otherwise (#424 unterminated-string repro).
+		safe := strings.ReplaceAll(q, `'`, "")
+		return `"` + safe + `"`
+	}
 	for i, tok := range tokens {
 		tokens[i] = wrapTokenIfNeeded(tok)
 	}
@@ -2882,9 +2900,10 @@ func sanitizeFTS5Query(q string) string {
 }
 
 // wrapTokenIfNeeded returns tok wrapped in FTS5 phrase quotes if it
-// contains a `.` or `-` between alphanumerics. Strips a trailing `*`
-// before testing and re-adds it so prefix queries (`os.Stat*`) keep
-// working. Returns tok unchanged otherwise.
+// contains an FTS5-special character. Strips a trailing `*` before
+// testing and re-adds it so prefix queries (`os.Stat*`) keep working.
+// Apostrophes inside the wrapped span are stripped so they don't
+// terminate the phrase (#424).
 func wrapTokenIfNeeded(tok string) string {
 	suffix := ""
 	core := tok
@@ -2895,23 +2914,46 @@ func wrapTokenIfNeeded(tok string) string {
 	if !needsQuoting(core) {
 		return tok
 	}
+	core = strings.ReplaceAll(core, `'`, "")
 	return `"` + core + `"` + suffix
 }
 
 func needsQuoting(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	// Chars that are FTS5-syntactic anywhere in the token — parens
+	// open/close groups, slash splits paths, @ is reserved, ! and ?
+	// were proposed in #424, brackets/braces/comma all crash bare. An
+	// apostrophe alone opens a phrase and crashes with unterminated
+	// string. Wrapping in a phrase quote neutralises all of these.
+	if strings.ContainsAny(s, "()[]{},/@!?'") {
+		return true
+	}
+	// `.`, `-`, `:` only matter when they sit between alphanumerics —
+	// `os.Stat`, `my-component`, `localhost:8080`. A bare `.` or `:`
+	// at an edge is usually intentional (wildcard or column prefix).
 	if len(s) < 3 {
 		return false
 	}
 	for i := 1; i < len(s)-1; i++ {
-		// #289 added `.` and `-`; #356 adds `:` (FTS5 treats it as
-		// column-prefix syntax: `colname:term`). When the colon sits
-		// between alphanumerics in user input it's almost always a
-		// path/port/key separator (e.g. `localhost:8080`, `mod:fn`,
-		// YAML key paths), not an FTS5 column lookup.
 		if s[i] == '.' || s[i] == '-' || s[i] == ':' {
 			if isAlphanum(s[i-1]) && isAlphanum(s[i+1]) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// containsBareFTS5Operator reports whether any token in tokens is a
+// standalone uppercase FTS5 boolean operator (NOT, AND, OR). FTS5
+// treats these as operators only when uppercase and unquoted, so the
+// match is case-sensitive and exact.
+func containsBareFTS5Operator(tokens []string) bool {
+	for _, t := range tokens {
+		if t == "NOT" || t == "AND" || t == "OR" {
+			return true
 		}
 	}
 	return false

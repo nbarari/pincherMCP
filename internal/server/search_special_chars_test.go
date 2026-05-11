@@ -41,9 +41,38 @@ func TestSanitizeFTS5Query_DottedIdentifier(t *testing.T) {
 		{"flushBuffers", "flushBuffers"},
 		{"auth*", "auth*"},
 
-		// Boolean operators: no `.` or `-`, untouched.
-		{"foo OR bar", "foo OR bar"},
-		{"NOT foo", "NOT foo"},
+		// #424: bare uppercase boolean operators in a multi-token query
+		// trigger the FTS5 operator parser and crash on malformed
+		// expressions. The sanitizer now phrase-wraps the whole query
+		// so it searches as literal text. Single-token NOT/AND/OR pass
+		// through (FTS5 accepts those alone).
+		{"foo OR bar", `"foo OR bar"`},
+		{"NOT foo", `"NOT foo"`},
+		{"handle AND NOT context", `"handle AND NOT context"`},
+		{"NOT", "NOT"},
+		// Lowercase booleans aren't FTS5 operators — pass through.
+		{"foo or bar", "foo or bar"},
+		{"foo and bar", "foo and bar"},
+
+		// #424: parens, slash, at-sign, brackets, braces, comma, !, ?
+		// — these all crash bare in FTS5; phrase-wrap them.
+		{"parse(query)", `"parse(query)"`},
+		{"http.Get(", `"http.Get("`},
+		{"json.Marshal(rows)", `"json.Marshal(rows)"`},
+		{"notifications/tools/list_changed", `"notifications/tools/list_changed"`},
+		{"pkg/sub", `"pkg/sub"`},
+		{"@deprecated", `"@deprecated"`},
+		{"@Component", `"@Component"`},
+		{"foo,bar", `"foo,bar"`},
+		{"arr[0]", `"arr[0]"`},
+		{"map{k}", `"map{k}"`},
+		{"foo!", `"foo!"`},
+		{"foo?", `"foo?"`},
+
+		// #424: apostrophe inside a token used to crash with
+		// "unterminated string". Now it's stripped from the wrapped span.
+		{"don't", `"dont"`},
+		{"user's input", `"users" input`},
 
 		// #356: colon-separated identifiers get wrapped — FTS5 treats
 		// `colname:term` as a column-prefix lookup, but the FTS5 vtab
