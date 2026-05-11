@@ -59,6 +59,26 @@ func TestSortTraceCandidates_ProductionBeatsTest(t *testing.T) {
 	}
 }
 
+// #398: testdata/ fixtures must rank below production code AND below
+// real test files. The motivating bug: `trace name=Open` resolved to
+// `testdata/corpus/go-project/internal/auth/auth.go::auth.Open` instead
+// of the real `db.Open`, because the fixture and the real symbol had
+// the same kind (Function) and the path filter only knew about
+// scratch + test, not testdata fixtures.
+func TestSortTraceCandidates_ProductionBeatsFixture(t *testing.T) {
+	syms := []db.Symbol{
+		{ID: "testdata/corpus/go-project/internal/auth/auth.go::auth.Open#Function",
+			Name: "Open", FilePath: "testdata/corpus/go-project/internal/auth/auth.go",
+			Kind: "Function"},
+		{ID: "internal/db/db.go::db.Open#Function",
+			Name: "Open", FilePath: "internal/db/db.go", Kind: "Function"},
+	}
+	sortTraceCandidates(syms)
+	if syms[0].FilePath != "internal/db/db.go" {
+		t.Errorf("top file = %q, want internal/db/db.go (production beats fixture)", syms[0].FilePath)
+	}
+}
+
 // All-test result still works (the test helpers ARE the only
 // matches; resolve to one of them, in stable order).
 func TestSortTraceCandidates_AllTestStableOrder(t *testing.T) {

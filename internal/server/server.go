@@ -484,10 +484,17 @@ func sortTraceCandidates(syms []db.Symbol) {
 		}
 	}
 	pathRank := func(p string) int {
-		// scratch and test files rank below production. Two buckets:
-		// scratch (worst, dev pollution) and test (still legitimate
-		// but secondary).
+		// scratch, fixture, and test files all rank below production
+		// code. Order:
+		//   - scratch (worst, dev pollution; #275)
+		//   - testdata fixtures (#393/#398: e.g. testdata/corpus/...
+		//     declares package main and trips name-collision with
+		//     real symbols like `Open` / `Run` / `main`)
+		//   - test (still legitimate code, just secondary)
 		if isDeveloperScratchPath(p) {
+			return 3
+		}
+		if isTestFixturePath(p) {
 			return 2
 		}
 		if isTestFile(p) {
@@ -1683,7 +1690,7 @@ func (s *Server) registerTools() {
 	// 7. trace
 	s.addTool(&mcp.Tool{
 		Name:        "trace",
-		Description: "**Use before changing behaviour** that other code depends on, to find callers (inbound) or what it calls (outbound). Risk labels: CRITICAL=direct callers, HIGH=2 hops, MEDIUM=3 hops. Use `search` first to confirm the exact function name; ambiguous names fall back to the first match (use `changes` if you have an exact symbol ID instead). Default traversal follows CALLS-family edges; pass `kinds=READS,WRITES` to trace data-flow edges instead (or `kinds=CALLS,READS` to mix).",
+		Description: "**Use before changing behaviour** that other code depends on, to find callers (inbound) or what it calls (outbound). Risk labels: CRITICAL=direct callers, HIGH=2 hops, MEDIUM=3 hops. Use `search` first to confirm the exact function name; ambiguous names fall back to the first match (use `changes` if you have an exact symbol ID instead). Default traversal follows CALLS-family edges; pass `kinds=READS,WRITES` to trace data-flow edges instead (or `kinds=CALLS,READS` to mix). Test files and testdata/ fixtures are filtered by default; pass `include_tests=true` to see test coverage of a symbol.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["name"],"properties":{
 				"name":{"type":"string","description":"Function name to trace (short name, e.g. 'ProcessOrder')"},
@@ -1692,7 +1699,8 @@ func (s *Server) registerTools() {
 				"depth":{"type":"integer","description":"BFS depth 1-5 (default 3)"},
 				"risk":{"type":"boolean","description":"Add CRITICAL/HIGH/MEDIUM/LOW risk labels (default true)"},
 				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Hops whose target symbol scores below the threshold are excluded from the result."},
-				"kinds":{"type":"string","description":"Comma-separated list of edge kinds to traverse (e.g. 'CALLS' or 'READS,WRITES'). Default: CALLS-family (CALLS,HTTP_CALLS,ASYNC_CALLS) — covers the typical 'who calls this' use case. Pass READS / WRITES (Go vars only, see #264/#265) to follow data-flow edges. Whitespace and case-insensitive."}
+				"kinds":{"type":"string","description":"Comma-separated list of edge kinds to traverse (e.g. 'CALLS' or 'READS,WRITES'). Default: CALLS-family (CALLS,HTTP_CALLS,ASYNC_CALLS) — covers the typical 'who calls this' use case. Pass READS / WRITES (Go vars only, see #264/#265) to follow data-flow edges. Whitespace and case-insensitive."},
+				"include_tests":{"type":"boolean","description":"If true, surface hops in test files (*_test.go, *.spec.ts, etc.) and testdata/ fixtures. Default false — tests flood inbound traces on hotspots without orientation value, so they're filtered like architecture's hotspot list. Set true when you genuinely want to see a symbol's test coverage."}
 			}
 		}`),
 	}, s.handleTrace)
@@ -3234,6 +3242,16 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	depth := intArg(args, "depth", 3)
 	addRisk := boolArgDefault(args, "risk", true)
 	minConfidence := floatArg(args, "min_confidence", 0.0)
+	// #398: by default, drop hops in *_test.go and testdata/__fixtures__/
+	// paths. Mirrors the architecture filter (#305 + #393): test
+	// files have legitimate inbound edges from every test that
+	// touches them but flood the BFS output with low-signal hops
+	// (a single trace on a hotspot returns 100+ test functions).
+	// Fixture paths (testdata/corpus/...) are worse: those symbols
+	// aren't real code, just inputs to pincher's own snapshot tests.
+	// `include_tests=true` opts back into the legacy mixed list when
+	// the caller actually wants to see test coverage of a symbol.
+	includeTests := boolArg(args, "include_tests")
 
 	// kinds: comma-separated list of edge kinds to traverse (e.g.
 	// "CALLS" or "READS,WRITES"). Empty/missing = default (CALLS
@@ -3282,22 +3300,22 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 
 	// Filter by min_confidence — drop hops whose target falls below threshold.
 	// Always collect confidences for the response distribution (regardless of
-	// whether the threshold filter is active).
+	// whether the threshold filter is active). #398: also filter test +
+	// fixture hops by default; these flood inbound traces on hotspots
+	// without adding orientation value.
 	confs := make([]float64, 0, len(hops))
-	if minConfidence > 0 {
-		filtered := hops[:0]
-		for _, h := range hops {
-			if h.Symbol.ExtractionConfidence >= minConfidence {
-				filtered = append(filtered, h)
-				confs = append(confs, h.Symbol.ExtractionConfidence)
-			}
+	filtered := hops[:0]
+	for _, h := range hops {
+		if minConfidence > 0 && h.Symbol.ExtractionConfidence < minConfidence {
+			continue
 		}
-		hops = filtered
-	} else {
-		for _, h := range hops {
-			confs = append(confs, h.Symbol.ExtractionConfidence)
+		if !includeTests && (isTestFile(h.Symbol.FilePath) || isTestFixturePath(h.Symbol.FilePath)) {
+			continue
 		}
+		filtered = append(filtered, h)
+		confs = append(confs, h.Symbol.ExtractionConfidence)
 	}
+	hops = filtered
 
 	// Group by depth
 	byDepth := make(map[int][]map[string]any)
