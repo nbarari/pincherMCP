@@ -1279,12 +1279,14 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 		return 0
 	}
 
-	// QN cache: maps the qualified name to a (id, isVariable) pair so we
-	// can distinguish the "looked up but not a Variable" case from the
-	// "never looked up" case without re-querying.
+	// QN cache: maps the qualified name to (id, language, isVariable).
+	// language is needed for #436 — same-language scoping prevents Go
+	// references to common identifiers (`path`, `result`, `fs`) from
+	// binding to JS / Python locals that happen to share the name.
 	type lookup struct {
-		id     string
-		isVar  bool
+		id    string
+		lang  string
+		isVar bool
 	}
 	qnCache := make(map[string]lookup)
 	lookupQN := func(qn string) lookup {
@@ -1299,35 +1301,45 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 			qnCache[qn] = lookup{}
 			return lookup{}
 		}
-		v := lookup{id: syms[0].ID, isVar: syms[0].Kind == "Variable"}
+		v := lookup{id: syms[0].ID, lang: syms[0].Language, isVar: syms[0].Kind == "Variable"}
 		qnCache[qn] = v
 		return v
 	}
 
-	nameCache := make(map[string]lookup)
-	lookupName := func(name string) lookup {
+	// Name lookups are scoped to the source language. Cache key includes
+	// the language so two source languages asking for the same name
+	// don't collide on the cached entry from the first one in.
+	type nameKey struct{ name, lang string }
+	nameCache := make(map[nameKey]lookup)
+	lookupNameInLang := func(name, lang string) lookup {
 		if name == "" {
 			return lookup{}
 		}
-		if v, ok := nameCache[name]; ok {
+		k := nameKey{name: name, lang: lang}
+		if v, ok := nameCache[k]; ok {
 			return v
 		}
-		// Variable matches preferred — pull a small batch and pick the
-		// first Variable. Falls back to the first hit when no Variable
-		// is in the result set; that hit fails the isVar gate below.
-		syms, err := idx.store.GetSymbolsByName(projectID, name, 5)
+		syms, err := idx.store.GetSymbolsByName(projectID, name, 10)
 		if err != nil || len(syms) == 0 {
-			nameCache[name] = lookup{}
+			nameCache[k] = lookup{}
 			return lookup{}
 		}
-		v := lookup{id: syms[0].ID, isVar: syms[0].Kind == "Variable"}
+		// #436: only match symbols of the same language as the source.
+		// Variable matches preferred within that scoped set.
+		var v lookup
 		for _, s := range syms {
+			if lang != "" && s.Language != lang {
+				continue
+			}
 			if s.Kind == "Variable" {
-				v = lookup{id: s.ID, isVar: true}
+				v = lookup{id: s.ID, lang: s.Language, isVar: true}
 				break
 			}
+			if v.id == "" {
+				v = lookup{id: s.ID, lang: s.Language, isVar: false}
+			}
 		}
-		nameCache[name] = v
+		nameCache[k] = v
 		return v
 	}
 
@@ -1337,16 +1349,28 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 		from := lookupQN(e.FromQN)
 		fromID := from.id
 		if fromID == "" && !strings.Contains(e.FromQN, ".") {
-			fromID = lookupName(e.FromQN).id
+			// From-side name lookup — no language scope yet (we're
+			// trying to discover it). The from symbol's language
+			// becomes the gate for the to-side lookup below.
+			from = lookupNameInLang(e.FromQN, "")
+			fromID = from.id
 		}
 		if fromID == "" {
 			continue
 		}
 		to := lookupQN(e.ToName)
 		if to.id == "" && !strings.Contains(e.ToName, ".") {
-			to = lookupName(e.ToName)
+			to = lookupNameInLang(e.ToName, from.lang)
 		}
+		// #436: belt-and-suspenders — even when QN matched, drop the
+		// edge if the target is a different language than the source.
+		// QN matches across languages can happen for short namespace
+		// segments (`util`, `index`) that look identical when lifted
+		// to the qualified-name table.
 		if to.id == "" || !to.isVar || fromID == to.id {
+			continue
+		}
+		if from.lang != "" && to.lang != "" && from.lang != to.lang {
 			continue
 		}
 		// Dedupe key includes the edge kind so a function that BOTH
