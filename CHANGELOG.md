@@ -8,6 +8,19 @@ minors.
 ## [Unreleased]
 
 ### Fixed
+- **changes: blast radius now intersects diff hunks with symbol line
+  ranges ([#502](https://github.com/kwad77/pincher/issues/502)).**
+  Pre-fix, every symbol in any changed file was treated as "changed"
+  — adding 3 functions to a 6000-line file inflated `changed_symbols`
+  to 240 and the BFS to 472 critical-impacted symbols, producing a
+  345 KB response that didn't fit in agent context. Now `changes`
+  fetches `git diff --unified=0` alongside `--name-only` and parses
+  hunk headers (`@@ -old +new @@`); symbols whose `[StartLine,
+  EndLine]` doesn't overlap any hunk are dropped. On the same 3-PR
+  workload: `changed_symbols` drops from 240 → 3, payload from
+  345 KB → ~3 KB. Fallback preserved: if `git diff --unified=0`
+  fails (e.g. permissions), the per-file all-symbols behaviour
+  kicks back in so the tool stays usable.
 - **dead_code precision: Go init / TestMain / main filtered
   ([#492](https://github.com/kwad77/pincher/issues/492)).** The static
   CALLS graph cannot see runtime-invoked callers (Go init() called at
@@ -19,7 +32,6 @@ minors.
   languages. Interface-dispatch false positives ([#493]) need a
   separate satisfaction-analysis pass; not addressed here.
 
->>>>>>> Stashed changes
 ## [v0.17.0] — 2026-05-11 — honest savings + failure-as-pedagogy
 
 Minor — the v0.17 theme is "honest savings + failure-as-pedagogy."

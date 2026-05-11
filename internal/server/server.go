@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3995,14 +3996,41 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 	// Parse changed files from diff
 	changedFiles := parseGitDiffFiles(diffOutput)
 
-	// Find symbols in changed files
+	// #502: also fetch the unified diff so per-file hunk ranges can
+	// intersect each symbol's [StartLine, EndLine]. Pre-fix, every
+	// symbol in any changed file was treated as "changed" — adding
+	// one function to a 6000-line file expanded the blast radius BFS
+	// to half the codebase. The hunk fetch is best-effort: on error
+	// we fall back to the pre-#502 behaviour (all symbols in changed
+	// files) so the tool stays usable when git options change shape.
+	hunkDiff, hunkErr := runGitDiffHunks(root, scope)
+	var hunksByFile map[string][][2]int
+	if hunkErr == nil {
+		hunksByFile = parseGitDiffHunks(hunkDiff)
+	}
+
+	// Find symbols in changed files. When we have hunks for a file,
+	// keep only symbols whose line range overlaps an actual edit.
+	// When hunks aren't available for a file (untracked content,
+	// rename without content change, parse miss), fall back to
+	// "all symbols in file" — better to over-report than under-report
+	// for the safety-check use case.
 	var changedSymbols []db.Symbol
 	for _, f := range changedFiles {
 		syms, err := s.store.GetSymbolsForFile(projectID, f)
 		if err != nil {
 			continue
 		}
-		changedSymbols = append(changedSymbols, syms...)
+		hunks, hasHunks := hunksByFile[f]
+		if !hasHunks || len(hunks) == 0 {
+			changedSymbols = append(changedSymbols, syms...)
+			continue
+		}
+		for _, sym := range syms {
+			if symbolOverlapsHunks(sym.StartLine, sym.EndLine, hunks) {
+				changedSymbols = append(changedSymbols, sym)
+			}
+		}
 	}
 
 	// BFS trace for blast radius. Use TraceByID so a changed `Run` /
@@ -6413,6 +6441,134 @@ func runGitLsUntracked(root string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// runGitDiffHunks returns the unified-diff text for the same scope as
+// runGitDiff, but WITHOUT --name-only. The output retains hunk headers
+// (`@@ -old,N +new,M @@`) so parseGitDiffHunks can extract per-file
+// changed-line ranges (#502 — fixes blast-radius inflation when a
+// single-function edit lives in a 6000-line file).
+//
+// scope handling mirrors runGitDiff so the two stay in lockstep.
+// Untracked files don't appear in the unified diff (git can't compare
+// against nothing); for scope='all' we emit them as full-file ranges
+// upstream so the symbol intersection still includes their symbols.
+func runGitDiffHunks(root, scope string) (string, error) {
+	if strings.HasPrefix(scope, "base:") {
+		branch := strings.TrimPrefix(scope, "base:")
+		if err := validateGitRefName(branch); err != nil {
+			return "", fmt.Errorf("invalid base branch %q: %w", branch, err)
+		}
+		// rev-parse --verify already done by runGitDiff before this
+		// path is reached; skip the duplicate check.
+		cmd := exec.Command("git", "diff", "--unified=0", branch+"...HEAD")
+		cmd.Dir = root
+		out, err := cmd.Output()
+		return string(out), err
+	}
+	args := []string{"diff", "--unified=0"}
+	switch scope {
+	case "", "unstaged":
+	case "staged":
+		args = append(args, "--cached")
+	case "all":
+		args = append(args, "HEAD")
+	default:
+		return "", fmt.Errorf("unknown scope %q; must be unstaged / staged / all / base:<branch>", scope)
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// parseGitDiffHunks parses unified-diff output into per-file changed-line
+// ranges (#502). Returns map keyed by file path. Each hunk emits a
+// half-open [start, end] range using the NEW-side line numbers (the
+// `+new,M` half of the @@ header) since the symbol's StartLine /
+// EndLine are post-edit byte offsets.
+//
+// Hunks with N=0 (pure deletions) still emit a single-line range at
+// the new-side cursor position so a symbol whose function body just
+// got a line removed shows up.
+//
+// Skips hunks at line 0 (file creation marker) and ignores binary diffs.
+func parseGitDiffHunks(diff string) map[string][][2]int {
+	out := map[string][][2]int{}
+	var currentFile string
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++ b/"):
+			currentFile = strings.TrimPrefix(line, "+++ b/")
+		case strings.HasPrefix(line, "+++ "):
+			// Some renames or new files; strip whatever prefix git used.
+			currentFile = strings.TrimPrefix(line, "+++ ")
+			currentFile = strings.TrimPrefix(currentFile, "b/")
+		case strings.HasPrefix(line, "@@"):
+			if currentFile == "" {
+				continue
+			}
+			start, count := parseHunkHeader(line)
+			if start <= 0 {
+				continue
+			}
+			end := start + count - 1
+			if count == 0 {
+				end = start
+			}
+			out[currentFile] = append(out[currentFile], [2]int{start, end})
+		}
+	}
+	return out
+}
+
+// parseHunkHeader extracts the +new,N portion of a unified-diff hunk
+// header. Returns (startLine, lineCount). On parse failure returns
+// (0, 0) so the caller can skip the hunk gracefully.
+//
+// Hunk header shape: `@@ -oldstart[,oldcount] +newstart[,newcount] @@`
+// When ,N is omitted, the count defaults to 1 per the unified-diff spec.
+func parseHunkHeader(header string) (int, int) {
+	plus := strings.Index(header, "+")
+	if plus < 0 {
+		return 0, 0
+	}
+	rest := header[plus+1:]
+	end := strings.Index(rest, " ")
+	if end < 0 {
+		return 0, 0
+	}
+	spec := rest[:end] // e.g. "123,7" or "123"
+	parts := strings.SplitN(spec, ",", 2)
+	start, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0
+	}
+	count := 1
+	if len(parts) == 2 {
+		c, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return start, 1
+		}
+		count = c
+	}
+	return start, count
+}
+
+// symbolOverlapsHunks returns true when [symStart, symEnd] intersects
+// any [hunkStart, hunkEnd] range in hunks. Used by handleChanges to
+// drop unchanged sibling symbols in a partially-edited file (#502).
+//
+// Empty hunks slice → return false (the file appears in the diff but
+// no extractable hunks; safer to treat as "no symbols touched" than
+// to retain the pre-#502 noise).
+func symbolOverlapsHunks(symStart, symEnd int, hunks [][2]int) bool {
+	for _, h := range hunks {
+		if symStart <= h[1] && symEnd >= h[0] {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGitDiffFiles(diff string) []string {
