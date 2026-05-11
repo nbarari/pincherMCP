@@ -6184,6 +6184,18 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 		go s.flushSession()
 	}
 
+	// #494: occasional dopamine. Cumulative all-time tokens_saved =
+	// previously-flushed sessions + this in-flight session's running
+	// total (statsTokensSaved). Without the in-flight component, the
+	// celebration would lag by 10s (next flushSession tick), which is
+	// long enough to land on a different unrelated tool call. Adding
+	// it surfaces the milestone on the response that actually crossed
+	// it. MaybeFireCelebration's PRIMARY KEY guarantees one-shot per
+	// installation.
+	if cel := s.maybeFormatCelebration(); cel != "" {
+		meta["celebration"] = cel
+	}
+
 	out, _ := json.MarshalIndent(data, "", "  ")
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
@@ -6197,6 +6209,41 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// this is a single os.Getenv check — sub-µs.
 	s.checkAutoRestart()
 	return result
+}
+
+// maybeFormatCelebration consults the store for a one-shot threshold
+// crossing (#494) and returns a one-line celebration string when fired.
+// Empty string on no crossing or any error — celebrations are best-effort,
+// never fail a tool response over them.
+//
+// "Cumulative" = persisted sessions + the in-flight session's atomic
+// counter. The persisted-only path lags by up to 10s (flushSession
+// ticker) which would land the celebration on a stale tool call. Adding
+// the in-flight delta gives the milestone to the response that actually
+// crossed the line.
+func (s *Server) maybeFormatCelebration() string {
+	if s.store == nil {
+		return ""
+	}
+	_, _, persisted, _, err := s.store.GetAllTimeSavings()
+	if err != nil {
+		return ""
+	}
+	cumulative := persisted + atomic.LoadInt64(&s.statsTokensSaved)
+	threshold, fired, err := s.store.MaybeFireCelebration(cumulative)
+	if err != nil || !fired {
+		return ""
+	}
+	return formatCelebration(threshold, cumulative)
+}
+
+// formatCelebration produces the human-readable one-liner for a
+// celebration. Pure function — easy to unit-test independently of the
+// store. No $-figures (#476 SAVINGS_HONESTY): we don't know the user's
+// model or pricing, and the token number is the dopamine carrier.
+func formatCelebration(threshold, cumulativeTokensSaved int64) string {
+	return fmt.Sprintf("🎯 Pincher has saved you %s tokens (just crossed %s) — that's the loop working.",
+		humanInt(int(cumulativeTokensSaved)), humanInt(int(threshold)))
 }
 
 // textResultWithMeta performs the same session accounting as jsonResultWithMeta

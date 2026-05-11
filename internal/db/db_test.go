@@ -458,6 +458,7 @@ var writerRoutedStoreMethods = map[string]bool{
 	"DeleteSymbolsForFile":     true,
 	"BulkUpsertEdges":            true,
 	"DeleteEdgesByKindAndSource": true,
+	"MaybeFireCelebration":       true,
 	"ReplacePendingEdgesForFile": true,
 	"DeletePendingEdgesForFile":  true,
 	"RecordSymbolMove":         true,

@@ -967,6 +967,19 @@ END;`,
 	// thereafter.
 	`ALTER TABLE edges ADD COLUMN source TEXT NOT NULL DEFAULT 'per_file';
 	CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(project_id, kind, source);`,
+
+	// v20 → v21: celebrations — one-shot record of cumulative
+	// tokens_saved milestones (#494). Each threshold (100k, 500k,
+	// 1M, 5M, 10M, 50M, 100M, 500M, 1B) fires exactly once per
+	// installation, ever. PRIMARY KEY on threshold_tokens is the
+	// one-shot guarantee — INSERT OR IGNORE on race. Tracked
+	// globally (not per-project) because the sessions table is
+	// project-agnostic and "you've saved a million tokens" reads
+	// better than "you've saved a million tokens on this repo".
+	`CREATE TABLE IF NOT EXISTS celebrations (
+		threshold_tokens INTEGER NOT NULL PRIMARY KEY,
+		fired_at         INTEGER NOT NULL
+	)`,
 }
 
 // migrate applies the baseline schema then runs any pending numbered migrations.
@@ -3449,6 +3462,60 @@ func (s *Store) GetAllTimeSavings() (calls, tokensUsed, tokensSaved int64, costA
 		 FROM sessions`,
 	).Scan(&calls, &tokensUsed, &tokensSaved, &costAvoided)
 	return
+}
+
+// CelebrationThresholds is the ordered list of cumulative-tokens-saved
+// milestones (#494). 5× spacing between tiers means crossings are
+// inherently rare — natural pacing without an artificial daily timer.
+// A given threshold fires exactly once per installation, ever
+// (enforced by celebrations.threshold_tokens PRIMARY KEY).
+var CelebrationThresholds = []int64{
+	100_000,
+	500_000,
+	1_000_000,
+	5_000_000,
+	10_000_000,
+	50_000_000,
+	100_000_000,
+	500_000_000,
+	1_000_000_000,
+}
+
+// MaybeFireCelebration finds the highest CelebrationThresholds entry
+// at or below cumulativeTokensSaved that has NOT yet been celebrated,
+// records it as fired, and returns it. Returns (0, false, nil) when
+// nothing new to celebrate. INSERT OR IGNORE makes this safe under
+// concurrent tool-call races: only one caller wins the row, the rest
+// observe `affected==0` and report "no celebration".
+//
+// Caller is expected to format the human-readable string from the
+// returned threshold. Keeping formatting out of the store keeps the
+// DB layer free of UI strings.
+func (s *Store) MaybeFireCelebration(cumulativeTokensSaved int64) (threshold int64, fired bool, err error) {
+	// Find highest threshold ≤ cumulative that is NOT in celebrations.
+	var candidate int64
+	for i := len(CelebrationThresholds) - 1; i >= 0; i-- {
+		if CelebrationThresholds[i] <= cumulativeTokensSaved {
+			candidate = CelebrationThresholds[i]
+			break
+		}
+	}
+	if candidate == 0 {
+		return 0, false, nil
+	}
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO celebrations(threshold_tokens, fired_at) VALUES(?, ?)`,
+		candidate, time.Now().Unix(),
+	)
+	if err != nil {
+		return 0, false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Already fired — race or repeat call.
+		return 0, false, nil
+	}
+	return candidate, true, nil
 }
 
 // GetAllTimeCallsByLanguage returns the cumulative per-language call

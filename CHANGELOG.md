@@ -7,6 +7,19 @@ minors.
 
 ## [Unreleased]
 
+### Added
+- **Occasional milestone celebration in `_meta`
+  ([#494](https://github.com/kwad77/pincher/issues/494)).** Tool
+  responses now surface a one-line `_meta.celebration` when cumulative
+  all-time `tokens_saved` crosses a tier
+  (100k / 500k / 1M / 5M / 10M / 50M / 100M / 500M / 1B). Each tier
+  fires exactly once per installation (persisted in a new
+  `celebrations` table, schema v21). When a single huge call vaults
+  past multiple tiers, only the highest one fires — no spam. 5×
+  spacing means real milestones, not nagging. The dopamine layer
+  iter-4 promised, scoped down to the single feature that fits in
+  the existing `_meta` envelope.
+
 ### Fixed
 - **All tools: unknown args surface in `_meta.warnings` instead of
   silent ignore ([#499](https://github.com/kwad77/pincher/issues/499)).**
