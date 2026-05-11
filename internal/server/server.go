@@ -1654,7 +1654,7 @@ func (s *Server) registerTools() {
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["query"],"properties":{
 				"query":{"type":"string","description":"FTS5 search query. Supports: prefix (auth*), phrase (\"login flow\"), AND/OR."},
-				"project":{"type":"string"},
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project. Pass '*' to search across every indexed project (cross-repo lookups)."},
 				"kind":{"type":"string","description":"Filter by symbol kind: Function|Method|Class|Interface|Enum|Type|Variable|Module|Setting|Section|Document|Resource|DataSource|Output|Local|Provider|Block"},
 				"language":{"type":"string","description":"Filter by language: Go|Python|TypeScript|HCL|YAML|Markdown|etc"},
 				"corpus":{"type":"string","enum":["","code","config","docs"],"description":"FTS5 corpus to search. Default (omitted or '') is 'code' — source-code identifiers (Function/Method/Class/etc). 'config' restricts to YAML/JSON/HCL/TOML Settings/Resources/Outputs; 'docs' to Markdown sections + fetched Documents. Use a specific corpus to avoid BM25 dilution from unrelated symbol kinds. (The legacy 'all' value was removed in v0.5; older callers passing 'all' are soft-redirected to 'code' with a deprecation log line.)"},
@@ -1673,7 +1673,7 @@ func (s *Server) registerTools() {
 			"type":"object","properties":{
 				"pinchql":{"type":"string","description":"pinchQL query. Example: MATCH (f:Function)-[:CALLS]->(g) WHERE f.name='main' RETURN g.name LIMIT 20. Alias: cypher (deprecated, kept for one release)."},
 				"cypher":{"type":"string","description":"Deprecated alias for pinchql; kept for one release. Pass either, not both."},
-				"project":{"type":"string"},
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project. Pass '*' to query across every indexed project (cross-repo graph lookups)."},
 				"max_rows":{"type":"integer","description":"Max rows (default 200, max 10000)"},
 				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Filters rows whose query selects an extraction_confidence column; rows from queries that don't return confidence are unaffected."}
 			}
@@ -3072,13 +3072,25 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	maxRows := intArg(args, "max_rows", 200)
 	minConfidence := floatArg(args, "min_confidence", 0.0)
 
-	projectID, errRes := s.mustProject(args)
-	if errRes != nil {
-		return errRes, nil
+	// project=* opts in to cross-project pinchQL — same shape as
+	// search's `project=*`. Useful for "where do I import lib X
+	// across all my services?" queries when many projects are
+	// indexed in the same store.
+	projectArg := str(args, "project")
+	var projectID string
+	allowAllProjects := false
+	if projectArg == "*" {
+		allowAllProjects = true
+	} else {
+		var errRes *mcp.CallToolResult
+		projectID, errRes = s.mustProject(args)
+		if errRes != nil {
+			return errRes, nil
+		}
 	}
 
 	// Cypher queries are pure SELECTs — route to the reader pool (#51).
-	exec := &cypher.Executor{DB: s.store.RO(), MaxRows: maxRows, ProjectID: projectID}
+	exec := &cypher.Executor{DB: s.store.RO(), MaxRows: maxRows, ProjectID: projectID, AllowAllProjects: allowAllProjects}
 	// Defense-in-depth deadline. The Executor honors context cancellation
 	// via QueryContext, but the incoming MCP context may not have one —
 	// so a pathological query (huge LIMIT × complex regex) could run

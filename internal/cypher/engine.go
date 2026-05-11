@@ -41,22 +41,31 @@ type Executor struct {
 	DB        *sql.DB
 	MaxRows   int    // 0 = default (200)
 	ProjectID string // if set, all queries are scoped to this project
+
+	// AllowAllProjects opts in to cross-project queries. The MCP
+	// `query` handler sets this when the caller passes `project=*`,
+	// matching the same opt-in shape `search` uses. Empty ProjectID
+	// without this flag is rejected as defense-in-depth.
+	AllowAllProjects bool
 }
 
 // Execute parses and executes a Cypher query.
-// Execute parses and executes a Cypher query.
 //
-// SECURITY: rejects empty ProjectID. The runNodeScan / runJoinQuery / runBFS
-// paths only append `project_id=?` to the SQL when ProjectID is non-empty,
-// so a caller forgetting to set it would get cross-project results.
-// Refusing here is defense-in-depth — handleQuery (the MCP entrypoint)
-// already enforces a non-empty project via mustProject, but in-code
-// callers might construct an Executor directly. The constraint is
-// announced explicitly at the boundary so misuse fails loudly instead
-// of silently leaking cross-project data.
+// SECURITY: by default, rejects empty ProjectID. The runNodeScan /
+// runJoinQuery / runBFS paths only append `project_id=?` to the SQL
+// when ProjectID is non-empty, so a caller forgetting to set it would
+// get cross-project results. Refusing here is defense-in-depth —
+// handleQuery (the MCP entrypoint) already enforces a non-empty
+// project via mustProject, but in-code callers might construct an
+// Executor directly.
+//
+// AllowAllProjects=true is the explicit opt-in for cross-project
+// queries, set by handleQuery when the caller passes `project=*`.
+// In that mode an empty ProjectID is permitted and the SQL omits
+// the project_id filter, returning rows from every indexed project.
 func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
-	if e.ProjectID == "" {
-		return nil, fmt.Errorf("cypher: ProjectID is required (refusing to run cross-project query)")
+	if e.ProjectID == "" && !e.AllowAllProjects {
+		return nil, fmt.Errorf("cypher: ProjectID is required (refusing to run cross-project query; pass AllowAllProjects=true or project=* via the MCP handler to opt in)")
 	}
 	q, err := parse(query)
 	if err != nil {

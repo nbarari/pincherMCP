@@ -272,6 +272,7 @@
           "type": "string"
         },
         "project": {
+          "description": "Project name or ID. Defaults to session project. Pass '*' to query across every indexed project (cross-repo graph lookups).",
           "type": "string"
         }
       },
@@ -326,6 +327,7 @@
           "type": "number"
         },
         "project": {
+          "description": "Project name or ID. Defaults to session project. Pass '*' to search across every indexed project (cross-repo lookups).",
           "type": "string"
         },
         "query": {

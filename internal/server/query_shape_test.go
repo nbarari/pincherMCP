@@ -81,6 +81,74 @@ func TestHandleQuery_NonEmptyRowsWithID_NextStepsSuggestsContext(t *testing.T) {
 	}
 }
 
+// project=* opts in to cross-project pinchQL execution. Same shape
+// as search's project=*. Returns rows from every indexed project,
+// not just the session/default one.
+func TestHandleQuery_ProjectStarReturnsCrossProjectRows(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "p1"
+
+	store.UpsertProject(db.Project{ID: "p1", Path: "/tmp/p1", Name: "p1", IndexedAt: time.Now()})
+	store.UpsertProject(db.Project{ID: "p2", Path: "/tmp/p2", Name: "p2", IndexedAt: time.Now()})
+	mustUpsertSymbols(t, store, []db.Symbol{
+		{ID: "p1::main.Foo#Function", ProjectID: "p1", FilePath: "main.go", Name: "Foo",
+			QualifiedName: "main.Foo", Kind: "Function", Language: "Go",
+			StartByte: 0, EndByte: 30, StartLine: 1, EndLine: 3, ExtractionConfidence: 1.0},
+		{ID: "p2::main.Bar#Function", ProjectID: "p2", FilePath: "main.go", Name: "Bar",
+			QualifiedName: "main.Bar", Kind: "Function", Language: "Go",
+			StartByte: 0, EndByte: 30, StartLine: 1, EndLine: 3, ExtractionConfidence: 1.0},
+	})
+
+	// project=* should surface rows from BOTH p1 (session default)
+	// and p2 (other project).
+	result, err := srv.handleQuery(context.Background(), makeReq(map[string]any{
+		"project": "*",
+		"pinchql": `MATCH (n:Function) RETURN n.name`,
+	}))
+	if err != nil {
+		t.Fatalf("handleQuery: %v", err)
+	}
+	body := decode(t, result)
+	rows, _ := body["rows"].([]any)
+	got := map[string]bool{}
+	for _, r := range rows {
+		row, _ := r.(map[string]any)
+		if name, ok := row["n.name"].(string); ok {
+			got[name] = true
+		}
+	}
+	if !got["Foo"] {
+		t.Errorf("Foo (p1) missing from project=* result; got %v", got)
+	}
+	if !got["Bar"] {
+		t.Errorf("Bar (p2) missing from project=* result; got %v", got)
+	}
+
+	// Default (no project=*) must still scope to session project — Bar
+	// from p2 must NOT appear.
+	defaultResult, err := srv.handleQuery(context.Background(), makeReq(map[string]any{
+		"pinchql": `MATCH (n:Function) RETURN n.name`,
+	}))
+	if err != nil {
+		t.Fatalf("handleQuery (default): %v", err)
+	}
+	body = decode(t, defaultResult)
+	rows, _ = body["rows"].([]any)
+	got = map[string]bool{}
+	for _, r := range rows {
+		row, _ := r.(map[string]any)
+		if name, ok := row["n.name"].(string); ok {
+			got[name] = true
+		}
+	}
+	if !got["Foo"] {
+		t.Errorf("Foo (session p1) missing from default result; got %v", got)
+	}
+	if got["Bar"] {
+		t.Errorf("Bar (p2) leaked into default p1-scoped result; got %v", got)
+	}
+}
+
 // firstRowID unit-tests: handles `id`, `n.id`, missing, and non-string
 // values.
 func TestFirstRowID(t *testing.T) {
