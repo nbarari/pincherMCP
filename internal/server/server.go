@@ -5752,7 +5752,12 @@ func runGitLsUntracked(root string) (string, error) {
 }
 
 func parseGitDiffFiles(diff string) []string {
-	var files []string
+	// #408: zero-len init so callers see [] in JSON, not null. Same
+	// JSON-shape invariant the v0.7.0 audit (#330 class) applied to
+	// every other slice field in tool responses; this one slipped
+	// through because the function returns to handleChanges which
+	// puts the value directly into the response map.
+	files := []string{}
 	for _, line := range strings.Split(diff, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {

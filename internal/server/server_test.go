@@ -2002,6 +2002,22 @@ func TestRunGitDiff_IncludesUntrackedForUnstagedAndAll(t *testing.T) {
 	}
 }
 
+// #408: parseGitDiffFiles returns [] (not nil) on empty input so the
+// JSON-shape invariant holds — the value flows directly into the
+// changes response's `changed_files` field, which serialises as
+// null when the slice is nil. Same fix-class as #330.
+func TestParseGitDiffFiles_EmptyInputReturnsEmptySliceNotNil(t *testing.T) {
+	for _, in := range []string{"", "\n", "  \n  \n", "# comment\n# another"} {
+		got := parseGitDiffFiles(in)
+		if got == nil {
+			t.Errorf("parseGitDiffFiles(%q) = nil; want []string{} for stable JSON shape", in)
+		}
+		if len(got) != 0 {
+			t.Errorf("parseGitDiffFiles(%q) = %v; want empty slice", in, got)
+		}
+	}
+}
+
 // TestRunGitDiff_BaseBranchScope: scope=base:<branch> reports the
 // committed-only diff vs the branch's merge-base. Pre-PR blast-radius
 // preview: agent can ask "what does this branch introduce" without
