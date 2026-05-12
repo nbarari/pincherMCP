@@ -7,6 +7,15 @@ minors.
 
 ## [Unreleased]
 
+## [v0.38.0] — 2026-05-12 — polyglot install warning
+
+The expectation-setting release. Without this, a Ruby- or Scala-heavy repo's first session lands ~1-3% savings against a README promising 95-99% — the user concludes "pincher doesn't work" when actually they're in a different tier. `pincher init` now reports per-language extraction confidence + expected savings tier at install time, before the disappointment can happen.
+
+No schema change — all v0.38 work runs on schema v24.
+
+### Added
+- **Per-language extraction-tier profile in `pincher init` ([#631](https://github.com/kwad77/pincher/issues/631)).** New `internal/init/profile.go` walks the target directory via gocodewalker (respecting `.gitignore`, capped at 5000 files for install-time latency), classifies each file via the existing `ast.DetectLanguage` + `ast.RegisteredConfidence` plumbing, and prints a one-screen summary. Four tiers map to the v0.34 README #621 vocabulary: AST (95-99% on retrieval), stable-regex (80-95%), approximate-regex (60-85%, structural queries less reliable), and stub (1-3% — pincher won't accelerate this workflow). Headline tier picks the majority-by-file-count and emits a typical-session savings band. New `--quiet` flag suppresses the profile for CI/scripted installs while still running the wiring. Vendor / node_modules / .git / build / dist directories are excluded from the install-time sample (full re-index later sees them if relevant).
+
 ## [v0.37.0] — 2026-05-12 — hook conversion-rate dashboard
 
 The measurement release. v0.36 wired runtime interception via the PreToolUse hook; v0.37 surfaces the headline metric — what fraction of redirected Read/Grep calls the agent actually follows through on. Two panels triangulate the diagnosis: an override rate that isolates "saw and rejected" from "no signal yet", and a per-tool breakdown so a low conversion rate has somewhere to drill into.

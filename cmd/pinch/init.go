@@ -30,6 +30,7 @@ func runInitCLI(args []string) {
 	dataDir := fs.String("data-dir", "", "Override data directory (used to discover the running HTTP dashboard URL)")
 	targetFlag := fs.String("target", "claude", "Editor target: "+strings.Join(pinit.TargetNames(), ", "))
 	noHook := fs.Bool("no-hook", false, "(claude target only) Skip writing the .claude/settings.json PreToolUse hook. Default false — the hook is what closes the Read/Grep → pincher gap at runtime.")
+	quiet := fs.Bool("quiet", false, "Suppress the per-language extraction-tier profile printed after the wiring step (#631). The wiring itself still runs.")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: pincher init [--target=NAME] [--global] [--dry-run] [--force]")
 		fmt.Fprintln(os.Stderr, "  Seed a pincher usage policy file for an editor or agent (idempotent; replace-in-place via marker comments).")
@@ -76,6 +77,16 @@ func runInitCLI(args []string) {
 	}
 
 	if !*dryRun {
+		// #631: print the per-language extraction-tier profile so the
+		// user sees "Ruby is regex-tier, Scala is stub-tier" before
+		// they run their first session and conclude pincher doesn't
+		// work. --quiet suppresses for CI/scripted installs. Profile
+		// failures are non-fatal — install already succeeded.
+		if !*quiet {
+			if profile, err := pinit.ProfileDir(cwd); err == nil {
+				pinit.PrintProfile(out, profile)
+			}
+		}
 		printNextSteps(out, *dataDir)
 	}
 }

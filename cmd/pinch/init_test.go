@@ -43,6 +43,59 @@ func TestInitCLI_Binary_DryRun(t *testing.T) {
 	}
 }
 
+// #631: `pincher init` prints a per-language extraction-tier profile
+// after the wiring step. --quiet suppresses for CI/scripted installs.
+func TestInitCLI_Binary_ProfilePrintedByDefault(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+	bin := buildPincherBinary(t)
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "init", "--data-dir", t.TempDir(), "--no-hook")
+	cmd.Dir = workdir
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	got := string(out)
+	for _, want := range []string{"Project profile:", "Headline tier:", "Go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("init output should include %q; got:\n%s", want, got)
+		}
+	}
+}
+
+func TestInitCLI_Binary_QuietSuppressesProfile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI binary build in -short mode")
+	}
+	bin := buildPincherBinary(t)
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "init", "--quiet", "--data-dir", t.TempDir(), "--no-hook")
+	cmd.Dir = workdir
+	cmd.Env = pincherCoverEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("init --quiet: %v\n%s", err, out)
+	}
+	got := string(out)
+	if strings.Contains(got, "Project profile:") {
+		t.Errorf("--quiet should suppress profile; got:\n%s", got)
+	}
+	// Wiring still ran: marker block written.
+	target := filepath.Join(workdir, "CLAUDE.md")
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("--quiet should still write the marker block: %v", err)
+	}
+}
+
 func TestInitCLI_Binary_WriteThenIdempotent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI binary build in -short mode")
