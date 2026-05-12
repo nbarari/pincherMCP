@@ -7,6 +7,21 @@ minors.
 
 ## [Unreleased]
 
+## [v0.50.0] — 2026-05-12 — maturity consolidation + README repositioning
+
+The version-number-truthing release. Eighteen minor releases shipped in roughly 24 hours (v0.21 through v0.38), each picking up real work — dashboard hardening, hook foundation, conversion-rate metric, polyglot install warning. The changelog reflects every step of that, but the leading single-digit version number understated the actual maturity of the codebase. v0.50.0 is the discipline correction: bump the version to where the test coverage (85.2% sustained), tool surface (frozen since v0.35), and schema (v24, stable since the v0.36 hook table) actually sit. No new functionality past v0.38; this is purely the README differentiator from #641 plus the version-number truthing.
+
+The remaining path to v1.0 is tracked in [#638](https://github.com/kwad77/pincher/issues/638). Eight named release themes remain (v0.51 through v0.56 plus a v0.46-equivalent field-data slot, ending in v1.0).
+
+No schema change — runs on schema v24.
+
+### Added
+- **README \"What it does\" leads with a differentiator paragraph ([#641](https://github.com/kwad77/pincher/pull/641)).** Names the category overlap with Sourcegraph / OpenGrok / IntelliJ in one sentence, then compresses the three concrete differences (agent-context-window-shaped responses, runtime hook interception of Read/Grep, local-only) into a single trailing clause. The mechanism paragraph (single Go binary indexing into three co-located layers) stays — it's now the second paragraph. Closes the README differentiator open question from [#638](https://github.com/kwad77/pincher/issues/638).
+
+### Notes
+- Versions v0.39 through v0.49 are not skipped in the SemVer sense — they were never tagged. The version sequence jumps from v0.38 directly to v0.50, and no installer behavior changes for users who previously held at v0.38.
+- Planning milestones have shifted: v0.39 → v0.51, v0.40 → v0.52, v0.41 → v0.53, etc. Open issues moved to the new slots: [#635](https://github.com/kwad77/pincher/issues/635), [#639](https://github.com/kwad77/pincher/issues/639), [#640](https://github.com/kwad77/pincher/issues/640), [#642](https://github.com/kwad77/pincher/issues/642).
+
 ## [v0.38.0] — 2026-05-12 — polyglot install warning
 
 The expectation-setting release. Without this, a Ruby- or Scala-heavy repo's first session lands ~1-3% savings against a README promising 95-99% — the user concludes "pincher doesn't work" when actually they're in a different tier. `pincher init` now reports per-language extraction confidence + expected savings tier at install time, before the disappointment can happen.
