@@ -5489,7 +5489,21 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return errResult(fmt.Sprintf("read error: %v", err)), nil
 	}
 
-	pageTitle, text := extractTextFromHTML(string(rawBytes))
+	// #579: Content-Type-aware extraction. text/html → strip tags +
+	// <title>; text/markdown / text/plain → preserve verbatim, parse
+	// first H1 as title for markdown. Pre-fix every fetched URL ran
+	// through extractTextFromHTML unconditionally, which (a) eats
+	// stray `>` characters even outside tags (arrows, generics,
+	// blockquotes silently mangled), and (b) returns empty title for
+	// non-HTML inputs since `<title>` doesn't exist in markdown.
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	var pageTitle, text string
+	if strings.Contains(contentType, "text/markdown") || strings.Contains(contentType, "text/plain") || strings.HasSuffix(strings.ToLower(rawURL), ".md") {
+		text = extractMarkdownText(string(rawBytes))
+		pageTitle = firstMarkdownH1(string(rawBytes))
+	} else {
+		pageTitle, text = extractTextFromHTML(string(rawBytes))
+	}
 	if titleOverride != "" {
 		pageTitle = titleOverride
 	}
@@ -6236,7 +6250,17 @@ func extractTextFromHTML(raw string) (title, text string) {
 			inTag = true
 			b.WriteByte(' ')
 		case raw[i] == '>':
-			inTag = false
+			// #579: only consume `>` when it closes a tag we entered.
+			// Outside a tag (e.g. an arrow `=>` in a code sample, a
+			// blockquote `>`, a generic `Vec<T>` mishandled because the
+			// `<` already flipped state — anything where `>` is a
+			// literal character) preserve it verbatim. Pre-fix every
+			// `>` was silently consumed.
+			if inTag {
+				inTag = false
+			} else {
+				b.WriteByte('>')
+			}
 		case !inTag:
 			b.WriteByte(raw[i])
 		}
@@ -6245,6 +6269,42 @@ func extractTextFromHTML(raw string) (title, text string) {
 	// Collapse whitespace.
 	text = strings.Join(strings.Fields(b.String()), " ")
 	return
+}
+
+// extractMarkdownText returns the markdown body verbatim with
+// trailing whitespace trimmed and CRLF normalized to LF. Used for
+// text/markdown / text/plain fetches where extractTextFromHTML's tag
+// stripper would corrupt code samples and arrow operators (#579).
+func extractMarkdownText(raw string) string {
+	return strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+}
+
+// firstMarkdownH1 returns the first `# Title` line of a markdown
+// document, or "" if no H1 is found in the leading 200 lines. Used
+// as the title when content-type is markdown — the URL fallback in
+// the fetch handler is ugly when a real title is one line away
+// (#579). Skips empty lines and YAML/TOML front-matter delimiters
+// (`---`, `+++`).
+func firstMarkdownH1(raw string) string {
+	scanner := strings.SplitN(raw, "\n", 200)
+	inFrontMatter := false
+	for i, line := range scanner {
+		t := strings.TrimSpace(line)
+		if i == 0 && (t == "---" || t == "+++") {
+			inFrontMatter = true
+			continue
+		}
+		if inFrontMatter {
+			if t == "---" || t == "+++" {
+				inFrontMatter = false
+			}
+			continue
+		}
+		if strings.HasPrefix(t, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(t, "# "))
+		}
+	}
+	return ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
