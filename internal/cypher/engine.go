@@ -84,6 +84,10 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// warning the agent walks away thinking "no matches" when the
 	// real cause is a typo in the property name.
 	warnings := collectUnknownPropertyWarnings(q)
+	// #593: column-vs-column comparisons (`a.col <op> b.col`) parse
+	// but evaluation returns false — surface a warning so the agent
+	// knows the predicate isn't being honored. Same UX class as #473.
+	warnings = append(warnings, collectCrossColumnWarnings(q)...)
 	res, err := e.run(ctx, q)
 	if err != nil {
 		return res, err
@@ -178,6 +182,60 @@ func collectUnknownPropertyWarnings(q *queryAST) []string {
 		out = append(out, fmt.Sprintf(
 			"property %q not recognized; treated as undefined (always false in comparisons). Valid properties: %s.",
 			n, strings.Join(knownPropertyList, ", ")))
+	}
+	return out
+}
+
+// collectCrossColumnWarnings (#593) walks the WHERE tree for
+// conditions whose RHS is a column reference (`a.col <op> b.col`).
+// pinchQL doesn't currently support column-vs-column comparison —
+// evaluation returns false for these, so the user gets 0 rows
+// (consistent with #473 unknown-property handling). The warning
+// names the offending clauses so the agent can rewrite them as
+// literal comparisons or run the equivalent post-filter in their
+// client. Sorted alphabetically for stable test output.
+func collectCrossColumnWarnings(q *queryAST) []string {
+	if q == nil {
+		return nil
+	}
+	clauses := map[string]struct{}{}
+	check := func(c condition) {
+		if c.rhsProperty == "" {
+			return
+		}
+		clause := fmt.Sprintf("%s.%s %s %s.%s",
+			c.variable, c.property, c.op, c.rhsVariable, c.rhsProperty)
+		clauses[clause] = struct{}{}
+	}
+	for _, c := range q.conditions {
+		check(c)
+	}
+	var walk func(w whereExpr)
+	walk = func(w whereExpr) {
+		switch e := w.(type) {
+		case condExpr:
+			check(e.c)
+		case binaryExpr:
+			walk(e.left)
+			walk(e.right)
+		case notExpr:
+			walk(e.inner)
+		}
+	}
+	walk(q.where)
+	if len(clauses) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(clauses))
+	for n := range clauses {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, fmt.Sprintf(
+			"column-vs-column comparison %q is not supported in pinchQL — predicate ignored (returns false). Use literal values on the RHS, or post-filter the result set in your client.",
+			n))
 	}
 	return out
 }
@@ -527,6 +585,12 @@ type condition struct {
 	value     string
 	negated   bool   // #354: WHERE NOT n.x = ... — invert the comparison result
 	connector string // #358: "AND" or "OR" — connects this condition to the running result. First condition is "" (start).
+	// #593: when the user writes `WHERE a.col <op> b.col`, parseOneCondition
+	// captures the RHS variable + property here so collectCrossColumnWarnings
+	// can name them in the advisory and evaluation can return false instead
+	// of falsely-true. Empty when the RHS is a literal.
+	rhsVariable string
+	rhsProperty string
 }
 
 type returnVar struct {
@@ -960,6 +1024,18 @@ func (p *parser) parseOneCondition() (condition, error) {
 	case "=", "<>", ">", "<", ">=", "<=":
 		c.op = p.next().value
 		c.value = normalizeConditionValue(p.next())
+		// #593: detect column-vs-column shape (`a.col <op> b.col`).
+		// When the RHS token is followed by `.<prop>`, the user wrote a
+		// property reference instead of a literal. Capture both sides so
+		// collectCrossColumnWarnings can name them; evaluation returns
+		// false (consistent with the #473 unknown-property handling)
+		// rather than the silently-always-true behavior pre-#593.
+		if p.peek().value == "." {
+			p.next()
+			c.rhsVariable = c.value
+			c.rhsProperty = p.next().value
+			c.value = ""
+		}
 	case "=~":
 		c.op = p.next().value
 		c.value = normalizeConditionValue(p.next())
@@ -1277,6 +1353,13 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 	var unpushed []condition
 	if canPush {
 		for _, c := range q.conditions {
+			// #593: cross-column comparisons demoted to in-Go (see
+			// runJoinQuery for full rationale). Symmetric across both
+			// scan paths.
+			if c.rhsProperty != "" {
+				unpushed = append(unpushed, c)
+				continue
+			}
 			if c.variable != pat.fromVar {
 				continue
 			}
@@ -1503,6 +1586,17 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 	var unpushed []condition
 	if canPush {
 		for _, c := range q.conditions {
+			// #593: cross-column comparisons (rhsProperty != "")
+			// can't push to SQL — the RHS references another row,
+			// not a literal. Pre-fix this branch pushed `a.lang <> ?`
+			// with c.value="" (the empty fallback after parsing
+			// stripped the RHS), which silently let rows through.
+			// Demote to in-Go evaluation where evalCondition returns
+			// false for these and the warning emitter names them.
+			if c.rhsProperty != "" {
+				unpushed = append(unpushed, c)
+				continue
+			}
 			tableAlias := "a"
 			if c.variable == pat.toVar {
 				tableAlias = "b"
@@ -2326,6 +2420,12 @@ func condLeafToSQL(prefix, col string, c condition) (string, []any, bool) {
 func whereExprToSQL(w whereExpr, prefixFor func(string) (string, bool)) (string, []any, bool) {
 	switch e := w.(type) {
 	case condExpr:
+		// #593: cross-column comparisons can't push to SQL — the RHS
+		// references another row, not a literal. Fall through to
+		// in-Go evalCondition which returns false for these.
+		if e.c.rhsProperty != "" {
+			return "", nil, false
+		}
 		prefix, ok := prefixFor(e.c.variable)
 		if !ok {
 			return "", nil, false
@@ -2459,6 +2559,15 @@ func matchesConditionsWithCache(row map[string]any, conds []condition, reCache m
 // evalCondition returns true iff the row satisfies the un-negated form
 // of c. Caller XORs with c.negated for #354 NOT semantics.
 func evalCondition(row map[string]any, c condition, reCache map[string]*regexp.Regexp) bool {
+	// #593: column-vs-column comparisons are unsupported. Return false
+	// so the predicate filters everything out — consistent with the
+	// #473 "unknown property → 0 rows + warning" handling. Without
+	// this the comparison silently evaluates to true (RHS treated as
+	// a literal that doesn't match any column value), inflating the
+	// result set and confusing the agent.
+	if c.rhsProperty != "" {
+		return false
+	}
 	key := c.variable + "." + c.property
 	actual := fmt.Sprint(row[key])
 
