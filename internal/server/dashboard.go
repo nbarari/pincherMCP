@@ -11,13 +11,19 @@ import "strings"
 // inline <script> content is now blocked by the browser even if it bypasses
 // our esc() escape pipeline.
 func renderDashboard(prefix string) string {
-	return strings.ReplaceAll(dashboardTemplate, "__PINCHER_BASEPATH__", prefix)
+	return strings.ReplaceAll(dashboardTemplate, "__PINCHER_BASEPATH__", normalizeBasePath(prefix))
 }
 
 // renderDashboardJS returns the dashboard JavaScript with the reverse-proxy
 // basepath substituted into the BP constant. Served from /v1/dashboard.js.
+//
+// #523: prefix is normalized before substitution so a trailing slash on
+// the input doesn't survive into BP. Without normalization the JS
+// wrapper rewrite `BP + '/v1/...'` produces `/foo//v1/...` (double
+// slash) which reverse proxies route as a different path than the HTML
+// <link>/<script> tags, silently breaking every dashboard data fetch.
 func renderDashboardJS(prefix string) string {
-	return strings.ReplaceAll(dashboardJSTemplate, "__PINCHER_BASEPATH__", prefix)
+	return strings.ReplaceAll(dashboardJSTemplate, "__PINCHER_BASEPATH__", normalizeBasePath(prefix))
 }
 
 // renderDashboardCSS returns the dashboard CSS. No basepath substitution

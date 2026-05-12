@@ -7,6 +7,26 @@ minors.
 
 ## [Unreleased]
 
+## [v0.24.0] — 2026-05-12 — dashboard test foundation
+
+Patch-shaped minor — four test additions closing the umbrella #519 dashboard hardening's "no test coverage" gap. v0.23 already shipped the runtime hardening (CSP, basepath, error envelope); v0.24 surrounds those with regression tests so future edits surface drift immediately. Plus one small renderer change: `renderDashboard*` now normalize the basepath through `normalizeBasePath`, so a trailing slash on the input prefix doesn't silently produce double-slashed fetch URLs.
+
+No schema change — all v0.24 work runs on schema v23.
+
+### Added
+- **Dashboard CSS regression test + byte snapshot
+  ([#522](https://github.com/kwad77/pincher/issues/522),
+  [#598](https://github.com/kwad77/pincher/pull/598)).** `TestDashboardCSS_RegressionSnapshot` asserts 200 + `text/css` + `Cache-Control` + body-length bounds + exact-byte snapshot under `testdata/dashboard/dashboard.css`. Mirrors the v0.21 #521 pattern. Regenerate after intentional CSS edits with `-update-dashboard-css-snapshot`.
+- **Dashboard JS basepath substitution edge cases
+  ([#523](https://github.com/kwad77/pincher/issues/523),
+  [#598](https://github.com/kwad77/pincher/pull/598)).** Table-driven `TestDashboardJS_BasepathSubstitution` across empty, simple, trailing-slash, deep-path, BP-contains-`/v1/`, URL-encoded chars. Companion `TestDashboardJS_BasepathSubstitution_HTMLAndJSAgree` pins that `<script src>` in the HTML and `const BP` in the JS use byte-identical prefixes — drift between the two is the exact failure mode that motivated splitting `renderDashboard` from `renderDashboardJS`. Renderer change: trailing slashes are now normalized away by both renderers, eliminating a footgun where `renderDashboardJS("/pincher/")` would emit a BP that produced double-slashed fetch URLs (`BP + '/v1/...'` → `/pincher//v1/...`).
+- **Per-endpoint API contract tests
+  ([#528](https://github.com/kwad77/pincher/issues/528),
+  [#598](https://github.com/kwad77/pincher/pull/598)).** Eleven new tests under `TestEndpointShape_*` and `TestEndpointNegative_*` covering the ad-hoc `/v1/` routes that don't flow through `registerTools` (and so don't get OpenAPI parity gates from #558/#581): `/v1/health`, `/v1/stats`, `/v1/sessions`, `/v1/projects`, `/v1/openapi.json`, `/v1/index-progress`, plus DELETE `/v1/projects` and DELETE `/v1/projects/empty`. Shape tests assert documented top-level keys present; negative tests assert malformed bodies return 4xx with a JSON `{error}` envelope, not 500 with a leaked stack. Includes a `#334`-class regression guard that `/v1/sessions` returns `[]` not `null` when empty.
+- **Large-dataset fixture + perf cliff guard
+  ([#527](https://github.com/kwad77/pincher/issues/527),
+  [#598](https://github.com/kwad77/pincher/pull/598)).** `TestDashboard_LargeDataset` seeds 1000 projects + 1000 sessions + 5000 symbols, hits `/v1/stats` + `/v1/sessions` + `/v1/projects`, and gates each on a 5s wallclock budget + per-endpoint payload-size bound. Catches superlinear regressions and pagination cliffs. Current observed: stats 0.5ms / 219 B, sessions 0.5ms / 14.5 KB, projects 2.5ms / 188 KB. The bounds intentionally trail v0.25's pagination work (#530/#531/#532) — once those land, tighten the bounds.
+
 ## [v0.23.0] — 2026-05-12 — HTTP gateway hardening + pinchQL data integrity
 
 Patch-shaped minor — four fixes from a continuous v0.22 dogfood probe of the HTTP gateway and pinchQL deep queries. Net effect: container orchestrators can now liveness-probe pincher behind `--http-key`, the bare URL routes to the dashboard, and pinchQL stops silently inflating result sets via two distinct edge-cases (multi-sourced edges + column-vs-column comparisons).
