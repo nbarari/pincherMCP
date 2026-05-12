@@ -1069,7 +1069,19 @@ func (p *parser) parseReturn() ([]returnVar, error) {
 			}
 			p.skip(")")
 		} else {
-			rv.variable = p.next().value
+			// #578: catch unknown function calls (typo'd or unsupported)
+			// before they parse as bare variable refs and silently
+			// evaluate to null. Pre-fix `RETURN LENGTH(f.docstring)`
+			// rendered as a column named `LENGTH` with every row null —
+			// no warning, no error, the caller's audit silently
+			// returned wrong results. Same UX class as #473's typo'd
+			// properties; same fix shape: surface a clear pinchQL
+			// error naming the offender + the supported set.
+			tok := p.next()
+			if p.peek().value == "(" {
+				return nil, fmt.Errorf("pinchQL: unknown function %q in RETURN. Supported: COUNT, AVG, MIN, MAX, SUM (aggregators only). For per-row computations use a property reference like %s.docstring instead.", tok.value, strings.ToLower(tok.value))
+			}
+			rv.variable = tok.value
 			if p.peek().value == "." {
 				p.next()
 				rv.property = p.next().value
