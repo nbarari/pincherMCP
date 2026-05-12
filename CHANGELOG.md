@@ -7,6 +7,17 @@ minors.
 
 ## [Unreleased]
 
+## [v0.33.0] — 2026-05-12 — loop-3 dogfood haul: guide methodology routing + fetch JS-render warning
+
+Three issues filed by autoresearcher round 3 against v0.32, fixed in one batch. Loop-3 was scoped to *usability* — friction agents hit even when the underlying tool works correctly.
+
+No schema change — all v0.33 work runs on schema v23.
+
+### Fixed
+- **`guide` methodology questions stop extracting category nouns as the hint ([#615](https://github.com/kwad77/pincher/issues/615)).** Pre-fix, `guide task="how do I find what calls a private function"` extracted `"private"` as the hint and templated useless `search query="private"` recommendations. Now visibility/category nouns (`private`, `public`, `exported`, `unexported`, `internal`, `external`, `global`, `local`, `stub`, `static`, `dynamic`) are stop words for hint extraction — the discriminator falls through to the actual subject (or empty when the task is a methodology question with no concrete symbol).
+- **`guide` "use pinchQL to ..." routes to the `query` tool with a starter template, not pinchQL source ([#616](https://github.com/kwad77/pincher/issues/616)).** Pre-fix, bare `pinchql` matched a domain concept whose recommendation was `search query="runJoinQuery"` — pointing the user at the dispatcher's source code when they wanted to *use* pinchQL as a query language. Tightened the engine-internals concept to require a disambiguating phrase (`cypher engine`, `pinchql parser`, `where pushdown`, `how does pinchql`, etc.); added a new concept that catches `use pinchql to`, `via pinchql`, `with pinchql`, `pinchql query` and recommends a `query` tool call with a `MATCH (n:Function) RETURN n.qualified_name LIMIT 20` starter template.
+- **`fetch` warns when extracted text is suspiciously small relative to raw bytes ([#617](https://github.com/kwad77/pincher/issues/617)).** JS-rendered SPAs (GitHub, Twitter, Reddit, modern docs sites) returned a "successful" response with `stored: true`, plausible `raw_bytes`, real `title` — but `text` was just the inert accessibility skip-link. Agents acted on the empty text. Now `_meta.warnings` carries an entry when raw is > 10 KB AND extracted text is < 0.5% of raw, naming the heuristic and pointing at common workarounds (raw README URL for GitHub repos, the project's REST API, etc.). Skipped on `text/markdown` / `text/plain` inputs where extraction is verbatim.
+
 ## [v0.32.0] — 2026-05-12 — loop-2 dogfood haul: 0%-coverage gates + edge-property warning pedagogy
 
 Three issues filed by autoresearcher round 2 against v0.31, fixed in one batch. Two are 0%-coverage gates on load-bearing helpers (#611 pinchQL `NOT (...)` Go-side eval, #613 `db.CurrentSchemaVersion`) — same risk class as #607. The third is a pedagogy refinement: edge-property warnings now list edge properties instead of misleading users with the symbol property list.

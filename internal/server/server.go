@@ -5889,6 +5889,30 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"raw_bytes": len(rawBytes),
 		"stored":    true,
 	}
+
+	// #617: warn when the extracted text is suspiciously small relative
+	// to the raw response — typical of JS-rendered SPAs (GitHub, Twitter,
+	// Reddit, modern docs sites) where the static HTML is a near-empty
+	// shell. Pre-fix the response looked successful (`stored: true`,
+	// realistic `raw_bytes`, real `title`) but `text` was just the
+	// inert accessibility skip-link. Threshold: > 10 KB raw AND text/raw
+	// ratio < 0.5%. Skip the heuristic for markdown/plain inputs (their
+	// "extraction" is verbatim copy and the ratio approaches 1).
+	if !strings.Contains(contentType, "text/markdown") && !strings.Contains(contentType, "text/plain") {
+		if len(rawBytes) > 10000 && len(text)*200 < len(rawBytes) {
+			meta, _ := data["_meta"].(map[string]any)
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			warnings, _ := meta["warnings"].([]string)
+			warnings = append(warnings,
+				fmt.Sprintf("fetched %d bytes but extracted only %d chars of text (%.2f%%) — page is likely JS-rendered. Static HTML extraction won't surface the visible content. For GitHub/GitLab repos try the raw README URL (e.g. https://raw.githubusercontent.com/<owner>/<repo>/<branch>/README.md); for other SPAs prefer the project's REST/JSON API or a markdown mirror.",
+					len(rawBytes), len(text), float64(len(text))*100/float64(len(rawBytes))))
+			meta["warnings"] = warnings
+			data["_meta"] = meta
+		}
+	}
+
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
 
@@ -6082,10 +6106,28 @@ var domainConcepts = []struct {
 		why:      "the supervisor lives in internal/supervisor/supervisor.go — Supervisor type, respawn(), and the pump goroutines are the surface area",
 	},
 	{
-		patterns: []string{"pinchql", "cypher engine", "match (a)", "where pushdown", "edge filter"},
+		// #616: bare "pinchql" was matching tasks like "use pinchQL to
+		// find X" — the user wanted a pinchQL *query* template, not a
+		// pointer at the engine's source code. Tightened to phrases that
+		// unambiguously signal "I'm investigating pinchQL internals".
+		patterns: []string{"cypher engine", "pinchql engine", "pinchql implementation",
+			"pinchql parser", "pinchql planner", "pinchql pushdown", "pinchql where",
+			"how does pinchql", "how pinchql works", "explain pinchql",
+			"match (a)", "where pushdown", "edge filter"},
 		tool:     "search",
 		args:     `{"query":"runJoinQuery"}`,
 		why:      "pinchQL routing splits between runNodeScan / runJoinQuery / runBFS in internal/cypher/engine.go — Execute() is the dispatcher",
+	},
+	{
+		// #616: when the user wants to USE pinchQL (not investigate it),
+		// hand back a starter `query` recommendation with a self-join
+		// template so they have something to adapt rather than starting
+		// from a blank prompt.
+		patterns: []string{"use pinchql", "via pinchql", "with pinchql", "in pinchql",
+			"pinchql query", "pinchql to find", "pinchql to list", "pinchql to count"},
+		tool:     "query",
+		args:     `{"pinchql":"MATCH (n:Function) RETURN n.qualified_name LIMIT 20"}`,
+		why:      "pinchQL is the right tool for structural questions — adapt the template to your filter (n.docstring IS NULL, n.is_test=true, etc.). See `schema` for available properties",
 	},
 	{
 		patterns: []string{"fts5", "full-text search", "rebuild fts", "search index", "bm25"},
@@ -6344,6 +6386,15 @@ func taskHintFromString(task string) string {
 		"repo":      true, "repository": true, "project": true,
 		"file":      true, "module":     true, "package": true,
 		"directory": true, "folder":     true,
+		// #615: visibility / category nouns. Tasks like "find what calls
+		// a private function" or "list every public method" use these
+		// adjectives to scope a class of symbols, not name a single one.
+		// Pre-fix the hint extractor would pick "private" / "public" as
+		// the discriminator and template a useless `search query="private"`.
+		// Drop them as stopwords so the actual subject (or no subject) wins.
+		"private": true, "public": true, "exported": true, "unexported": true,
+		"internal": true, "external": true, "global": true, "local": true,
+		"stub":     true, "stubs":   true, "static":   true, "dynamic":  true,
 	}
 	tokens := strings.FieldsFunc(task, func(r rune) bool {
 		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_')
