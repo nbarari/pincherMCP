@@ -4,14 +4,13 @@ import (
 	"testing"
 )
 
-// #624: MCP exposes the agent working set; operator/diagnostic tools
-// stay reachable via /v1/<tool> HTTP. v0.35 narrowed from 22 → 9; v0.51
-// (#645) restored `index` and `adr` after real-user feedback showed the
-// narrowing was too aggressive — index is core (helps onboard fresh
-// repos, recovers from binary-version drift, closes the watcher's 2s-
-// tick race) and adr is the institutional-memory tool the agent reads +
-// writes mid-session per the global CLAUDE.md policy. Current MCP-
-// visible count: 11. Operator-only: 11.
+// MCP exposes the agent working set; operator/diagnostic tools stay
+// HTTP-only (with an MCP redirect stub from v0.51.1 #644). Evolution:
+// v0.35 #624 narrowed from 22 → 9; v0.51 #645 restored `index` and `adr`
+// to the working set; v0.51.1 #644 added the MCP redirect-stub for the
+// remaining 11 operator tools so `unknown tool "X"` no longer fires
+// when an agent calls one over MCP. Current MCP working set
+// (real-handler): 11. Operator-only (redirect-stub on MCP): 11.
 //
 // API parity (#558 phase 3) is preserved: every operator handler still
 // has an HTTP route. CLI ↔ HTTP parity gate is unaffected — that gate

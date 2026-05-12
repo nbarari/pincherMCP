@@ -7,6 +7,15 @@ minors.
 
 ## [Unreleased]
 
+## [v0.51.1] — 2026-05-12 — operator-tool MCP redirect stubs
+
+Patch follow-on to v0.51.0. The remaining 11 operator-only tools (architecture, dead_code, doctor, health, init, list, neighborhood, rebuild_fts, schema, self_test, stats) now ship with an MCP redirect stub so an agent that calls one over MCP gets a structured `operator_tool_not_on_mcp` error pointing at the HTTP endpoint and CLI subcommand — instead of the SDK's bare `unknown tool "X"` that trains users to think the tool is missing. The stub description is prefixed `[OPERATOR-ONLY — call POST /v1/<tool> over HTTP or pincher <tool> from CLI]` so an agent reading `tools/list` skips them upfront without having to invoke and parse the redirect.
+
+No schema change — runs on schema v24.
+
+### Fixed
+- **Bare `unknown tool "X"` MCP error replaced with structured redirect ([#644](https://github.com/kwad77/pincher/issues/644)).** `addOperatorTool` in `internal/server/server.go` now mirrors operator tools on MCP via `s.mcp.AddTool` with a thin redirect handler. Body shape: `{"error": {"code": "operator_tool_not_on_mcp", "message": "...", "details": {"tool", "http_endpoint", "cli_command", "since_version"}}}`. Test coverage: 11 redirect cases in `internal/server/operator_redirect_test.go` (one per operator tool).
+
 ## [v0.51.0] — 2026-05-12 — restore index + adr to MCP; explain indexing in README
 
 The dogfood-driven correction release. A real user hit `unknown tool "index"` trying to call index over MCP — the v0.35 #624 surface narrowing had swept index into the operator-only bucket on the theory it was diagnostic noise. It isn't. Index is core: it's how an agent helps a user onboard a fresh repo, recovers from binary-version drift surfaced in `_meta.binary_version_warning`, and closes the in-session-edit race the watcher's 2s tick can't cover. v0.51 restores it to the agent-facing surface (along with `adr`, which has the same shape — institutional memory the agent reads + writes mid-session per the global CLAUDE.md policy). README gains a new "Indexing & staleness" section that walks through the four staleness-defense mechanisms and the three cases where manual `index` is the right lever.

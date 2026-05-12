@@ -2128,12 +2128,19 @@ func (s *Server) addTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 }
 
 // addOperatorTool registers an operator/diagnostic tool: HTTP route +
-// handler map + tool registry, but NOT on the MCP server. Used by
-// #624 to slim the agent-visible MCP surface to its working set
-// (search, symbol, symbols, context, trace, query, guide, changes,
-// fetch) while keeping `/v1/<tool>` HTTP dispatch unchanged for
-// operators monitoring `/v1/doctor`, `/v1/health`, `/v1/stats`,
-// `/v1/dead_code`, `/v1/architecture`, etc.
+// handler map + tool registry, plus a redirect-stub on MCP that returns
+// a structured `operator_tool_not_on_mcp` error explaining the HTTP and
+// CLI alternatives (#644). The stub keeps the MCP surface honest about
+// what's reachable: an agent that tries to call e.g. `dead_code` over
+// MCP gets a clear redirect instead of the SDK's bare `unknown tool`,
+// which trains users to think the tool is missing.
+//
+// Originally introduced in #624 to slim the agent-visible MCP working
+// set to (search, symbol, symbols, context, trace, query, guide,
+// changes, fetch). v0.51 #645 restored `index` and `adr` to the working
+// set; v0.51.1 #644 added the redirect-stub for the remaining 11
+// operator tools so future surface changes don't bite users with the
+// same bare-error UX.
 //
 // CLI ↔ HTTP parity (#558 phase 3) gate is unaffected: every CLI
 // subcommand still has a corresponding `/v1/<tool>` endpoint.
@@ -2143,6 +2150,40 @@ func (s *Server) addTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 func (s *Server) addOperatorTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 	s.handlers[tool.Name] = handler
 	s.tools[tool.Name] = tool
+	// Mirror the tool on MCP with the redirect stub. The stub's
+	// description leads with [OPERATOR-ONLY] so an agent reading
+	// tools/list sees the redirect upfront and doesn't waste a call.
+	stub := *tool
+	stub.Description = fmt.Sprintf(
+		"[OPERATOR-ONLY — call POST /v1/%s over HTTP or `pincher %s` from CLI] %s",
+		tool.Name, tool.Name, tool.Description,
+	)
+	s.mcp.AddTool(&stub, s.makeOperatorRedirectHandler(tool.Name))
+}
+
+// makeOperatorRedirectHandler builds the MCP-side stub handler returned
+// for operator tools (#644). Returns a structured error pointing at the
+// HTTP endpoint and CLI subcommand — never falls through to the real
+// handler over MCP.
+func (s *Server) makeOperatorRedirectHandler(toolName string) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		body, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"code":    "operator_tool_not_on_mcp",
+				"message": fmt.Sprintf("Tool %q is operator-only and does not run over MCP. Call POST /v1/%s over HTTP, or run `pincher %s` from the CLI. (Surface scoped in v0.35 #624; redirect-stub added in v0.51.1 #644.)", toolName, toolName, toolName),
+				"details": map[string]any{
+					"tool":          toolName,
+					"http_endpoint": "POST /v1/" + toolName,
+					"cli_command":   "pincher " + toolName,
+					"since_version": "v0.35",
+				},
+			},
+		})
+		return &mcp.CallToolResult{
+			IsError: true,
+			Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
+		}, nil
+	}
 }
 
 // toolArgKeysFor returns the set of argument keys declared in tool's
