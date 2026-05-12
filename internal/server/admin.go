@@ -95,6 +95,16 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 			return projects[i].Symbols > projects[j].Symbols
 		})
 	}
+	// #575: cap projects to `top` to bound the response size on
+	// multi-project installs. Pre-fix a 125-project install + default
+	// top=10 returned all 125 projects (≈19 KB) plus all 198 failures
+	// (≈80 KB) for a total ≈119 KB — exceeded the MCP per-call cap.
+	// Sorted-by-symbol-count-desc above means we keep the largest
+	// (most likely to surface a problem) first.
+	if len(projects) > top {
+		data["projects_truncated"] = len(projects) - top
+		projects = projects[:top]
+	}
 	data["projects"] = projects
 
 	type failureRow struct {
@@ -107,13 +117,26 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	failures := []failureRow{}
 	cutoff := time.Now().Add(-time.Duration(lookbackHours) * time.Hour)
+	failuresTruncated := 0
+collect:
 	for _, p := range plist {
+		// #575: keep pulling per-project for visibility across
+		// projects (a single noisy project shouldn't crowd out
+		// signals from healthier ones), but enforce `top` as a GLOBAL
+		// cap. Pre-fix the per-project loop made the response grow
+		// linearly with project count → 125 projects × 10 failures
+		// blew the MCP token cap. Track how many we dropped so the
+		// caller knows the count is capped.
 		fails, err := s.store.ListExtractionFailures(p.ID, top)
 		if err != nil {
 			continue
 		}
 		for _, f := range fails {
 			if f.LastSeenAt.Before(cutoff) {
+				continue
+			}
+			if len(failures) >= top {
+				failuresTruncated++
 				continue
 			}
 			failures = append(failures, failureRow{
@@ -125,8 +148,18 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 				LastSeenAt: f.LastSeenAt.Format(time.RFC3339),
 			})
 		}
+		// Continue iterating to count the trailing rows we're
+		// dropping (so the truncated count is honest), but bail once
+		// we've quantified the overflow at >5× cap to avoid pointless
+		// DB churn on enormous installs.
+		if failuresTruncated > top*5 {
+			break collect
+		}
 	}
 	data["extraction_failures"] = failures
+	if failuresTruncated > 0 {
+		data["extraction_failures_truncated"] = failuresTruncated
+	}
 
 	type slowRow struct {
 		Tool       string `json:"tool"`

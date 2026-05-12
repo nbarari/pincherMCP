@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -38,6 +39,46 @@ func TestHandleDoctor_HealthyEmptyDB(t *testing.T) {
 	for _, k := range []string{"projects", "extraction_failures", "slow_queries"} {
 		if v, ok := body[k].([]any); !ok || v == nil {
 			t.Errorf("%s should be [] not nil; got %T %v", k, body[k], body[k])
+		}
+	}
+}
+
+// #575: pre-fix the handler iterated every project and pulled `top`
+// failures per project, so a 125-project install ballooned the
+// response past the MCP token cap. `top` now caps the projects
+// list AND the global failure list; truncation surfaces in
+// `projects_truncated` / `extraction_failures_truncated` so the
+// caller knows.
+func TestHandleDoctor_CapsProjectsAndFailuresGlobally(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	// Seed 50 projects to repro the multi-project bloat shape.
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("p%02d", i)
+		store.UpsertProject(db.Project{
+			ID: id, Path: "/tmp/" + id, Name: id,
+			IndexedAt: time.Now(),
+			SymCount:  i, // sort by symbols desc → p49 first
+		})
+	}
+
+	result, err := srv.handleDoctor(context.Background(), makeReq(map[string]any{"top": 5}))
+	if err != nil {
+		t.Fatalf("handleDoctor: %v", err)
+	}
+	body := decode(t, result)
+
+	projects, _ := body["projects"].([]any)
+	if len(projects) != 5 {
+		t.Errorf("expected 5 projects (capped by top=5), got %d", len(projects))
+	}
+	if truncated, ok := body["projects_truncated"].(float64); !ok || truncated != 45 {
+		t.Errorf("expected projects_truncated=45, got %v", body["projects_truncated"])
+	}
+	// Sorted by symbols desc → top should be p49.
+	if len(projects) > 0 {
+		first := projects[0].(map[string]any)
+		if first["name"] != "p49" {
+			t.Errorf("expected first project p49 (largest), got %v", first["name"])
 		}
 	}
 }
