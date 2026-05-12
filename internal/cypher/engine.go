@@ -1558,6 +1558,17 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 
 	reCache := make(map[string]*regexp.Regexp)
 	var resultRows []map[string]any
+	// #591: dedup multi-sourced edges by (from_id, to_id, kind). The
+	// edges table stores one row per source tag (per_file /
+	// resolve_pass / binding_pass) by design — each pass owns its
+	// source-tagged subset so atomic replaces don't wipe sibling-source
+	// edges. But the user-facing semantic is "this caller calls this
+	// callee once," so the JOIN must collapse to one row per logical
+	// edge. Keep the highest-confidence variant when sources disagree
+	// (typically resolve_pass at 0.7 wins over binding_pass at 0.4).
+	// Map index → row in resultRows for in-place upgrade when a higher-
+	// confidence variant of an already-seen edge appears.
+	seenEdge := map[string]int{} // key → index in resultRows
 	for rows.Next() {
 		aNode, bNode, edgeKind, conf, err := scanJoinRow(rows)
 		if err != nil {
@@ -1577,6 +1588,18 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 		if !matchesWhere(m, filter, reCache) {
 			continue
 		}
+		key := aNode.ID + "\x00" + bNode.ID + "\x00" + edgeKind
+		if idx, dup := seenEdge[key]; dup {
+			// Already have a row for this logical edge — keep the
+			// higher-confidence variant.
+			if pat.edgeVar != "" {
+				if existing, _ := resultRows[idx][pat.edgeVar+".confidence"].(float64); conf > existing {
+					resultRows[idx] = m
+				}
+			}
+			continue
+		}
+		seenEdge[key] = len(resultRows)
 		resultRows = append(resultRows, m)
 	}
 	if err := rows.Err(); err != nil {
