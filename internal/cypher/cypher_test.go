@@ -2029,7 +2029,11 @@ func TestExecute_UnknownPropertyInWhereWarns(t *testing.T) {
 	if !strings.Contains(r.Warnings[0], "nonexistent_prop") {
 		t.Errorf("warning %q must name the offending property", r.Warnings[0])
 	}
-	if !strings.Contains(r.Warnings[0], "Valid properties:") {
+	// #612: warning text now distinguishes node vs edge — accept either
+	// "Valid properties:" (legacy phrasing) or the more specific
+	// "Valid node properties:" introduced by the edge-aware variant.
+	if !strings.Contains(r.Warnings[0], "Valid properties:") &&
+		!strings.Contains(r.Warnings[0], "Valid node properties:") {
 		t.Errorf("warning %q must list valid alternatives", r.Warnings[0])
 	}
 }

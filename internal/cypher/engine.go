@@ -109,14 +109,24 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 }
 
 // knownPropertyList is the human-readable enumeration used in the
-// unknown-property warning text. Sourced from the cypherPropToCol
-// switch — keep in sync if a new column is added there.
+// unknown-property warning text for NODE variables. Sourced from the
+// cypherPropToCol switch — keep in sync if a new column is added there.
 var knownPropertyList = []string{
 	"id", "name", "qualified_name (qn)", "kind (label)", "file_path",
 	"language", "start_line", "end_line", "start_byte", "end_byte",
 	"complexity", "extraction_confidence (confidence)",
 	"is_exported", "is_entry_point", "is_test",
 	"signature", "return_type", "docstring",
+}
+
+// knownEdgePropertyList is the equivalent for EDGE variables.
+// #612: pre-fix the unknown-property warning always showed node props
+// even when the offending variable was bound to an edge — pointing the
+// user at the wrong fix. Edge result rows currently carry `kind` and
+// `confidence` (engine.go ~1680); future fields (source) get added
+// here when surfaced to pinchQL.
+var knownEdgePropertyList = []string{
+	"kind", "confidence",
 }
 
 // collectUnknownPropertyWarnings walks the parsed query and returns one
@@ -128,26 +138,49 @@ func collectUnknownPropertyWarnings(q *queryAST) []string {
 	if q == nil {
 		return nil
 	}
-	unknown := map[string]struct{}{}
-	check := func(prop string) {
+	// #612: tag each unknown property with whether the variable on the
+	// LHS was bound to an edge. Pre-fix the warning always recommended
+	// node properties — useless when the user wrote `r.source` on a
+	// `[r:CALLS]` edge.
+	edgeVars := map[string]bool{}
+	for _, pat := range q.patterns {
+		if pat.edgeVar != "" {
+			edgeVars[pat.edgeVar] = true
+		}
+	}
+	type unknownRef struct {
+		isEdge bool
+	}
+	unknown := map[string]unknownRef{}
+	check := func(variable, prop string) {
 		if prop == "" {
 			return
 		}
-		if cypherPropToCol(prop) != "" {
+		isEdge := variable != "" && edgeVars[variable]
+		if isEdge {
+			if isKnownEdgeProperty(prop) {
+				return
+			}
+		} else if cypherPropToCol(prop) != "" {
 			return
 		}
-		unknown[prop] = struct{}{}
+		// Don't downgrade an existing edge mark to node-only just because
+		// the same property name appears on a node var elsewhere — keep
+		// the more-specific edge warning when both apply.
+		if existing, ok := unknown[prop]; !ok || (isEdge && !existing.isEdge) {
+			unknown[prop] = unknownRef{isEdge: isEdge}
+		}
 	}
 	// Flat WHERE conditions (the common AND-chain path).
 	for _, c := range q.conditions {
-		check(c.property)
+		check(c.variable, c.property)
 	}
 	// Recursive WHERE tree (paren-grouped queries / NOT-groups).
 	var walk func(w whereExpr)
 	walk = func(w whereExpr) {
 		switch e := w.(type) {
 		case condExpr:
-			check(e.c.property)
+			check(e.c.variable, e.c.property)
 		case binaryExpr:
 			walk(e.left)
 			walk(e.right)
@@ -157,17 +190,20 @@ func collectUnknownPropertyWarnings(q *queryAST) []string {
 	}
 	walk(q.where)
 	// Inline pattern match braces: MATCH (n:Function {foo:"x"}).
+	// Inline braces are always on node patterns (fromVar/toVar) — pinchQL
+	// doesn't accept inline braces on edge declarations — so pass an
+	// empty variable to default to the node warning.
 	for _, pat := range q.patterns {
 		for prop := range pat.fromProps {
-			check(prop)
+			check(pat.fromVar, prop)
 		}
 		for prop := range pat.toProps {
-			check(prop)
+			check(pat.toVar, prop)
 		}
 	}
-	// RETURN projections — n.foo references count too.
+	// RETURN projections — n.foo / r.foo references count too.
 	for _, rv := range q.returnVars {
-		check(rv.property)
+		check(rv.variable, rv.property)
 	}
 	if len(unknown) == 0 {
 		return nil
@@ -179,11 +215,31 @@ func collectUnknownPropertyWarnings(q *queryAST) []string {
 	sort.Strings(names)
 	out := make([]string, 0, len(names))
 	for _, n := range names {
+		propList := knownPropertyList
+		kind := "node"
+		if unknown[n].isEdge {
+			propList = knownEdgePropertyList
+			kind = "edge"
+		}
 		out = append(out, fmt.Sprintf(
-			"property %q not recognized; treated as undefined (always false in comparisons). Valid properties: %s.",
-			n, strings.Join(knownPropertyList, ", ")))
+			"property %q not recognized on %s variable; treated as undefined (always false in comparisons). Valid %s properties: %s.",
+			n, kind, kind, strings.Join(propList, ", ")))
 	}
 	return out
+}
+
+// isKnownEdgeProperty reports whether prop is one of the edge-variable
+// properties surfaced by the engine into result rows. Mirror of the
+// cypherPropToCol switch but for edges. Kept tiny — when a new edge
+// property gets exposed (e.g. `source` once #475's edges.source column
+// is plumbed through to pinchQL projections), add it here AND in
+// knownEdgePropertyList.
+func isKnownEdgeProperty(prop string) bool {
+	switch prop {
+	case "kind", "confidence":
+		return true
+	}
+	return false
 }
 
 // collectCrossColumnWarnings (#593) walks the WHERE tree for

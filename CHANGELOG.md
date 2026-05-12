@@ -7,6 +7,19 @@ minors.
 
 ## [Unreleased]
 
+## [v0.32.0] — 2026-05-12 — loop-2 dogfood haul: 0%-coverage gates + edge-property warning pedagogy
+
+Three issues filed by autoresearcher round 2 against v0.31, fixed in one batch. Two are 0%-coverage gates on load-bearing helpers (#611 pinchQL `NOT (...)` Go-side eval, #613 `db.CurrentSchemaVersion`) — same risk class as #607. The third is a pedagogy refinement: edge-property warnings now list edge properties instead of misleading users with the symbol property list.
+
+No schema change — all v0.32 work runs on schema v23.
+
+### Fixed
+- **`pinchQL` edge-property warnings now list edge properties ([#612](https://github.com/kwad77/pincher/issues/612)).** Pre-fix, querying `r.source` (an unrecognized edge property) emitted `Valid properties: id, name, qualified_name, kind, file_path, language, ...` — every property listed was a SYMBOL property even though the user wrote a property reference on an edge variable. Now `collectUnknownPropertyWarnings` tracks each pattern's `edgeVar` and emits `Valid edge properties: kind, confidence` when the offending variable was bound to an edge. Same pedagogy spirit as #473/#499/#501 — fix the part that actually misleads.
+
+### Tested
+- **`notExpr.eval` Go-side fallback ([#611](https://github.com/kwad77/pincher/issues/611)).** The `NOT (...)` in-Go evaluation path was 0% covered. SQL pushdown handles most cases but variable-length BFS and RETURN-time post-filter fall through to `notExpr.eval` — a typo flipping `!` to `==` would silently invert every fall-back result. Six new tests pin the contract: `notExpr` inversion, double-negation, NOT over `binaryExpr`, `binaryExpr` AND/OR semantics, and the `matchesWhere` entry point. Same risk class as #607 (`redactSensitiveSlice`).
+- **`db.CurrentSchemaVersion` version-drift gate ([#613](https://github.com/kwad77/pincher/issues/613)).** Was 0% covered despite being load-bearing for `pincher list` and `pincher doctor` cross-binary drift detection (#236). Two new tests: pin the `len(schemaMigrations) + 1` relationship (catches `+1`→`+0` regression), and assert it equals the freshly-opened DB's `schema_version` row (catches migration-application skips).
+
 ## [v0.31.0] — 2026-05-12 — autoresearcher haul: dead code, NULL pinchQL, redact tests, audit-shape, HTTP method semantics
 
 Five issues filed by an autoresearcher dogfood probe of v0.30 against pincher-repo, fixed in one batch. The bug class is "silently wrong UX": dead unreferenced helper, predicates that match nothing because of SQL tri-state, untested credential redaction, guide misroutes, and a 404 that misleads operators about whether an endpoint exists.
