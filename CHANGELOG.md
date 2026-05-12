@@ -7,6 +7,19 @@ minors.
 
 ## [Unreleased]
 
+## [v0.35.0] — 2026-05-12 — envelope discipline + MCP surface split
+
+Three changes that shift how pincher's tool surface presents to agents. Pedagogy-shape `next_steps` no longer ride on every successful response (kept on empty/ambiguous results where the pedagogy is load-bearing). New `context lite=true` mode returns source-only minimum-envelope for the v0.36 PreToolUse hook redirect path. The MCP-visible tool surface drops from 22 to 9 — operator/diagnostic tools (architecture, health, schema, list, index, adr, neighborhood, stats, doctor, rebuild_fts, self_test, dead_code) remain reachable via `POST /v1/<tool>` HTTP for monitoring dashboards and ops automation.
+
+No schema change — all v0.35 work runs on schema v23.
+
+### Added
+- **`verbose=true` universal opt-in for the full `_meta` envelope ([#622](https://github.com/kwad77/pincher/issues/622)).** Default behavior on the success path now strips pedagogy `next_steps` (workflow hints like "you found Foo, now run context on its ID" — useful once, then noise on every subsequent call). Stripping is gated to leave warning-bearing responses (`warnings`, `diagnosis`) and same-tool pagination entries (`tool: "list"` continuation on a `list` call) untouched. Agents that want the full instrumentation envelope pass `verbose=true` on any tool.
+- **`context lite=true` source-only minimum-envelope mode ([#623](https://github.com/kwad77/pincher/issues/623)).** Returns `{id, source}` and nothing else — no imports walk, no callees walk, no next_steps. Used by the v0.36 PreToolUse hook redirect when replacing a Read call: agent gets exactly the bytes Read would have given them, with the smallest possible envelope. Same retrieval semantics as positional Read but with byte-offset precision. Skips the `IMPORTS`/`CALLS` edge walks that account for most of `context`'s per-call latency on big symbols.
+
+### Changed
+- **MCP-visible tool surface narrows from 22 to 9 ([#624](https://github.com/kwad77/pincher/issues/624)).** Agent-facing set: `search`, `symbol`, `symbols`, `context`, `trace`, `query`, `guide`, `changes`, `fetch`. The other 13 (operator/diagnostic tools) are now registered via the new `addOperatorTool` helper which populates `s.handlers` (HTTP dispatch) and `s.tools` (registry / OpenAPI / output schemas / parity gates) but skips the MCP `AddTool` call. The MCP `tools/list` response shrinks to the working set most agents reach for; the rest stay on `POST /v1/<tool>` for operators. CLI ↔ HTTP parity (#558 phase 3) is preserved — every CLI subcommand still has its corresponding endpoint.
+
 ## [v0.34.0] — 2026-05-12 — measurement honesty: bounded percentages, structured fields, per-tier README claims
 
 Three changes that shift how pincher reports its value to a more useful shape. Bounded percentages are easier to reason about per-call than compounding multipliers; structured fields scale better across clients than parseable prose; per-tier README claims let users match expected savings to the workflow shape they actually have. Forward-looking repositioning — the prior shapes were fine for a first pass; these shapes are clearer for the use cases that have emerged.

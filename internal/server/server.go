@@ -2085,6 +2085,24 @@ func (s *Server) addTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 	s.tools[tool.Name] = tool
 }
 
+// addOperatorTool registers an operator/diagnostic tool: HTTP route +
+// handler map + tool registry, but NOT on the MCP server. Used by
+// #624 to slim the agent-visible MCP surface to its working set
+// (search, symbol, symbols, context, trace, query, guide, changes,
+// fetch) while keeping `/v1/<tool>` HTTP dispatch unchanged for
+// operators monitoring `/v1/doctor`, `/v1/health`, `/v1/stats`,
+// `/v1/dead_code`, `/v1/architecture`, etc.
+//
+// CLI ↔ HTTP parity (#558 phase 3) gate is unaffected: every CLI
+// subcommand still has a corresponding `/v1/<tool>` endpoint.
+// OpenAPI spec still advertises every endpoint because openAPISpec
+// derives from `s.handlers`, which this populates. Output schema
+// pairing (#581) still works because `s.tools` carries the registration.
+func (s *Server) addOperatorTool(tool *mcp.Tool, handler mcp.ToolHandler) {
+	s.handlers[tool.Name] = handler
+	s.tools[tool.Name] = tool
+}
+
 // toolArgKeysFor returns the set of argument keys declared in tool's
 // InputSchema.properties — used by unknownArgs to detect typos / unknown
 // args (#499). Lazily parses once per tool; cached on s.toolArgKeys.
@@ -2133,6 +2151,14 @@ func (s *Server) unknownArgs(tool string, args map[string]any) []string {
 	}
 	var warnings []string
 	for k := range args {
+		// #622: `verbose` is a universal meta-arg accepted by every tool
+		// — it controls _meta envelope shape (drops pedagogy-only
+		// next_steps when false). Skipping it here keeps the per-tool
+		// InputSchema definitions clean while still letting callers opt
+		// into the full envelope on any call.
+		if k == "verbose" {
+			continue
+		}
 		if !allowed[k] {
 			// Build a sorted hint of accepted keys so the warning is
 			// actionable (agent can self-correct on the next call).
@@ -2152,8 +2178,8 @@ func (s *Server) unknownArgs(tool string, args map[string]any) []string {
 }
 
 func (s *Server) registerTools() {
-	// 1. index
-	s.addTool(&mcp.Tool{
+	// 1. index — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "index",
 		Description: "**Call once per project before using any other tool.** Indexes a repository: extracts symbols with byte offsets, builds the knowledge graph, populates FTS5 search — all in one pass. Incremental by default (content-hash checks skip unchanged files; the watcher keeps it fresh during a session). Pass `force=true` to re-parse every file (rare; only after schema/extractor changes).",
 		InputSchema: json.RawMessage(`{
@@ -2193,12 +2219,13 @@ func (s *Server) registerTools() {
 	// 4. context
 	s.addTool(&mcp.Tool{
 		Name:        "context",
-		Description: "**Use before editing a function** to read it together with everything it directly imports and calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}], callees: [{source, ...}]}` — `imports` is cross-package dependencies (IMPORTS edges), `callees` is the in-package helpers it directly calls (CALLS edges). De-duplicated so a symbol that's both imported and called only appears once. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source. Pass `fields=symbol,callees` to drop sections you don't need.",
+		Description: "**Use before editing a function** to read it together with everything it directly imports and calls — one shot, ~90% token reduction vs reading files. Returns `{symbol: {source, ...}, imports: [{source, ...}], callees: [{source, ...}]}` — `imports` is cross-package dependencies (IMPORTS edges), `callees` is the in-package helpers it directly calls (CALLS edges). De-duplicated so a symbol that's both imported and called only appears once. Prefer this over `symbol` whenever you need to understand how a function works in context, not just see its source. Pass `fields=symbol,callees` to drop sections you don't need. Pass `lite=true` for source-only retrieval — minimum-envelope shape used by the PreToolUse hook redirect when replacing a Read call.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["id"],"properties":{
 				"id":{"type":"string","description":"Symbol ID to fetch with its imports."},
 				"project":{"type":"string"},
-				"fields":{"type":"string","description":"Comma-separated top-level keys to include, e.g. 'symbol,callees' to drop imports. Omit for all. _meta is preserved unconditionally."}
+				"fields":{"type":"string","description":"Comma-separated top-level keys to include, e.g. 'symbol,callees' to drop imports. Omit for all. _meta is preserved unconditionally."},
+				"lite":{"type":"boolean","description":"When true, return only {id, source} — no imports, no callees, no next_steps. Used by PreToolUse hook to land on minimum-envelope shape when redirecting a Read call. Default false."}
 			}
 		}`),
 	}, s.handleContext)
@@ -2271,8 +2298,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleChanges)
 
-	// 9. dead-code
-	s.addTool(&mcp.Tool{
+	// 9. dead-code — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "dead_code",
 		Description: "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision: `language=Go` (1.0-confidence AST extraction) + `kinds=Function,Method`. Lower `min_confidence` and broaden `kinds` at the cost of false positives from regex-tier extractors that under-resolve cross-file edges. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
 		InputSchema: json.RawMessage(`{
@@ -2286,8 +2313,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleDeadCode)
 
-	// 10. architecture
-	s.addTool(&mcp.Tool{
+	// 10. architecture — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "architecture",
 		Description: "**Call once at the start of unfamiliar work** to orient. Returns language breakdown, entry points, hotspot functions (most-called = highest change risk), and graph statistics. Hotspots default to production code only (test helpers are filtered); pass include_tests=true to surface them too. Much cheaper than reading files to understand the structure.",
 		InputSchema: json.RawMessage(`{
@@ -2298,8 +2325,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleArchitecture)
 
-	// 10. schema
-	s.addTool(&mcp.Tool{
+	// 10. schema — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "schema",
 		Description: "**Use before writing a `query`** to see what node/edge kinds exist in this project. Returns node-kind counts (Function, Class, Method, …), edge-kind counts (CALLS, IMPORTS, …), and totals.",
 		InputSchema: json.RawMessage(`{
@@ -2309,8 +2336,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleSchema)
 
-	// 11. list
-	s.addTool(&mcp.Tool{
+	// 11. list — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "list",
 		Description: "**Use to confirm which projects are indexed** before scoping a query with `project=`. Returns `[{name, path, files, symbols, edges, indexed_at}, ...]` for active projects. Paginated: defaults to 50 entries per call (limit/offset), with the next page surfaced in `_meta.next_steps` when more remain. Defaults filter out projects whose on-disk path no longer exists, whose last index is older than `active_within_days` (14 by default), or that have zero edges (typically empty worktrees). Pass `active=false`/`include_dead=true`/`min_edges=0` to widen the filter, `limit=0` for the legacy unbounded dump, `prune_dead=true` to physically remove dead-on-disk projects from the store.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{
@@ -2324,8 +2351,8 @@ func (s *Server) registerTools() {
 		}}`),
 	}, s.handleList)
 
-	// 12. adr
-	s.addTool(&mcp.Tool{
+	// 12. adr — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "adr",
 		Description: "**Use to record decisions/conventions/gotchas** that should survive across sessions. Persistent project knowledge store. Actions: `set` (store), `get` (retrieve), `list` (all entries), `delete`. Examples: `adr set PURPOSE 'payment processing service'`; `adr set STACK 'Go+SQLite+Redis'`; `adr list` to recall everything stored. Call `adr list` early in unfamiliar work — prior agents' notes often save a `search` chain.",
 		InputSchema: json.RawMessage(`{
@@ -2338,8 +2365,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleADR)
 
-	// 13. health
-	s.addTool(&mcp.Tool{
+	// 13. health — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "health",
 		Description: "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST vs Regex) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable.",
 		InputSchema: json.RawMessage(`{
@@ -2349,8 +2376,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleHealth)
 
-	// 14. stats
-	s.addTool(&mcp.Tool{
+	// 14. stats — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "stats",
 		Description: "**Use to track context-budget savings** for the current session and all-time. Returns tokens used, tokens saved (vs reading whole files), call count, plus per-project index size (files, symbols, edges). Useful as a sanity check that pincher tools are being preferred over `Read`/`Grep` — if `tokens_saved` is 0 after a chunk of work, the agent is probably bypassing the index.",
 		InputSchema: json.RawMessage(`{
@@ -2385,8 +2412,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleGuide)
 
-	// 17. neighborhood
-	s.addTool(&mcp.Tool{
+	// 17. neighborhood — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "neighborhood",
 		Description: "**Returns same-file symbols, NOT graph adjacency.** Despite the name (#498), this tool answers \"what other symbols live in the same file as the seed?\" — useful for in-file refactor planning. For graph adjacency (callers / callees / readers / writers), use `trace direction=both` instead. Given a seed symbol ID, returns every symbol in the same file (signatures + line ranges) ordered by source position. One round-trip vs N `symbol` calls or one whole-file `Read`. Paginated: defaults to 50 neighbors per call (limit/offset), with the next page surfaced in `_meta.next_steps` when the file has more. Default response excludes `source`; pass `include_source=true` to also fetch each neighbor's body.",
 		InputSchema: json.RawMessage(`{
@@ -2401,8 +2428,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleNeighborhood)
 
-	// 18. init
-	s.addTool(&mcp.Tool{
+	// 18. init — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "init",
 		Description: "**Seed an editor's pincher usage policy file** without dropping into a separate shell. Same surface as `pincher init` CLI but defaults to dry-run for safety; pass `write=true` to actually mutate files. Targets: claude / cursor / cursor-legacy / windsurf / aider / detect / all. The continue target is rejected (always-global, escapes project scope from an MCP context). Returns per-target {target, path, action, diff_preview, bytes_in, bytes_out}.",
 		InputSchema: json.RawMessage(`{
@@ -2414,8 +2441,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleInit)
 
-	// 19. doctor (#558 phase 2)
-	s.addTool(&mcp.Tool{
+	// 19. doctor (#558 phase 2) — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "doctor",
 		Description: "**Diagnostic report from the local pincher database** — schema version, DB + WAL file sizes, per-project staleness, recent extraction failures, recent slow queries. Same data the `pincher doctor --json` CLI returns; exposed via MCP so dashboards and ops automations can poll without shelling out. Read-only; safe to call repeatedly.",
 		InputSchema: json.RawMessage(`{
@@ -2426,8 +2453,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleDoctor)
 
-	// 20. rebuild_fts (#558 phase 2)
-	s.addTool(&mcp.Tool{
+	// 20. rebuild_fts (#558 phase 2) — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "rebuild_fts",
 		Description: "**Admin: rebuild every FTS5 index from source data.** Equivalent to `pincher rebuild-fts` CLI. Use after symptoms of FTS corruption (search results missing symbols you can confirm exist via `query`). Long-running on large indexes (~1 second per ~10k symbols). Mutates DB; requires confirm=true to actually run — without it, returns the projected work without touching anything.",
 		InputSchema: json.RawMessage(`{
@@ -2437,8 +2464,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleRebuildFTS)
 
-	// 21. self_test (#558 phase 2)
-	s.addTool(&mcp.Tool{
+	// 21. self_test (#558 phase 2) — operator tool (HTTP only after #624)
+	s.addOperatorTool(&mcp.Tool{
 		Name:        "self_test",
 		Description: "**Smoke-test the pincher install** by exercising the index → search → byte-offset-retrieve loop. Equivalent to `pincher self-test` CLI. Returns per-step pass/fail. Useful as a liveness check after a binary upgrade or in CI. Read-only; uses a temp project that's cleaned up before return.",
 		InputSchema: json.RawMessage(`{
@@ -2895,6 +2922,27 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 
 	root, _ := s.resolveProjectRoot(sym.ProjectID)
 	source, _ := index.ReadSymbolSource(root, *sym)
+
+	// #623: lite=true short-circuit. Returns just {id, source} —
+	// no imports, no callees, no staleness warning, no next_steps.
+	// Used by the v0.36 PreToolUse hook redirect: when redirecting a
+	// Read of a large indexed file to context, the agent gets exactly
+	// the bytes Read would have given them, with the smallest possible
+	// envelope. Same retrieval semantics as positional Read but with
+	// byte-offset precision. Skips the IMPORTS/CALLS edge walks that
+	// account for most of context's per-call latency on big symbols.
+	if lite, _ := args["lite"].(bool); lite {
+		liteData := map[string]any{
+			"id":     sym.ID,
+			"source": source,
+		}
+		// Apply field projection if requested — keeps the contract
+		// consistent (callers already use `fields=` patterns elsewhere).
+		liteData = projectFields(liteData, fieldSet)
+		liteResponseJSON, _ := json.Marshal(liteData)
+		return s.jsonResultWithMeta(liteData, start, tool, args,
+			s.savedVsFileSizesSession(sym.ProjectID, root, []string{sym.FilePath}, liteResponseJSON)), nil
+	}
 
 	// Find IMPORTS edges from this symbol — cross-package dependencies.
 	importEdges, _ := s.store.EdgesFrom(sym.ID, []string{"IMPORTS"})
@@ -6925,6 +6973,44 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// installation.
 	if cel := s.maybeFormatCelebration(); cel != "" {
 		meta["celebration"] = cel
+	}
+
+	// #622: drop pedagogy-shape next_steps on the success path. Most
+	// next_steps entries on a happy-path response are workflow hints
+	// ("you found Foo with search; now run context on its ID") — useful
+	// once, then noise on every subsequent call. Suppressed when:
+	//   - the caller didn't opt in to verbose=true
+	//   - there are no warnings (warnings + next_steps together are the
+	//     pedagogy that justifies the chrome — drop both, or keep both)
+	//   - there's no diagnosis (zero-result advisory pairs with steps)
+	//   - the next_steps don't include a continue-the-same-tool entry
+	//     (pagination — `limit/offset` continuation IS load-bearing
+	//     follow-up info, not pedagogy; preserve it)
+	//
+	// Gated on `tool != ""` so unit tests that call handlers directly
+	// without setting req.Params.Name preserve their next_steps
+	// assertions. In production every MCP invocation populates the
+	// tool name, so the strip applies on every real call.
+	verbose, _ := args["verbose"].(bool)
+	if !verbose && tool != "" {
+		_, hasWarn := meta["warnings"]
+		_, hasDiag := meta["diagnosis"]
+		if !hasWarn && !hasDiag {
+			if steps, ok := meta["next_steps"].([]map[string]string); ok && len(steps) > 0 {
+				keep := false
+				for _, st := range steps {
+					if st["tool"] == tool {
+						// Same-tool entry signals pagination / continuation —
+						// real follow-up, not pedagogy. Keep the whole list.
+						keep = true
+						break
+					}
+				}
+				if !keep {
+					delete(meta, "next_steps")
+				}
+			}
+		}
 	}
 
 	out, _ := json.MarshalIndent(data, "", "  ")
