@@ -75,7 +75,12 @@ type Server struct {
 	// by the tool-contract golden-file test (#127) so any rename / removal
 	// of a tool surfaces as a deliberate, reviewable diff.
 	tools   map[string]*mcp.Tool
-	version string
+	// outputSchemas maps tool name → JSON Schema describing its 200
+	// response body (#581). Populated by addToolWithOutput at
+	// registerTools time; consumed by openAPISpec to render real
+	// per-endpoint response contracts.
+	outputSchemas map[string]json.RawMessage
+	version       string
 
 	// toolArgKeys is the per-tool allow-list of declared input args
 	// (#499). Computed lazily under toolArgKeysOnce on first
@@ -282,6 +287,17 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		},
 	)
 	s.registerTools()
+	// #581: stamp the per-tool OpenAPI response schemas after
+	// registration. Done as a post-pass so registerTools stays
+	// readable (~24 addTool calls without an extra arg each) and the
+	// schemas live in their own file. The gate test pins every
+	// registered tool to declare one.
+	s.outputSchemas = make(map[string]json.RawMessage, len(s.tools))
+	for name := range s.tools {
+		if raw := outputSchemaJSON(name); raw != nil {
+			s.outputSchemas[name] = raw
+		}
+	}
 	// #420: when the supervisor supplied a stable PINCHER_SESSION_ID,
 	// reload prior counters from the sessions row so the session-level
 	// stats survive a supervised respawn. Flushes are INSERT OR REPLACE
@@ -1190,6 +1206,59 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"error": "empty result"})
 }
 
+// openAPIComponentSchemas defines the shared schemas referenced via
+// $ref from per-endpoint response bodies (#581). Two components:
+//
+//   - Meta: the `_meta` envelope every tool response carries —
+//     baseline_method, tokens_used/saved, latency_ms, optional
+//     next_steps, optional warnings, optional celebration.
+//   - Error: the `{error: string}` shape every handler returns from
+//     errResult(). Wired as the `default` response on every endpoint.
+//
+// Lifting these to components/schemas means a single source of truth
+// for the envelope — when the envelope grows a field, the spec
+// updates in one place instead of N.
+func openAPIComponentSchemas() map[string]any {
+	return map[string]any{
+		"Meta": map[string]any{
+			"type":        "object",
+			"description": "Envelope present on every tool response. Tracks token accounting, latency, and (optionally) next-step recommendations + warnings + milestone celebrations.",
+			"properties": map[string]any{
+				"baseline_method": map[string]any{
+					"type":        "string",
+					"enum":        []any{"full_file_read", "partial_read", "none"},
+					"description": "Which kind of work this tool replaced. `full_file_read` for tools that replace a Read of source files; `partial_read` for repeat-access; `none` for admin / orientation tools with no Read alternative.",
+				},
+				"tokens_used":  map[string]any{"type": "integer", "description": "Approx tokens spent producing this response."},
+				"tokens_saved": map[string]any{"type": []any{"integer", "null"}, "description": "Approx tokens saved vs reading the underlying source files. `null` when baseline_method=none."},
+				"latency_ms":   map[string]any{"type": "integer", "description": "Server-side handler latency in milliseconds."},
+				"savings":      map[string]any{"type": "string", "description": "Optional human-readable savings line; suppressed when baseline_method=none."},
+				"next_steps": map[string]any{
+					"type":        "array",
+					"description": "Suggested next tool calls to keep the agent oriented.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"tool": map[string]any{"type": "string"},
+							"args": map[string]any{"type": "string", "description": "JSON-encoded arguments for the suggested tool call."},
+							"why":  map[string]any{"type": "string"},
+						},
+					},
+				},
+				"warnings":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Non-fatal advisories — typo'd args, unknown property names, etc. (#473, #499, #501)."},
+				"celebration": map[string]any{"type": "string", "description": "One-shot tier-milestone line, fired exactly once per installation per tier (#494)."},
+			},
+			"required": []any{"latency_ms", "tokens_used"},
+		},
+		"Error": map[string]any{
+			"type":        "object",
+			"description": "Returned for any non-success response (auth failures, validation errors, server errors).",
+			"properties":  map[string]any{"error": map[string]any{"type": "string"}},
+			"required":    []any{"error"},
+		},
+	}
+}
+
 // openAPISpec returns a minimal OpenAPI 3.1 document describing every HTTP tool endpoint.
 // Served at GET /v1/openapi.json so any client (Postman, Cursor, copilots) can auto-import.
 //
@@ -1235,6 +1304,18 @@ func (s *Server) openAPISpec(r *http.Request) map[string]any {
 				}
 			}
 		}
+		// #581: per-tool response schema. Falls back to the bare
+		// {type: object} placeholder when no OutputSchema was
+		// registered. The gate test
+		// TestOpenAPI_EveryToolHasNonPlaceholderOutputSchema fails
+		// CI when a future tool is registered without one.
+		var responseSchema any = map[string]any{"type": "object"}
+		if raw, ok := s.outputSchemas[t]; ok && len(raw) > 0 {
+			var parsed any
+			if err := json.Unmarshal(raw, &parsed); err == nil {
+				responseSchema = parsed
+			}
+		}
 		paths[prefix+"/v1/"+t] = map[string]any{
 			"post": map[string]any{
 				"operationId": t,
@@ -1244,7 +1325,14 @@ func (s *Server) openAPISpec(r *http.Request) map[string]any {
 					"content":  map[string]any{"application/json": map[string]any{"schema": requestSchema}},
 				},
 				"responses": map[string]any{
-					"200": map[string]any{"description": "Tool result", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object"}}}},
+					"200": map[string]any{
+						"description": "Tool result",
+						"content":     map[string]any{"application/json": map[string]any{"schema": responseSchema}},
+					},
+					"default": map[string]any{
+						"description": "Error response",
+						"content":     map[string]any{"application/json": map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/Error"}}},
+					},
 				},
 			},
 		}
@@ -1253,9 +1341,10 @@ func (s *Server) openAPISpec(r *http.Request) map[string]any {
 		"get": map[string]any{"operationId": "health", "summary": "Liveness probe", "responses": map[string]any{"200": map[string]any{"description": "ok"}}},
 	}
 	spec := map[string]any{
-		"openapi": "3.1.0",
-		"info":    map[string]any{"title": "pincherMCP HTTP API", "version": s.version},
-		"paths":   paths,
+		"openapi":    "3.1.0",
+		"info":       map[string]any{"title": "pincherMCP HTTP API", "version": s.version},
+		"paths":      paths,
+		"components": map[string]any{"schemas": openAPIComponentSchemas()},
 	}
 	if prefix != "" || (s.trustProxy && r.Header.Get("X-Forwarded-Host") != "") {
 		proto := "http"

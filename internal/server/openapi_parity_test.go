@@ -118,3 +118,110 @@ func TestOpenAPI_PerToolSchemaIsRealNotPlaceholder(t *testing.T) {
 		t.Errorf("/v1/search schema missing 'query' property; got props: %v", props)
 	}
 }
+
+// TestOpenAPI_EveryToolHasNonPlaceholderResponseSchema is the
+// response-side parity gate (#581). Sibling of
+// TestOpenAPI_PerToolSchemaIsRealNotPlaceholder which gates the
+// request side.
+//
+// Pre-#581 every endpoint emitted a 200 schema of the bare
+// {type: object} placeholder — useless for generated SDKs and
+// auto-importing OpenAPI clients. Now every tool registered in
+// s.handlers must have an OutputSchema with `properties` AND a
+// `_meta` reference. Catches new tools added without an entry in
+// outputSchemas.
+func TestOpenAPI_EveryToolHasNonPlaceholderResponseSchema(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/openapi.json", nil)
+	srv.ServeHTTP(w, r)
+
+	var spec map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("openapi.json parse: %v", err)
+	}
+	paths := spec["paths"].(map[string]any)
+
+	var missing []string
+	for name := range srv.handlers {
+		path, ok := paths["/v1/"+name].(map[string]any)
+		if !ok {
+			t.Errorf("/v1/%s missing from openapi paths (parity gate failure?)", name)
+			continue
+		}
+		post, ok := path["post"].(map[string]any)
+		if !ok {
+			continue
+		}
+		responses, ok := post["responses"].(map[string]any)
+		if !ok {
+			t.Errorf("/v1/%s has no responses", name)
+			continue
+		}
+		ok200, ok := responses["200"].(map[string]any)
+		if !ok {
+			t.Errorf("/v1/%s has no 200 response", name)
+			continue
+		}
+		content := ok200["content"].(map[string]any)
+		app := content["application/json"].(map[string]any)
+		schema, ok := app["schema"].(map[string]any)
+		if !ok {
+			missing = append(missing, name+" (no schema object)")
+			continue
+		}
+		props, hasProps := schema["properties"].(map[string]any)
+		if !hasProps || len(props) == 0 {
+			missing = append(missing, name+" (placeholder {type: object})")
+			continue
+		}
+		// Every response must reference the shared _meta envelope.
+		if _, hasMeta := props["_meta"]; !hasMeta {
+			missing = append(missing, name+" (missing _meta in schema)")
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("tools without real OpenAPI response schema (#581):\n  - %s\n"+
+			"Add an entry in internal/server/openapi_output_schemas.go's outputSchemas map. "+
+			"Every tool's success response must declare its top-level fields plus a _meta "+
+			"reference so consumers (Postman, Cursor, generated SDKs) get a real contract.",
+			strings.Join(missing, "\n  - "))
+	}
+}
+
+// TestOpenAPI_HasSharedMetaAndErrorComponents pins the
+// components/schemas/Meta + Error definitions emitted by
+// openAPIComponentSchemas (#581). Per-endpoint schemas $ref these,
+// so removing them silently breaks every response shape.
+func TestOpenAPI_HasSharedMetaAndErrorComponents(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/openapi.json", nil)
+	srv.ServeHTTP(w, r)
+
+	var spec map[string]any
+	json.Unmarshal(w.Body.Bytes(), &spec)
+	components, ok := spec["components"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi.json missing components")
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		t.Fatal("components.schemas missing")
+	}
+	for _, want := range []string{"Meta", "Error"} {
+		if _, ok := schemas[want].(map[string]any); !ok {
+			t.Errorf("components/schemas/%s missing", want)
+		}
+	}
+	// Sanity: Meta declares baseline_method / tokens_used / latency_ms.
+	if meta, ok := schemas["Meta"].(map[string]any); ok {
+		props, _ := meta["properties"].(map[string]any)
+		for _, want := range []string{"baseline_method", "tokens_used", "tokens_saved", "latency_ms"} {
+			if _, ok := props[want]; !ok {
+				t.Errorf("Meta schema missing property %q", want)
+			}
+		}
+	}
+}
