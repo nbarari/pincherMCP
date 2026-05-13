@@ -46,7 +46,7 @@ func TestSupervisor_RespawnEmitsToolsListChangedNotification(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout())
 	defer cancel()
 	runDone := make(chan error, 1)
 	go func() { runDone <- sup.Run(ctx) }()

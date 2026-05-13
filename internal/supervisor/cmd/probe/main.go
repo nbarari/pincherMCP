@@ -43,6 +43,22 @@ type rpcMsg struct {
 	Result  json.RawMessage `json:"result,omitempty"`
 }
 
+// rpcTimeout returns the per-RPC round-trip wait used in probe expect()
+// calls. Defaults to 15s; tunable via PINCHER_TEST_RPC_TIMEOUT (Go
+// duration syntax, e.g. "30s", "1m"). Default bumped from 5s → 15s in
+// v0.55 (#681 Bucket A) — the original 5s budget was borderline on
+// the windows-latest CI runner under -p 2 parallelism, surfacing as
+// `TestRun_EndToEnd_BareMode` flakes (`timeout 5s waiting for id=10`).
+// 15s is still fast for a healthy run; dramatically reduces flake rate.
+func rpcTimeout() time.Duration {
+	if v := os.Getenv("PINCHER_TEST_RPC_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 15 * time.Second
+}
+
 func main() {
 	binPath := flag.String("binary", "", "Path to pincher binary. Default: ./pincher.exe in cwd.")
 	supervised := flag.Bool("supervised", false, "Drive `pincher supervised` instead of bare `pincher`.")
@@ -178,7 +194,7 @@ func run(binPath string, supervised bool, totalTimeout time.Duration) error {
 	if err := send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"supervisor-probe","version":"1"}}}`); err != nil {
 		return err
 	}
-	if _, err := expect(1, 5*time.Second); err != nil {
+	if _, err := expect(1, rpcTimeout()); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
 	if err := send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`); err != nil {
@@ -191,7 +207,7 @@ func run(binPath string, supervised bool, totalTimeout time.Duration) error {
 	if err := send(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"health","arguments":{}}}`); err != nil {
 		return err
 	}
-	if _, err := expect(10, 5*time.Second); err != nil {
+	if _, err := expect(10, rpcTimeout()); err != nil {
 		return fmt.Errorf("pre-bump health: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "✓ pre-bump health response received")
@@ -210,7 +226,7 @@ func run(binPath string, supervised bool, totalTimeout time.Duration) error {
 		return err
 	}
 	post := "✗ NO RESPONSE for call 20 — confirms the response-loss bug"
-	if _, err := expect(20, 5*time.Second); err == nil {
+	if _, err := expect(20, rpcTimeout()); err == nil {
 		post = "✓ post-bump stats response received (response-loss fix working)"
 	}
 	fmt.Fprintln(os.Stderr, post)
