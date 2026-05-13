@@ -173,3 +173,21 @@ jobs:
   # before pushing. Baselines under `testdata/bench/` stay committed for
   # local comparison and as a re-promotion starting point if we ever
   # capture the variance dataset.
+
+  # #681 Bucket C: PRs touching code must add a CHANGELOG.d/<num>.<type>.md
+  # stub (per CHANGELOG.d/README.md convention). Pure-doc PRs are exempt.
+  # Pattern eliminates the merge-conflict cost of two concurrent PRs
+  # editing CHANGELOG.md's [Unreleased] section — the recurring friction
+  # that produced ~5 conflicts across the v0.53/v0.54 cycles.
+  changelog-stub-check:
+    name: CHANGELOG stub check
+    runs-on: ubuntu-latest
+    # Only meaningful on PRs (master pushes don't have a "vs base" diff).
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history to diff vs base
+
+      - name: Verify CHANGELOG stub
+        run: bash scripts/changelog-stub-check.sh "origin/${{ github.base_ref }}"
