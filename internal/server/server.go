@@ -2127,64 +2127,13 @@ func (s *Server) addTool(tool *mcp.Tool, handler mcp.ToolHandler) {
 	s.tools[tool.Name] = tool
 }
 
-// addOperatorTool registers an operator/diagnostic tool: HTTP route +
-// handler map + tool registry, plus a redirect-stub on MCP that returns
-// a structured `operator_tool_not_on_mcp` error explaining the HTTP and
-// CLI alternatives (#644). The stub keeps the MCP surface honest about
-// what's reachable: an agent that tries to call e.g. `dead_code` over
-// MCP gets a clear redirect instead of the SDK's bare `unknown tool`,
-// which trains users to think the tool is missing.
-//
-// Originally introduced in #624 to slim the agent-visible MCP working
-// set to (search, symbol, symbols, context, trace, query, guide,
-// changes, fetch). v0.51 #645 restored `index` and `adr` to the working
-// set; v0.51.1 #644 added the redirect-stub for the remaining 11
-// operator tools so future surface changes don't bite users with the
-// same bare-error UX.
-//
-// CLI ↔ HTTP parity (#558 phase 3) gate is unaffected: every CLI
-// subcommand still has a corresponding `/v1/<tool>` endpoint.
-// OpenAPI spec still advertises every endpoint because openAPISpec
-// derives from `s.handlers`, which this populates. Output schema
-// pairing (#581) still works because `s.tools` carries the registration.
-func (s *Server) addOperatorTool(tool *mcp.Tool, handler mcp.ToolHandler) {
-	s.handlers[tool.Name] = handler
-	s.tools[tool.Name] = tool
-	// Mirror the tool on MCP with the redirect stub. The stub's
-	// description leads with [OPERATOR-ONLY] so an agent reading
-	// tools/list sees the redirect upfront and doesn't waste a call.
-	stub := *tool
-	stub.Description = fmt.Sprintf(
-		"[OPERATOR-ONLY — call POST /v1/%s over HTTP or `pincher %s` from CLI] %s",
-		tool.Name, tool.Name, tool.Description,
-	)
-	s.mcp.AddTool(&stub, s.makeOperatorRedirectHandler(tool.Name))
-}
-
-// makeOperatorRedirectHandler builds the MCP-side stub handler returned
-// for operator tools (#644). Returns a structured error pointing at the
-// HTTP endpoint and CLI subcommand — never falls through to the real
-// handler over MCP.
-func (s *Server) makeOperatorRedirectHandler(toolName string) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		body, _ := json.Marshal(map[string]any{
-			"error": map[string]any{
-				"code":    "operator_tool_not_on_mcp",
-				"message": fmt.Sprintf("Tool %q is operator-only and does not run over MCP. Call POST /v1/%s over HTTP, or run `pincher %s` from the CLI. (Surface scoped in v0.35 #624; redirect-stub added in v0.51.1 #644.)", toolName, toolName, toolName),
-				"details": map[string]any{
-					"tool":          toolName,
-					"http_endpoint": "POST /v1/" + toolName,
-					"cli_command":   "pincher " + toolName,
-					"since_version": "v0.35",
-				},
-			},
-		})
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
-		}, nil
-	}
-}
+// (v0.52: addOperatorTool + makeOperatorRedirectHandler removed. The
+// v0.35 #624 surface narrowing — and the v0.51.1 #644 redirect-stub
+// mechanism that compensated for it — both deleted. Aggregator-shaped
+// deployments (zelos, bifrost, detour) collapsed the agent/operator
+// distinction: every pincher tool is now agent-callable via MCP.
+// `addTool` is the only registration path. HTTP routes preserved
+// for ops automation that already integrates against /v1/<tool>.)
 
 // toolArgKeysFor returns the set of argument keys declared in tool's
 // InputSchema.properties — used by unknownArgs to detect typos / unknown
@@ -2388,8 +2337,10 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleChanges)
 
-	// 9. dead-code — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 9. dead_code — agent-facing exploration tool. Restored to MCP-visible
+	// in v0.52 (full reversal of #624) after the aggregator-deployment shape
+	// (zelos, bifrost, detour) made the v0.35 narrowing argument obsolete.
+	s.addTool(&mcp.Tool{
 		Name:        "dead_code",
 		Description: "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision: `language=Go` (1.0-confidence AST extraction) + `kinds=Function,Method`. Lower `min_confidence` and broaden `kinds` at the cost of false positives from regex-tier extractors that under-resolve cross-file edges. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
 		InputSchema: json.RawMessage(`{
@@ -2403,8 +2354,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleDeadCode)
 
-	// 10. architecture — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 10. architecture — agent-facing orient tool. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "architecture",
 		Description: "**Call once at the start of unfamiliar work** to orient. Returns language breakdown, entry points, hotspot functions (most-called = highest change risk), and graph statistics. Hotspots default to production code only (test helpers are filtered); pass include_tests=true to surface them too. Much cheaper than reading files to understand the structure.",
 		InputSchema: json.RawMessage(`{
@@ -2415,8 +2366,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleArchitecture)
 
-	// 10. schema — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 11. schema — agent-callable introspection. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "schema",
 		Description: "**Use before writing a `query`** to see what node/edge kinds exist in this project. Returns node-kind counts (Function, Class, Method, …), edge-kind counts (CALLS, IMPORTS, …), and totals.",
 		InputSchema: json.RawMessage(`{
@@ -2426,8 +2377,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleSchema)
 
-	// 11. list — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 12. list — cross-project enumeration. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "list",
 		Description: "**Use to confirm which projects are indexed** before scoping a query with `project=`. Returns `[{name, path, files, symbols, edges, indexed_at}, ...]` for active projects. Paginated: defaults to 50 entries per call (limit/offset), with the next page surfaced in `_meta.next_steps` when more remain. Defaults filter out projects whose on-disk path no longer exists, whose last index is older than `active_within_days` (14 by default), or that have zero edges (typically empty worktrees). Pass `active=false`/`include_dead=true`/`min_edges=0` to widen the filter, `limit=0` for the legacy unbounded dump, `prune_dead=true` to physically remove dead-on-disk projects from the store.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{
@@ -2458,8 +2409,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleADR)
 
-	// 13. health — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 13. health — drift signals + extraction coverage. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "health",
 		Description: "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST vs Regex) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable.",
 		InputSchema: json.RawMessage(`{
@@ -2469,8 +2420,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleHealth)
 
-	// 14. stats — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 14. stats — session savings + cumulative counters. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "stats",
 		Description: "**Use to track context-budget savings** for the current session and all-time. Returns tokens used, tokens saved (vs reading whole files), call count, plus per-project index size (files, symbols, edges). Useful as a sanity check that pincher tools are being preferred over `Read`/`Grep` — if `tokens_saved` is 0 after a chunk of work, the agent is probably bypassing the index.",
 		InputSchema: json.RawMessage(`{
@@ -2505,8 +2456,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleGuide)
 
-	// 17. neighborhood — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 17. neighborhood — graph view around a symbol. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "neighborhood",
 		Description: "**Returns same-file symbols, NOT graph adjacency.** Despite the name (#498), this tool answers \"what other symbols live in the same file as the seed?\" — useful for in-file refactor planning. For graph adjacency (callers / callees / readers / writers), use `trace direction=both` instead. Given a seed symbol ID, returns every symbol in the same file (signatures + line ranges) ordered by source position. One round-trip vs N `symbol` calls or one whole-file `Read`. Paginated: defaults to 50 neighbors per call (limit/offset), with the next page surfaced in `_meta.next_steps` when the file has more. Default response excludes `source`; pass `include_source=true` to also fetch each neighbor's body.",
 		InputSchema: json.RawMessage(`{
@@ -2521,8 +2472,11 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleNeighborhood)
 
-	// 18. init — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 18. init — agent-callable for new-repo onboarding via aggregator
+	// (e.g., zelos surfacing "user opened repo X" → agent fires init).
+	// v0.52 reversal of #624. Description leads with the side-effect
+	// warning so agents confirm with the user before invoking.
+	s.addTool(&mcp.Tool{
 		Name:        "init",
 		Description: "**Seed an editor's pincher usage policy file** without dropping into a separate shell. Same surface as `pincher init` CLI but defaults to dry-run for safety; pass `write=true` to actually mutate files. Targets: claude / cursor / cursor-legacy / windsurf / aider / detect / all. The continue target is rejected (always-global, escapes project scope from an MCP context). Returns per-target {target, path, action, diff_preview, bytes_in, bytes_out}.",
 		InputSchema: json.RawMessage(`{
@@ -2534,8 +2488,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleInit)
 
-	// 19. doctor (#558 phase 2) — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 19. doctor — drift + sanity diagnostics. v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "doctor",
 		Description: "**Diagnostic report from the local pincher database** — schema version, DB + WAL file sizes, per-project staleness, recent extraction failures, recent slow queries. Same data the `pincher doctor --json` CLI returns; exposed via MCP so dashboards and ops automations can poll without shelling out. Read-only; safe to call repeatedly.",
 		InputSchema: json.RawMessage(`{
@@ -2546,8 +2500,10 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleDoctor)
 
-	// 20. rebuild_fts (#558 phase 2) — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 20. rebuild_fts — agent-callable for "search feels broken, refresh
+	// the FTS5 index." Slow on large projects; description warns. v0.52
+	// reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "rebuild_fts",
 		Description: "**Admin: rebuild every FTS5 index from source data.** Equivalent to `pincher rebuild-fts` CLI. Use after symptoms of FTS corruption (search results missing symbols you can confirm exist via `query`). Long-running on large indexes (~1 second per ~10k symbols). Mutates DB; requires confirm=true to actually run — without it, returns the projected work without touching anything.",
 		InputSchema: json.RawMessage(`{
@@ -2557,8 +2513,8 @@ func (s *Server) registerTools() {
 		}`),
 	}, s.handleRebuildFTS)
 
-	// 21. self_test (#558 phase 2) — operator tool (HTTP only after #624)
-	s.addOperatorTool(&mcp.Tool{
+	// 21. self_test — internal probe (expensive). v0.52 reversal of #624.
+	s.addTool(&mcp.Tool{
 		Name:        "self_test",
 		Description: "**Smoke-test the pincher install** by exercising the index → search → byte-offset-retrieve loop. Equivalent to `pincher self-test` CLI. Returns per-step pass/fail. Useful as a liveness check after a binary upgrade or in CI. Read-only; uses a temp project that's cleaned up before return.",
 		InputSchema: json.RawMessage(`{

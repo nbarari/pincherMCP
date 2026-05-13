@@ -7,6 +7,22 @@ minors.
 
 ## [Unreleased]
 
+## [v0.52.0] — 2026-05-13 — full MCP restoration; bedrock-layer surface
+
+The aggregator-deployment correction. v0.35 #624 narrowed the MCP surface from 22 tools to 9 on the theory that agents face decision tax from large tool lists. That argument doesn't hold under aggregator deployment (zelos / bifrost / detour-shape) where the agent already faces N backends × M tools each — pincher having 22 vs 11 is invisible noise relative to the cluster surface. Real-user feedback through zelos's `pincher__index` failure surfaced the gap; v0.51.0 restored `index` + `adr`, v0.51.1 added redirect stubs for the rest. v0.52 ships the full reversal: every operator tool now agent-callable via MCP with its own typed schema; the stub mechanism is deleted entirely.
+
+The reframe: pincher is the bedrock-layer code-intel primitive that any routing-shaped consumer (zelos for MCP, bifrost for LLMs, detour for model-tier routing) wants to incorporate. The cleanest backend wins. Every tool reachable through every transport is the surface contract that supports that positioning.
+
+No schema change — runs on schema v24.
+
+### Changed
+- **MCP surface 11 → 22 tools ([#645](https://github.com/kwad77/pincher/issues/645) follow-on; full reversal of [#624](https://github.com/kwad77/pincher/issues/624)).** Every operator tool restored to MCP-visible with its real handler: `architecture`, `dead_code`, `neighborhood`, `health`, `stats`, `schema`, `list`, `doctor`, `rebuild_fts`, `init`, `self_test`. Per-tool typed InputSchemas preserved; descriptions cleaned (the `[OPERATOR-ONLY ...]` prefix is gone). HTTP routes preserved for ops automation. CLI ↔ HTTP ↔ MCP parity gate stays green.
+- **Stub mechanism deleted.** `addOperatorTool` and `makeOperatorRedirectHandler` removed from `internal/server/server.go`. The v0.51.1 redirect-stub tests in `operator_redirect_test.go` deleted. `mcp_surface_split_test.go` repurposed as a single-set MCP-surface contract test (all registered tools must be agent-callable).
+- **README leading paragraph** updated: "9 agent-facing MCP tools plus 13 operator/diagnostic tools on the HTTP REST API" → "22 agent-callable MCP tools, every one also reachable via the HTTP REST API at `/v1/<tool>`".
+
+### Why now
+Aggregator deployment changes the calculus on tool-surface narrowing. The original argument was "fewer tools = lower agent decision tax." Under zelos/bifrost/detour-shape consumption, the agent's working set is `N backends × M tools each` — pincher's 22 vs 11 is invisible noise. Meanwhile, the surface-narrowing's cost (bare "unknown tool" errors when wrappers route by tool name) was real and biting users. Full reversal corrects both sides.
+
 ## [v0.51.1] — 2026-05-12 — operator-tool MCP redirect stubs
 
 Patch follow-on to v0.51.0. The remaining 11 operator-only tools (architecture, dead_code, doctor, health, init, list, neighborhood, rebuild_fts, schema, self_test, stats) now ship with an MCP redirect stub so an agent that calls one over MCP gets a structured `operator_tool_not_on_mcp` error pointing at the HTTP endpoint and CLI subcommand — instead of the SDK's bare `unknown tool "X"` that trains users to think the tool is missing. The stub description is prefixed `[OPERATOR-ONLY — call POST /v1/<tool> over HTTP or pincher <tool> from CLI]` so an agent reading `tools/list` skips them upfront without having to invoke and parse the redirect.

@@ -22,7 +22,7 @@ Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
 
 Sourcegraph, OpenGrok, and IntelliJ index a codebase for humans browsing it; pincherMCP indexes the same codebase for an LLM agent calling tools. The agent-shaped surface is the whole point — responses sized for a context window rather than a UI pane, runtime interception of Read and Grep calls before the agent opens the file, and a local-only binary so neither the index nor the code leaves the machine.
 
-Underneath, it is a single Go binary that indexes the codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through **9 agent-facing MCP tools** plus 13 operator/diagnostic tools on the HTTP REST API.
+Underneath, it is a single Go binary that indexes the codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through **22 agent-callable MCP tools**, every one also reachable via the HTTP REST API at `/v1/<tool>`.
 
 Every tool response includes a `_meta` envelope with real BPE token counts (cl100k_base — exact for Claude and OpenAI families, approximate for Gemini/Llama) and latency:
 
