@@ -159,6 +159,15 @@ type Server struct {
 	statsTokensSaved int64
 	statsLatencyMS   int64
 
+	// capabilities is the runtime-detected feature set this binary
+	// supports (#649). Computed once at New() time; immutable thereafter.
+	// Routers read this from _meta.capabilities to make integration
+	// decisions without parsing version strings. Each capability tag
+	// corresponds to a feature with a runtime probe (gate test in
+	// capability_test.go enforces). When a feature ships or is removed,
+	// its capability tag is added/removed in lockstep.
+	capabilities []string
+
 	// Per-language call counts (#240). Sync.Map keyed by language name
 	// (e.g. "Go", "Markdown") with *int64 values. Incremented per tool
 	// call when the response carries a recognisable language signal;
@@ -295,6 +304,12 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		},
 	)
 	s.registerTools()
+	// #649: compute capability advertisement once at startup. Routers
+	// consume this from _meta.capabilities to make integration decisions
+	// (do I need to fall back to polling, or can I subscribe via SSE?
+	// is the streamable-HTTP transport available, or stdio-only? etc.)
+	// without scraping version strings or trial-and-error calls.
+	s.capabilities = computeCapabilities(s)
 	// #581: stamp the per-tool OpenAPI response schemas after
 	// registration. Done as a post-pass so registerTools stays
 	// readable (~24 addTool calls without an extra arg each) and the
@@ -2103,6 +2118,79 @@ func (s *Server) invalidateProjectIDCache() {
 		s.projectIDCache.Delete(key)
 		return true
 	})
+}
+
+// computeCapabilities builds the per-server capability advertisement
+// slice published in _meta.capabilities (#649). Each tag corresponds
+// to a feature with a runtime probe in capability_test.go; the
+// gate test enforces lockstep between tag and reality so we never
+// advertise something the running binary doesn't actually support.
+//
+// Tag vocabulary kept stable — additions are minor SemVer events
+// (routers can rely on absence == not-supported). Removals are major
+// SemVer events (any router consuming the removed tag breaks).
+//
+// Conditional capabilities (those depending on Server-level flags
+// rather than always-on binary features) consult the server fields
+// at startup. Because capabilities is computed once and cached, a
+// runtime flag change (e.g. SetHTTPKey called after New) is NOT
+// reflected — a deliberate simplification. If we need runtime-mutable
+// capabilities later, the field becomes a func that re-evaluates.
+func computeCapabilities(s *Server) []string {
+	caps := []string{
+		// Schema version — always reflects the current migration head.
+		// Routers can pin a minimum schema or refuse to talk to older
+		// pincher binaries via this tag.
+		"schema_v24",
+
+		// PreToolUse hook intercept (#625, #626, #627, v0.36).
+		// `pincher hook-check` is built into every binary post-v0.36;
+		// agents wired via `pincher init --target=claude` get
+		// runtime tool-call interception.
+		"hook_check",
+
+		// Supervised mode (#371, v0.11) — auto-restart-on-drift,
+		// initialize-replay across respawn. Routers know the binary
+		// can be swapped under them without losing the MCP session.
+		"supervised",
+
+		// All operator/admin tools agent-callable via MCP (v0.52,
+		// reverses #624). Routers can call any of the 22 tools
+		// through MCP without falling back to HTTP.
+		"operator_tools_on_mcp",
+
+		// Session counters survive supervised respawn (#420, v0.16).
+		// Stats roll-forward across restart so dashboards aren't
+		// confused by a fresh process zeroing out cumulative counts.
+		"session_persistence",
+
+		// Binary-version drift warning surfaces in _meta when the
+		// running binary differs from a project's indexed-by version
+		// (#620, v0.34, deduped per-session).
+		"binary_drift_warning",
+
+		// Per-call BPE token counts (cl100k_base) in _meta.tokens_used
+		// — exact for Claude/OpenAI families, approximate for
+		// Gemini/Llama. Stable since v0.4.
+		"tokens_used_envelope",
+
+		// Bounded percentage form of tokens_saved (#619, v0.34).
+		"tokens_saved_pct",
+
+		// Standardized error envelope on all 4xx/5xx HTTP responses
+		// (#537, v0.25). Routers can rely on the {error: {code,
+		// message, details}} shape rather than parsing a string.
+		"standardized_error_envelope",
+	}
+
+	// Conditional capability — present when the operator has wired
+	// the bearer token. Routers behind an auth-aware ingress can
+	// detect that pincher itself enforces auth and act accordingly.
+	if s.httpKey != "" {
+		caps = append(caps, "http_auth")
+	}
+
+	return caps
 }
 
 // resolveProjectRoot returns the filesystem root for a project.
@@ -6960,6 +7048,14 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 		}
 	}
 	meta["latency_ms"] = latency
+
+	// #649: capability advertisement. Stable per-server slice computed
+	// at New() time. Routers consume to make integration decisions
+	// (subscribe to SSE? use streamable-HTTP? expect operator tools
+	// via MCP?) without scraping versions or doing trial-and-error
+	// calls. Sized small (~10 short strings, < 200 bytes); cost
+	// negligible vs the discoverability win.
+	meta["capabilities"] = s.capabilities
 
 	// #499: surface unknown args from this call. The fix is to teach
 	// the agent that pincher saw the typo'd / made-up arg and ignored

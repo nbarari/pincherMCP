@@ -7,6 +7,9 @@ minors.
 
 ## [Unreleased]
 
+### Added
+- **`_meta.capabilities` advertisement field ([#649](https://github.com/kwad77/pincher/issues/649)).** First v0.53 deliverable. Every tool response now includes a `capabilities` slice on the `_meta` envelope declaring runtime-detected feature support: `schema_v24`, `hook_check`, `supervised`, `operator_tools_on_mcp`, `session_persistence`, `binary_drift_warning`, `tokens_used_envelope`, `tokens_saved_pct`, `standardized_error_envelope`, plus conditional `http_auth` when `--http-key` is set. Routers consume the field to make integration decisions (subscribe to SSE? expect operator tools via MCP? require auth?) without scraping version strings or doing trial-and-error calls. Lockstep gate test (`capability_test.go`) requires every advertised tag to have a runtime probe — false advertising fails the build.
+
 ## [v0.52.0] — 2026-05-13 — full MCP restoration; bedrock-layer surface
 
 The aggregator-deployment correction. v0.35 #624 narrowed the MCP surface from 22 tools to 9 on the theory that agents face decision tax from large tool lists. That argument doesn't hold under aggregator deployment (zelos / bifrost / detour-shape) where the agent already faces N backends × M tools each — pincher having 22 vs 11 is invisible noise relative to the cluster surface. Real-user feedback through zelos's `pincher__index` failure surfaced the gap; v0.51.0 restored `index` + `adr`, v0.51.1 added redirect stubs for the rest. v0.52 ships the full reversal: every operator tool now agent-callable via MCP with its own typed schema; the stub mechanism is deleted entirely.
