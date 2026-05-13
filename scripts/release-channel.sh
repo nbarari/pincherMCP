@@ -13,9 +13,11 @@
 # Patch releases (vX.Y.Z where Z > 0) inherit their minor's channel.
 # v0.60.1 = stable; v0.53.1 = dev.
 #
-# This script is the canonical channel-detection implementation. The
-# release.yml workflow has the same logic inline (defense in depth);
-# this script is what test_release_channel.sh exercises so the rule
+# This script is the canonical channel-detection implementation.
+# release.yml shells out to this script directly (post-#689) — the
+# inline-divergence detector in cmd/workflow-lint (#690 Bucket 2)
+# enforces that workflows never reimplement this logic inline.
+# scripts/release-channel_test.sh exercises this directly so the rule
 # is CI-tested locally without needing to push tags.
 #
 # Usage: scripts/release-channel.sh v0.60.0 → "stable"

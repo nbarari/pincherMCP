@@ -299,3 +299,128 @@ func TestFirstNonEmptyLine_SkipsBlanks(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestLint_CatchesInlineChannelDetection replays the v0.54.0-beta.1 bug
+// shape — release.yml had inline channel-detection logic that diverged
+// from scripts/release-channel.sh. Even with checkout present, the
+// inline reimplementation is a divergence risk and should fire.
+func TestLint_CatchesInlineChannelDetection(t *testing.T) {
+	wf := `name: Release
+on: { push: { tags: ['v*'] } }
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine channel inline
+        run: |
+          MINOR=$(echo "${GITHUB_REF_NAME#v}" | awk -F. '{print $2}')
+          case "${GITHUB_REF_NAME}" in
+            *-beta.*) CHANNEL="beta" ;;
+            *-alpha.*) CHANNEL="alpha" ;;
+            *-rc.*) CHANNEL="rc" ;;
+            *) [[ $((MINOR % 10)) -eq 0 ]] && CHANNEL="stable" || CHANNEL="dev" ;;
+          esac
+`
+	violations, err := lintFile(writeWorkflow(t, wf))
+	if err != nil {
+		t.Fatalf("lintFile: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 inline-divergence violation, got %d: %+v", len(violations), violations)
+	}
+	if violations[0].Kind != "inline-divergence" {
+		t.Errorf("violation kind = %q, want inline-divergence", violations[0].Kind)
+	}
+	if !strings.Contains(violations[0].Hint, "scripts/release-channel.sh") {
+		t.Errorf("hint should point at canonical script; got %q", violations[0].Hint)
+	}
+}
+
+// TestLint_AcceptsShelledOutChannelDetection — the post-#689 release.yml
+// shape (canonical script invocation) must NOT trigger the divergence
+// detector. Otherwise the rule fires on the fix it's meant to enforce.
+func TestLint_AcceptsShelledOutChannelDetection(t *testing.T) {
+	wf := `name: Release
+on: { push: { tags: ['v*'] } }
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine channel
+        run: |
+          CHANNEL="$(bash scripts/release-channel.sh "${GITHUB_REF_NAME}")"
+          echo "channel=$CHANNEL"
+`
+	violations, err := lintFile(writeWorkflow(t, wf))
+	if err != nil {
+		t.Fatalf("lintFile: %v", err)
+	}
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations on canonical-script invocation; got %d: %+v", len(violations), violations)
+	}
+}
+
+// TestLint_InlineDivergenceFiresEvenWithCheckout — divergence is a bug
+// regardless of checkout state. The two rules are orthogonal.
+func TestLint_InlineDivergenceFiresEvenWithCheckout(t *testing.T) {
+	wf := `name: Release
+on: { push: { tags: ['v*'] } }
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          case "$TAG" in
+            *-beta.*) echo beta ;;
+            *) [[ $((MINOR % 10)) -eq 0 ]] && echo stable ;;
+          esac
+`
+	violations, err := lintFile(writeWorkflow(t, wf))
+	if err != nil {
+		t.Fatalf("lintFile: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 inline-divergence violation, got %d", len(violations))
+	}
+	if violations[0].Kind != "inline-divergence" {
+		t.Errorf("kind = %q, want inline-divergence", violations[0].Kind)
+	}
+}
+
+// TestLint_InlineDivergenceNeedsAllFingerprints — single-pattern hits
+// (e.g., a workflow that just does `% 10` arithmetic somewhere unrelated)
+// must NOT fire. The detector requires the full constellation of
+// channel-detection signals.
+func TestLint_InlineDivergenceNeedsAllFingerprints(t *testing.T) {
+	// Only the modulo-10 pattern; no beta/alpha/rc strings → not divergence.
+	wf := `name: CI
+on: { push: { branches: [master] } }
+jobs:
+  unrelated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          # Unrelated arithmetic — sharding by ID modulo 10.
+          SHARD=$((USER_ID % 10))
+          echo "shard=$SHARD"
+`
+	violations, err := lintFile(writeWorkflow(t, wf))
+	if err != nil {
+		t.Fatalf("lintFile: %v", err)
+	}
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations (only one fingerprint hit); got %d", len(violations))
+	}
+}
+
+// TestMatchesAllFingerprints_EmptyPatternsReturnsFalse — defensive: an
+// empty pattern list must not flag everything.
+func TestMatchesAllFingerprints_EmptyPatternsReturnsFalse(t *testing.T) {
+	if matchesAllFingerprints("anything", nil) {
+		t.Errorf("empty patterns should not match")
+	}
+}

@@ -18,9 +18,18 @@
 //     but no `uses: actions/checkout@v4` step earlier in the job's
 //     step list
 //
+// What this tool catches (Bucket 2 — inline divergence):
+//
+//   - jobs with a `run:` step that reimplements logic that already lives
+//     in a canonical script under scripts/ — detected by fingerprint
+//     regex match across the run-block text WITHOUT a reference to the
+//     canonical script. Symptom: v0.54.0-beta.1 release-channel logic
+//     was duplicated inline in release.yml AND in scripts/release-channel.sh,
+//     and they had drifted — workflow log mis-labelled the beta tag as
+//     "dev" until #689 made release.yml shell out to the canonical script.
+//
 // What this tool does NOT catch (file as follow-ups if needed):
 //
-//   - inline-divergence from canonical scripts (bucket 2 in #690)
 //   - missing tag-shaped probe before merge (bucket 3 in #690)
 //
 // Run via: `go run ./cmd/workflow-lint`. Exit 0 = clean; exit 1 =
@@ -75,6 +84,35 @@ type violation struct {
 	JobName string
 	StepIdx int
 	Snippet string
+	Kind    string // "missing-checkout" or "inline-divergence"
+	Hint    string // remediation hint shown to operator
+}
+
+// canonicalScript names a repo-local script that has a stable identifying
+// fingerprint. When a workflow `run:` block matches the fingerprint but
+// does not reference the script path, we suspect inline divergence from
+// the canonical implementation (#690 Bucket 2 — exactly the v0.54.0-beta.1
+// failure shape).
+type canonicalScript struct {
+	Path        string           // repo-relative script path (e.g., "scripts/release-channel.sh")
+	Fingerprint []*regexp.Regexp // ALL must match the run-block text
+	Hint        string           // what to do instead
+}
+
+// canonicalScripts hardcodes the divergence-prone scripts we know about.
+// Adding entries here is cheaper than building a generalized AST-equivalence
+// engine; the lint catches exactly the bug shapes we've actually hit.
+var canonicalScripts = []canonicalScript{
+	{
+		Path: "scripts/release-channel.sh",
+		Fingerprint: []*regexp.Regexp{
+			// Modulo-10 stable-channel rule (e.g., `MINOR % 10 == 0`).
+			regexp.MustCompile(`%\s*10|\bmod\s+10`),
+			// Pre-release suffix routing — beta/alpha/rc string match.
+			regexp.MustCompile(`-(beta|alpha|rc)\.|"(beta|alpha|rc)"`),
+		},
+		Hint: "shell out to scripts/release-channel.sh instead — keep one canonical channel-detection implementation",
+	},
 }
 
 func main() {
@@ -101,10 +139,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stderr, "workflow-lint: %d violation(s):\n\n", len(violations))
 	for _, v := range violations {
-		fmt.Fprintf(stderr, "  %s :: job=%s (%s) :: step %d\n    references repo without prior actions/checkout@vN:\n      %s\n\n",
-			v.File, v.JobID, v.JobName, v.StepIdx, v.Snippet)
+		fmt.Fprintf(stderr, "  [%s] %s :: job=%s (%s) :: step %d\n    %s:\n      %s\n",
+			v.Kind, v.File, v.JobID, v.JobName, v.StepIdx, v.Hint, v.Snippet)
+		fmt.Fprintln(stderr)
 	}
-	fmt.Fprintln(stderr, "fix: add `- uses: actions/checkout@v4` as a step before the run-script reference.")
 	return 1
 }
 
@@ -149,9 +187,8 @@ func lintFile(p string) ([]violation, error) {
 	return out, nil
 }
 
-// lintJob walks a job's step list, tracking whether a checkout has run.
-// Returns one violation per script-referencing step that fires before
-// any checkout step.
+// lintJob walks a job's step list, applying the missing-checkout AND
+// inline-divergence rules to each `run:` step.
 func lintJob(file, jobID string, j job) []violation {
 	var out []violation
 	checkedOut := false
@@ -160,20 +197,52 @@ func lintJob(file, jobID string, j job) []violation {
 			checkedOut = true
 			continue
 		}
-		if s.Run == "" || checkedOut {
+		if s.Run == "" {
 			continue
 		}
-		if loc := scriptRefPattern.FindString(s.Run); loc != "" {
-			out = append(out, violation{
-				File:    file,
-				JobID:   jobID,
-				JobName: j.Name,
-				StepIdx: i,
-				Snippet: firstNonEmptyLine(s.Run),
-			})
+		// Rule 1 — missing-checkout. Only fires when no checkout has run yet.
+		if !checkedOut {
+			if loc := scriptRefPattern.FindString(s.Run); loc != "" {
+				out = append(out, violation{
+					File:    file,
+					JobID:   jobID,
+					JobName: j.Name,
+					StepIdx: i,
+					Snippet: firstNonEmptyLine(s.Run),
+					Kind:    "missing-checkout",
+					Hint:    "references repo without prior actions/checkout@vN; add `- uses: actions/checkout@v4` earlier in this job",
+				})
+			}
+		}
+		// Rule 2 — inline-divergence from canonical scripts. Fires regardless
+		// of checkout state — divergence is always a bug.
+		for _, cs := range canonicalScripts {
+			if matchesAllFingerprints(s.Run, cs.Fingerprint) && !strings.Contains(s.Run, cs.Path) {
+				out = append(out, violation{
+					File:    file,
+					JobID:   jobID,
+					JobName: j.Name,
+					StepIdx: i,
+					Snippet: firstNonEmptyLine(s.Run),
+					Kind:    "inline-divergence",
+					Hint:    cs.Hint,
+				})
+			}
 		}
 	}
 	return out
+}
+
+// matchesAllFingerprints returns true when every regex matches somewhere
+// in text. Used by the inline-divergence check to require multiple
+// signal regexes (single-pattern matches fire too eagerly).
+func matchesAllFingerprints(text string, patterns []*regexp.Regexp) bool {
+	for _, p := range patterns {
+		if !p.MatchString(text) {
+			return false
+		}
+	}
+	return len(patterns) > 0
 }
 
 func firstNonEmptyLine(s string) string {
