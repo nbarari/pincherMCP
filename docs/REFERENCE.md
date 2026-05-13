@@ -2,7 +2,7 @@
 
 The long-form reference. The [README](../README.md) is the pitch + quickstart; this file is the manual. For 10-minute end-to-end walkthroughs, see [`tutorials/`](tutorials/) — [Claude Code](tutorials/claude-code.md), [Cursor](tutorials/cursor.md), [HTTP dashboard](tutorials/http-dashboard.md).
 
-**Schema version:** v11 · **MCP tools:** 16 · **Languages with extractors:** 19 (6 AST, 13 regex)
+**Schema version:** v25 · **MCP tools:** 22 · **Languages detected:** ~25 (10 AST/parser-tier, 15 regex-tier, plus 7 stub-tier with no extractor — see [Language support](#language-support))
 
 ## Contents
 
@@ -11,7 +11,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
   - [Three-layer storage](#three-layer-storage)
   - [pinchQL query routing](#pinchql-query-routing)
   - [Data flow: index to query](#data-flow-index-to-query)
-- [The 16 MCP tools](#the-16-mcp-tools)
+- [The 22 MCP tools](#the-22-mcp-tools)
   - [Stable symbol IDs](#stable-symbol-ids)
   - [Field projection](#field-projection)
   - [Extraction confidence](#extraction-confidence)
@@ -56,7 +56,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
 ┌───────────────────────┐          ┌───────────────────────────┐
 │  pincher (MCP process)│          │  pincher --http :8080     │
 │                       │          │  (dashboard / REST)       │
-│  • 16 MCP tools       │          │                           │
+│  • 22 MCP tools       │          │                           │
 │  • idx.Watch()        │          │  • POST /v1/{tool}        │
 │  • SessionFlusher     │          │  • GET /v1/dashboard      │
 │    (flush every 10 s) │          │  • GET /v1/openapi.json   │
@@ -173,9 +173,9 @@ Project-scoped paths — `search`, `symbol`/`symbols` when `project=` is passed,
 
 ---
 
-## The 16 MCP tools
+## The 22 MCP tools
 
-All latencies measured on this codebase (13 files, 618 symbols, 5,785 edges). Token counts use cl100k_base BPE — the same tokenizer family as Claude.
+All latencies measured on this codebase. Token counts use cl100k_base BPE — the same tokenizer family as Claude.
 
 ### Starter
 
@@ -350,7 +350,7 @@ Multiple pincher processes can safely share one data directory. Each `Index()` r
 
 ## HTTP REST API
 
-All 16 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
+All 22 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
 
 ```bash
 # Start with both transports
@@ -673,7 +673,7 @@ pincherMCP/
 │   ├── index/
 │   │   ├── indexer.go            # Walk → hash → extract → resolve → store → watch
 │   │   └── lockfile.go           # Cross-process project lockfile w/ stale reclaim
-│   └── server/server.go          # 16 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
+│   └── server/server.go          # 22 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
 │                                 # basepath / reverse-proxy support, sessions persistence
 └── go.mod
 ```
@@ -789,7 +789,6 @@ Each release tier names a theme and the issues that close it. Issue numbers link
   **Workarounds**: use named-list syntax where the YAML schema allows it (`tasks: [{name: deploy, ...}]` reads `tasks.0.name = "deploy"` regardless of position once the parser sees `name:` as the canonical key — a future enhancement). For ADRs and long-lived references, prefer searching by symbol *name* (`pincher search`) over storing the symbol id.
 
   **Revisit trigger**: real complaints with reproducible churn. v0.8 / v1.1 territory. Tracked at #205.
-- **Single-user SQLite.** Concurrent processes are safely serialized via `internal/index/lockfile.go`, but the `sessions` table and symbol store are local-only. Team/enterprise shared indexes need a server mode that's not built yet.
 - **Single-user SQLite.** Concurrent processes are safely serialized via `internal/index/lockfile.go`, but the `sessions` table and symbol store are local-only. Team/enterprise shared indexes need a server mode that's not built yet.
 - **Regex gap.** ~7 non-Go languages still use regex extraction (~70–85% accuracy). `extraction_confidence` surfaces this to callers. Full fix = per-language pure-Go AST libraries (no tree-sitter / no CGO), tracked in the extractor refactor plan.
 - **HTTP auth.** The `--http` REST API is open by default; bearer-token auth is opt-in via `--http-key` (or `PINCHER_HTTP_KEY`). For non-localhost deployments, set `--http-key` or front pincher with a reverse proxy.
