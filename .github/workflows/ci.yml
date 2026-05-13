@@ -149,102 +149,27 @@ jobs:
           go test ./internal/index/ -run=^$ -bench=. -benchtime=100ms -benchmem
           go test ./internal/server/ -run=^$ -bench=. -benchtime=100ms -benchmem
 
-  # bench-regression gates ns/op + allocs/op against the committed
-  # baselines under testdata/bench/ (#50).
+  # bench-regression removed in v0.55 (#681 Bucket B). The job ran with
+  # continue-on-error: true and failed on most PRs (variance on shared
+  # runners). Always-red advisory check polluted the per-PR check view
+  # without ever blocking, so reviewers learned to ignore it — the
+  # signal-to-noise ratio went to zero.
   #
-  # Decision (#207, v0.7.0): KEEP ADVISORY. Rationale captured here as
-  # the workflow comment is the place future maintainers see first when
-  # tempted to flip continue-on-error.
+  # Decision matrix:
+  #   - PROMOTE TO REQUIRED → needs N≥20 variance dataset across multiple
+  #     weeks (per project memory `feedback_bench_gate_promotion.md`),
+  #     plus ongoing maintenance to keep BENCH_EXCLUDE current. Months
+  #     since the gate was created; the dataset never got captured.
+  #   - REMOVE → -1 always-red CI line per PR; lose perf-watching value
+  #     (already advisory anyway). Compile-test of new bench code is
+  #     covered by `bench-smoke` (above), which runs at 100ms/bench and
+  #     IS required.
+  #   - MOVE TO SCHEDULED → run weekly via cron, post to dashboard.
+  #     Defers the cleanup to a future PR (worth filing as #681 phase 2
+  #     follow-up if perf-watching value is missed).
   #
-  # Why advisory and not required:
-  #
-  # 1. Variance data is N=10. The standing rule (project memory) is
-  #    capture N≥20 before flipping a noise-prone CI gate to required.
-  #    Manual variance run from #166 lives at
-  #    testdata/bench/variance-ci-2026-05-09.md: 20 of 21 benchmarks
-  #    at <10% CV, but 1 noisy outlier at 21.5%
-  #    (`Index_Incremental_NoChange_GoProject`, I/O-bound). One
-  #    confirmed-stable batch isn't enough — the prior promotion (#160)
-  #    blocked a docs-only PR (#161) with a +109% / +276% outlier run
-  #    that no source change could plausibly explain.
-  #
-  # 2. Real benefit of advisory mode: the artifact + the failure
-  #    annotation is still visible on every PR. Reviewers who care can
-  #    look; the gate doesn't block a docs-only or unrelated PR when
-  #    the runner has a noisy day.
-  #
-  # 3. To re-promote: capture N≥20 across multiple weeks, identify any
-  #    new noisy benchmarks for BENCH_EXCLUDE, then flip
-  #    continue-on-error: false in a dedicated PR. Don't fold the
-  #    promotion in with another change — keep the bisect surface tiny
-  #    when something does eventually trip.
-  #
-  # Baselines captured on ubuntu-latest (AMD EPYC 7763, 4-core runner)
-  # via the bench-ci-actual artifact from a green run. The job uploads
-  # the CI-actual bench output as a separate artifact
-  # (`bench-ci-actual-*`) so any green run's numbers can become the
-  # next baseline; that's the substrate for both re-baselining and
-  # the eventual N≥20 variance characterisation.
-  bench-regression:
-    name: Benchmark regression (advisory)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    env:
-      # CI-baseline thresholds. Slightly above local-dev defaults
-      # (0.20/0.30) to absorb runner-to-runner variance.
-      BENCH_NS_THRESHOLD: "0.30"
-      BENCH_ALLOCS_THRESHOLD: "0.45"
-      # Excluded benchmarks — observed unstable on CI:
-      #
-      # - Index_Incremental_NoChange_GoProject — 21.5% CV per
-      #   testdata/bench/variance-ci-2026-05-09.md (I/O-bound, FS
-      #   cache fluctuation).
-      #
-      # - Auth_TimingProfile/* — tiny ns/op (4-100k ns) measuring
-      #   constant-time auth. Within-run CV is <1% (variance data),
-      #   but the *absolute* ns shifts 2x across CI runner-pool
-      #   reallocations (committed baseline 48k ns, recent runs
-      #   100k+ ns). Any percentage gate on single-digit-microsecond
-      #   benchmarks turns small absolute jitter into huge
-      #   percentage deltas.
-      #
-      # Excluded benches still appear in the output with [EXCLUDED]
-      # marker, so a regression that masks a real bug is still
-      # visible to a human reading the action log.
-      BENCH_EXCLUDE: "BenchmarkIndex_Incremental_NoChange_GoProject,BenchmarkAuth_TimingProfile/correct,BenchmarkAuth_TimingProfile/wrong_first_byte,BenchmarkAuth_TimingProfile/wrong_last_byte,BenchmarkAuth_TimingProfile/wrong_long_prefix_match,BenchmarkAuth_TimingProfile/wrong_same_length,BenchmarkAuth_TimingProfile/wrong_short"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Capture CI bench output for re-baselining
-        run: |
-          mkdir -p ci-bench-actual
-          go test ./internal/index/ -run='^$' -bench=. -benchtime=2s -benchmem \
-            > ci-bench-actual/index.bench.txt
-          go test ./internal/server/ -run='^$' -bench=. -benchtime=2s -benchmem \
-            > ci-bench-actual/server.bench.txt
-
-      - name: Compare against committed baseline (sanity gate)
-        run: |
-          go run ./cmd/benchcmp \
-            -ns-threshold=$BENCH_NS_THRESHOLD \
-            -allocs-threshold=$BENCH_ALLOCS_THRESHOLD \
-            -exclude="$BENCH_EXCLUDE" \
-            testdata/bench/index.bench.txt ci-bench-actual/index.bench.txt
-          go run ./cmd/benchcmp \
-            -ns-threshold=$BENCH_NS_THRESHOLD \
-            -allocs-threshold=$BENCH_ALLOCS_THRESHOLD \
-            -exclude="$BENCH_EXCLUDE" \
-            testdata/bench/server.bench.txt ci-bench-actual/server.bench.txt
-
-      - name: Upload CI-actual bench output (for re-baselining)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-ci-actual-${{ github.run_id }}
-          path: ci-bench-actual/
-          retention-days: 30
+  # Chose REMOVE. `make corpus-bench` + `cmd/benchcmp` survive for local
+  # use when a contributor wants to validate a perf-sensitive change
+  # before pushing. Baselines under `testdata/bench/` stay committed for
+  # local comparison and as a re-promotion starting point if we ever
+  # capture the variance dataset.

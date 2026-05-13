@@ -7,6 +7,9 @@ minors.
 
 ## [Unreleased]
 
+### Removed
+- **Bench-regression CI gate ([#681](https://github.com/kwad77/pincher/issues/681) Bucket B).** The `Benchmark regression (advisory)` job ran with `continue-on-error: true` and failed on most PRs (variance on shared runners). Always-red advisory check polluted every PR's check view without ever blocking — reviewers learned to ignore it, signal-to-noise went to zero. Removed in favor of the existing `bench-smoke` job (100ms/bench, required) for compile-test coverage and `make corpus-bench` for local perf validation. Baselines under `testdata/bench/` stay committed as a re-promotion starting point if we ever capture the N≥20 variance dataset (per `feedback_bench_gate_promotion.md`). Second v0.55 deliverable.
+
 ## [v0.54.0] — 2026-05-13 — closure tables + streamable-HTTP transport: structural perf + cluster-friendly
 
 Phase 1 — release 3 of 9. First beta-tag-shape release exercising v0.53's release-channel infrastructure end-to-end (`v0.54.0-beta.1`). Three deliverables that turn pincher from a single-tenant local primitive into a cluster-mountable backend with materialized perf:
