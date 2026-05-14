@@ -1471,7 +1471,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				msg = tc.Text
 			}
 		}
-		writeError(w, http.StatusBadRequest, "tool_error", msg)
+		// errResultRich (#709/#712) emits a JSON envelope
+		// {"error": "...", "_meta": {"next_steps": [...]}} through
+		// TextContent. Without unwrapping, that whole JSON string lands
+		// verbatim in the standardized envelope's `message` field — a
+		// double-encoded blob the client can't pattern-match on. Detect
+		// the rich shape, lift the inner `error` string to `message`,
+		// and carry next_steps through as `details` so HTTP clients
+		// keep the remediation hints. Bare errResult text isn't JSON,
+		// so json.Unmarshal fails and msg passes through unchanged.
+		message := msg
+		var details map[string]any
+		var rich map[string]any
+		if json.Unmarshal([]byte(msg), &rich) == nil {
+			if inner, ok := rich["error"].(string); ok {
+				message = inner
+				if meta, ok := rich["_meta"].(map[string]any); ok {
+					if ns, ok := meta["next_steps"]; ok {
+						details = map[string]any{"next_steps": ns}
+					}
+				}
+			}
+		}
+		if details != nil {
+			writeError(w, http.StatusBadRequest, "tool_error", message, details)
+		} else {
+			writeError(w, http.StatusBadRequest, "tool_error", message)
+		}
 		return
 	}
 

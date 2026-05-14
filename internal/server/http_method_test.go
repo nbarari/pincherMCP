@@ -244,3 +244,41 @@ func TestHTTP_EmptyBody_StillDefaultsToEmptyArgs(t *testing.T) {
 		}
 	}
 }
+
+// errResultRich (#709/#712) emits a JSON envelope through TextContent.
+// The HTTP dispatcher must UNWRAP it — lift the inner `error` string to
+// `message`, carry next_steps as `details` — not stuff the whole JSON
+// blob verbatim into the standardized envelope's `message` field.
+func TestHTTP_RichErrorEnvelope_IsUnwrapped(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	// search with a well-formed but empty body → handleSearch returns
+	// errResultRich ("query is required" + next_steps).
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, readBody(t, rr))
+	}
+	body := readBody(t, rr)
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nbody: %s", err, body)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	// The bug: message must be the human string, NOT a JSON blob.
+	if strings.HasPrefix(strings.TrimSpace(msg), "{") {
+		t.Errorf("message is a JSON blob — rich envelope not unwrapped: %q", msg)
+	}
+	if !strings.Contains(msg, "query is required") {
+		t.Errorf("message should be the inner error string; got %q", msg)
+	}
+	// next_steps must survive as structured details, not be lost.
+	details, _ := errObj["details"].(map[string]any)
+	if details == nil || details["next_steps"] == nil {
+		t.Errorf("rich envelope's next_steps should carry through to details; got details=%v", details)
+	}
+}
