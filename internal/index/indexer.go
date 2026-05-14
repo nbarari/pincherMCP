@@ -1390,6 +1390,38 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		return canonical
 	}
 
+	// lookupPythonTarget is the to-side lookup for Python IMPORTS: the
+	// same canonical-pick as `lookup`, but drops config/docs symbols
+	// first. #860: `import os` — a stdlib import with no in-project
+	// target — would otherwise false-bind to a same-named config-file
+	// `Setting` whose QN is literally "os" (any top-level JSON/YAML/TOML
+	// key extracts that way). An IMPORTS-edge target is always a code
+	// symbol — Module, Class, Function, Method — never a Setting; this
+	// is the same guard resolveCalls already applies via
+	// excludeNonCodeSyms (#762/#790).
+	codeCache := make(map[string]string)
+	lookupPythonTarget := func(qn string) string {
+		if id, ok := codeCache[qn]; ok {
+			return id
+		}
+		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
+		if err == nil {
+			syms = excludeNonCodeSyms(syms)
+		}
+		if err != nil || len(syms) == 0 {
+			codeCache[qn] = ""
+			return ""
+		}
+		canonical := syms[0].ID
+		for i := 1; i < len(syms); i++ {
+			if syms[i].ID < canonical {
+				canonical = syms[i].ID
+			}
+		}
+		codeCache[qn] = canonical
+		return canonical
+	}
+
 	// Python imports use dotted module paths ("zelosmcp.config"), but
 	// pincher's QNs are file-path-derived ("src.zelosmcp.config" for a
 	// src-layout repo). PythonImportCandidates expands toName with each
@@ -1398,7 +1430,7 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 	// path. See internal/ast/python_resolve.go.
 	lookupPython := func(toName, fromFile string) string {
 		for _, c := range ast.PythonImportCandidates(toName, fromFile, pythonRoots) {
-			if id := lookup(c); id != "" {
+			if id := lookupPythonTarget(c); id != "" {
 				return id
 			}
 		}
