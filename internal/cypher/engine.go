@@ -907,6 +907,61 @@ func (p *parser) skip(val string) {
 	}
 }
 
+// topLevelClauseKeywords are the tokens parseQuery accepts at the start
+// of a clause. Any other token at that position means the query is
+// malformed — see the #748 default-case rejection in parseQuery.
+var topLevelClauseKeywords = []string{"MATCH", "WHERE", "RETURN", "ORDER", "LIMIT", "WITH"}
+
+// nearestClauseKeyword returns the clause keyword within edit distance 1
+// of tok (case-insensitive), or "" if none. Turns an unexpected-token
+// parse error into a "did you mean WHERE?" hint — the #748 typo case.
+func nearestClauseKeyword(tok string) string {
+	up := strings.ToUpper(tok)
+	for _, kw := range topLevelClauseKeywords {
+		if up != kw && editDistanceAtMost1(up, kw) {
+			return kw
+		}
+	}
+	return ""
+}
+
+// editDistanceAtMost1 reports whether a and b differ by at most one
+// insertion, deletion, or substitution (Levenshtein distance ≤ 1).
+func editDistanceAtMost1(a, b string) bool {
+	la, lb := len(a), len(b)
+	if la == lb {
+		diff := 0
+		for i := 0; i < la; i++ {
+			if a[i] != b[i] {
+				diff++
+				if diff > 1 {
+					return false
+				}
+			}
+		}
+		return true // 0 or 1 substitution
+	}
+	if la > lb {
+		a, b, la, lb = b, a, lb, la
+	}
+	if lb-la != 1 {
+		return false
+	}
+	// b is exactly one char longer — does deleting one char from b yield a?
+	i, j, skipped := 0, 0, false
+	for i < la && j < lb {
+		if a[i] == b[j] {
+			i, j = i+1, j+1
+			continue
+		}
+		if skipped {
+			return false
+		}
+		skipped, j = true, j+1
+	}
+	return true
+}
+
 func (p *parser) parseQuery() (*queryAST, error) {
 	// limit=-1 = "no LIMIT clause; runner picks default". Distinct from
 	// LIMIT 0, which the parser sets to 0 below and the runner honors as
@@ -1022,7 +1077,23 @@ func (p *parser) parseQuery() (*queryAST, error) {
 					"Use a single MATCH ... WHERE ... RETURN; chain via subsequent calls")
 
 		default:
-			p.next() // skip unknown tokens
+			// #748: an unrecognized token at clause position means the
+			// query is malformed — most commonly a typo'd clause keyword.
+			// Pre-fix the parser silently skipped it, so
+			// `MATCH (n) WERE n.name="x" RETURN n.name` dropped the WHERE
+			// entirely and returned every row — a confidently-wrong
+			// result the agent reads as real data. Reject explicitly,
+			// with a did-you-mean hint when the token is a keyword
+			// near-miss.
+			bad := p.peek().value
+			if kw := nearestClauseKeyword(bad); kw != "" {
+				return nil, fmt.Errorf(
+					"pinchQL: unexpected token %q — did you mean %q? expected a clause keyword (WHERE, RETURN, ORDER BY, LIMIT) at this position",
+					bad, kw)
+			}
+			return nil, fmt.Errorf(
+				"pinchQL: unexpected token %q — expected a clause keyword (WHERE, RETURN, ORDER BY, LIMIT) at this position",
+				bad)
 		}
 	}
 	// #361: validate the parsed query has the minimum shape pinchQL
