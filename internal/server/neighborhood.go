@@ -47,10 +47,19 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	// agent page when the count exceeds the limit.
 	limit := intArg(args, "limit", 50)
 	offset := intArg(args, "offset", 0)
+	// #712: surface input clamps in _meta.warnings — same treatment as
+	// search/list/trace. A silently-coerced negative offset or
+	// non-positive limit leaves the caller thinking it got what it
+	// asked for.
+	var clampWarnings []string
 	if limit <= 0 {
+		clampWarnings = append(clampWarnings,
+			fmt.Sprintf("neighborhood: limit=%d clamped to 50 (must be positive)", limit))
 		limit = 50
 	}
 	if offset < 0 {
+		clampWarnings = append(clampWarnings,
+			fmt.Sprintf("neighborhood: offset=%d clamped to 0 (must be >= 0)", offset))
 		offset = 0
 	}
 
@@ -227,6 +236,17 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 				},
 			},
 		}
+	}
+	// #712: merge input-clamp warnings into _meta.warnings without
+	// clobbering the next_steps the pagination branch may have set.
+	if len(clampWarnings) > 0 {
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+			data["_meta"] = meta
+		}
+		existing, _ := meta["warnings"].([]string)
+		meta["warnings"] = append(existing, clampWarnings...)
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }

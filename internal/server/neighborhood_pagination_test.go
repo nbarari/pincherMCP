@@ -201,3 +201,36 @@ func TestHandleNeighborhood_NegativeArgsClampToDefaults(t *testing.T) {
 		t.Errorf("page.offset = %v, want 0 (clamped from negative)", page["offset"])
 	}
 }
+
+// #712: neighborhood clamps limit<=0 and offset<0 silently. The clamp
+// must now surface in _meta.warnings — same treatment as search/list/trace.
+func TestHandleNeighborhood_NegativeInputsWarn(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := setupBigNeighborhood(t, 20)
+	res, err := srv.handleNeighborhood(context.Background(), makeReq(map[string]any{
+		"id":     "big::main.F0#Function",
+		"limit":  -3,
+		"offset": -5,
+	}))
+	if err != nil {
+		t.Fatalf("handleNeighborhood: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected success; got error %s", textOf(t, res))
+	}
+	body := decode(t, res)
+	meta, _ := body["_meta"].(map[string]any)
+	warns, _ := meta["warnings"].([]any)
+	if len(warns) < 2 {
+		t.Fatalf("expected 2 clamp warnings (limit + offset); got %v", meta)
+	}
+	joined := fmt.Sprint(warns...)
+	if !strings.Contains(joined, "limit") || !strings.Contains(joined, "offset") {
+		t.Errorf("warnings should name both limit and offset; got %v", warns)
+	}
+	// The clamp still happened — page reflects the corrected values.
+	page, _ := body["page"].(map[string]any)
+	if page["limit"] != float64(50) || page["offset"] != float64(0) {
+		t.Errorf("clamped page should be limit=50 offset=0; got %v", page)
+	}
+}
