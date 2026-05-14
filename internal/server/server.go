@@ -5425,7 +5425,12 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 
 	language := str(args, "language")
 	kindsRaw := str(args, "kinds")
-	var kinds []string
+	// #738: allocate as []string{} not nil — a nil slice marshals to JSON
+	// `null`, and `kinds` is echoed verbatim into filters.kinds. Consumers
+	// iterating filters.kinds without a null-check break (and filters.language
+	// already defaults to "" not null — keep the echo block consistent). This
+	// is the recurring nil-slice-in-response class CLAUDE.md flags.
+	kinds := []string{}
 	if kindsRaw != "" {
 		for _, k := range strings.Split(kindsRaw, ",") {
 			if k = strings.TrimSpace(k); k != "" {

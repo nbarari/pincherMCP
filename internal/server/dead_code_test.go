@@ -184,6 +184,36 @@ func TestHandleDeadCode_KindsFilter(t *testing.T) {
 	}
 }
 
+// #738: filters.kinds must be a JSON array, never null. A nil []string
+// marshals to `null`, and consumers iterating filters.kinds without a
+// null-check break — the recurring nil-slice-in-response class. The
+// echoed filters.language already defaults to "" (not null); keep
+// filters.kinds consistent.
+func TestHandleDeadCode_FiltersKindsNeverNull(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "p1"
+	store.UpsertProject(db.Project{ID: "p1", Path: "/tmp/p1", Name: "p1", IndexedAt: time.Now()})
+
+	// No kinds arg passed — pre-#738 filters.kinds came back as null.
+	result, _ := srv.handleDeadCode(context.Background(), makeReq(map[string]any{}))
+	body := decode(t, result)
+	filters, ok := body["filters"].(map[string]any)
+	if !ok {
+		t.Fatalf("filters block missing or wrong type: %v", body["filters"])
+	}
+	kinds, present := filters["kinds"]
+	if !present {
+		t.Fatal("filters.kinds key missing")
+	}
+	if kinds == nil {
+		t.Errorf("filters.kinds = null; want [] (nil slice marshals to null — JSON invariant)")
+	}
+	if _, isArray := kinds.([]any); !isArray {
+		t.Errorf("filters.kinds = %T (%v); want a JSON array", kinds, kinds)
+	}
+}
+
 // Developer scratch paths (scratch_*.go) are post-filtered — they're
 // known-dead noise the developer doesn't need to be told about.
 func TestHandleDeadCode_ExcludesScratchPaths(t *testing.T) {
