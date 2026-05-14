@@ -175,6 +175,48 @@ class Other {
 	}
 }
 
+// #809: a blank line before a class method must not let
+// locateMethodInRange's leading-whitespace match span newlines —
+// pre-fix the `[\s]*` (and the `\s*` before the name) swallowed the
+// blank line, landing startByte on a stray newline so findBlockEnd
+// returned a zero-width span.
+func TestJSAST_BlankLineBeforeMethodNoZeroSpan(t *testing.T) {
+	t.Setenv("PINCHER_EXPERIMENTAL_JS_AST", "1")
+	src := []byte(`class Service {
+    constructor(name) {
+        this.name = name;
+    }
+
+    say() {
+        return this.name;
+    }
+
+    async loadAndSay(path) {
+        return this.say() + path;
+    }
+}
+`)
+	r, ok := extractJavaScriptAST(src, "src/svc.js")
+	if !ok {
+		t.Fatal("expected AST parse to succeed")
+	}
+	byName := map[string]ExtractedSymbol{}
+	for _, s := range r.Symbols {
+		byName[s.Name] = s
+		if s.StartByte >= s.EndByte {
+			t.Errorf("%s has zero/negative byte range: start=%d end=%d", s.Name, s.StartByte, s.EndByte)
+		}
+	}
+	// say() starts on line 6, after a blank line — must point at the
+	// method, not the preceding newline.
+	if got := byName["say"]; got.StartLine != 6 {
+		t.Errorf("say.StartLine = %d, want 6 (the method line, not a stray blank line)", got.StartLine)
+	}
+	if got := byName["loadAndSay"]; got.StartLine != 10 {
+		t.Errorf("loadAndSay.StartLine = %d, want 10", got.StartLine)
+	}
+}
+
 // Flag off → AST extractor not invoked; falls through to regex via the
 // registry's adapter. Verifies the dispatch in extractor.go's init().
 func TestJSAST_FlagOff_FallsThroughToRegex(t *testing.T) {

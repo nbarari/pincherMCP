@@ -586,8 +586,11 @@ func (w *jsASTWalker) locateMethodInRange(name string, classStart, classEnd int)
 	}
 	// Method shape inside a class body: optional `static`/`async`/`*`
 	// then `NAME(`. Skip the `constructor` / `class` keywords that
-	// would falsely match.
-	pattern := `(?m)^[\s]*(?:static\s+)?(?:async\s+)?\*?\s*` + regexp.QuoteMeta(name) + `\s*\(`
+	// would falsely match. Every inter-token whitespace class is
+	// `[ \t]`, NOT `\s` — `\s` includes `\n`, so blank lines before
+	// the method let the match start a line (or more) early, landing
+	// startByte on a stray newline and giving a zero-width span (#809).
+	pattern := `(?m)^[ \t]*(?:static[ \t]+)?(?:async[ \t]+)?\*?[ \t]*` + regexp.QuoteMeta(name) + `[ \t]*\(`
 	body := w.source[max(w.cursor, classStart):classEnd]
 	loc := w.regexFor(pattern).FindIndex(body)
 	if loc == nil {

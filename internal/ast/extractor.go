@@ -2118,7 +2118,9 @@ func findBlockEnd(source []byte, startOffset int, blockChar byte) int {
 	var closeChar byte
 	switch blockChar {
 	case '{':
-		closeChar = '}'
+		// Brace-bodied declarations (function/class) get a bounded
+		// opener search — see findBraceBlock (#809).
+		return findBraceBlock(source, startOffset)
 	case '(':
 		closeChar = ')'
 	case '[':
@@ -2136,6 +2138,59 @@ func findBlockEnd(source []byte, startOffset int, blockChar byte) int {
 		} else if source[i] == closeChar {
 			depth--
 			if started && depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return len(source)
+}
+
+// findBraceBlock spans a brace-bodied declaration (function, class,
+// interface, enum) opened at startOffset to the byte just past its
+// matching `}`.
+//
+// The opener search is bounded. The old code scanned forward for the
+// first `{` anywhere after startOffset with no upper bound — so an
+// expression-bodied or body-less declaration (Kotlin/Swift
+// `fun double(x) = x * 2`, an abstract method) latched onto the *next*
+// sibling's brace and swallowed its whole block (#809). A declaration's
+// `{` can only legitimately appear on the declaration line or on a
+// continuation line still inside the parameter parentheses, so: while
+// the body has not opened, track paren depth and treat a newline at
+// paren depth 0 as end-of-declaration — there is no braced body, return
+// end of that line. `{`/`}` inside the signature parens (default-value
+// lambdas) are ignored; only a `{` at paren depth 0 opens the body.
+func findBraceBlock(source []byte, startOffset int) int {
+	depth := 0
+	parenDepth := 0
+	started := false
+	for i := startOffset; i < len(source); i++ {
+		c := source[i]
+		if !started {
+			switch c {
+			case '(':
+				parenDepth++
+			case ')':
+				if parenDepth > 0 {
+					parenDepth--
+				}
+			case '{':
+				if parenDepth == 0 {
+					depth = 1
+					started = true
+				}
+			case '\n':
+				if parenDepth == 0 {
+					return i // declaration ended with no braced body
+				}
+			}
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
 				return i + 1
 			}
 		}

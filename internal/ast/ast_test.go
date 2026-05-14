@@ -1031,6 +1031,53 @@ func TestExtractKotlin(t *testing.T) {
 	}
 }
 
+// #809: an expression-bodied (brace-less) declaration must not scan
+// forward and swallow the next sibling's braced block. Pre-fix the
+// brace matcher latched onto the first `{` anywhere ahead, so `double`
+// ran to the end of `describe`.
+func TestExtractKotlin_ExpressionBodyDoesNotSwallowSibling(t *testing.T) {
+	src := []byte(`fun double(x: Int) = x * 2
+
+fun describe(x: Int): String {
+    return "v"
+}
+`)
+	result := Extract(src, "Kotlin", "m/f.kt")
+	byName := make(map[string]ExtractedSymbol)
+	for _, s := range result.Symbols {
+		byName[s.Name] = s
+	}
+	if got := byName["double"]; got.StartLine != 1 || got.EndLine != 1 {
+		t.Errorf("double span = %d-%d, want 1-1 (expression body, single line)", got.StartLine, got.EndLine)
+	}
+	if got := byName["describe"]; got.StartLine != 3 || got.EndLine != 5 {
+		t.Errorf("describe span = %d-%d, want 3-5 (its own braced body)", got.StartLine, got.EndLine)
+	}
+}
+
+// #809: a declaration whose `{` sits on a continuation line — still
+// inside the parameter parens — must span the full braced body, not
+// stop at the first newline.
+func TestExtractKotlin_MultiLineSignature(t *testing.T) {
+	src := []byte(`fun combine(
+    a: Int,
+    b: Int,
+): Int {
+    return a + b
+}
+`)
+	result := Extract(src, "Kotlin", "m/f.kt")
+	var combine ExtractedSymbol
+	for _, s := range result.Symbols {
+		if s.Name == "combine" {
+			combine = s
+		}
+	}
+	if combine.StartLine != 1 || combine.EndLine != 6 {
+		t.Errorf("combine span = %d-%d, want 1-6 (multi-line signature + braced body)", combine.StartLine, combine.EndLine)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Swift extractor
 // ─────────────────────────────────────────────────────────────────────────────
