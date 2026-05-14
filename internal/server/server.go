@@ -6810,13 +6810,6 @@ func classifyTaskShape(task string) guideShape {
 		return false
 	}
 	switch {
-	// #608: structural-audit pattern ("find every X without Y") must
-	// run before shapeFix — otherwise tasks like "find every handler
-	// that has no error return" match `error` and route to fix instead
-	// of the intended pinchQL audit query. The pattern is intentionally
-	// tighter than the keyword sweeps below, so an early match is safe.
-	case auditShapePattern.MatchString(t):
-		return shapeAudit
 	// #497: tool-output audit — "find FPs in dead_code", "audit search
 	// results", "characterize trace failures". The user is investigating
 	// a tool's output quality, not generic bugs in its source. The
@@ -6847,6 +6840,16 @@ func classifyTaskShape(task string) guideShape {
 		// survey intent.
 		"no inbound caller", "no inbound edge", "nothing calls", "never used"):
 		return shapeDeadCode
+	// #608/#780: structural-audit pattern ("find every X without Y")
+	// routes to a pinchQL audit query. Runs before shapeFix — otherwise
+	// "find every handler that has no error return" matches `error` and
+	// routes to fix. Must run AFTER shapeDeadCode: this regex also
+	// matches "find all functions with no callers", but a task naming
+	// callers/unused code is a dead-code survey, not a generic docstring
+	// audit — pre-fix it grabbed those tasks and recommended the
+	// hardcoded `docstring IS NULL` query regardless.
+	case auditShapePattern.MatchString(t):
+		return shapeAudit
 	case contains("test", "spec ", "coverage"):
 		return shapeTest
 	case contains("review", "diff", "before commit", "blast radius", "pre-commit", "impact"):

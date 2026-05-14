@@ -38,15 +38,17 @@ func TestClassifyTaskShape_AuditUndocumented(t *testing.T) {
 // silently falling through to shapeFind.
 func TestClassifyTaskShape_AuditEveryWithoutPattern(t *testing.T) {
 	t.Parallel()
+	// #780: "find every X with no callers" / "zero callers" phrasings
+	// deliberately excluded here — they match auditShapePattern but a
+	// task naming callers is a dead-code survey, so shapeDeadCode (which
+	// runs first) claims them. See TestClassifyTaskShape_DeadCode.
 	cases := []string{
 		"find every function without a test",
 		"list every endpoint without auth",
 		"count every method that lacks a return type",
-		"show every exported symbol with no callers",
 		"find any handler that has no error return",
 		"surface all migrations without a rollback",
 		"find every public field that doesn't have a tag",
-		"list any function with zero callers",
 	}
 	for _, task := range cases {
 		t.Run(task, func(t *testing.T) {

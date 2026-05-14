@@ -26,6 +26,14 @@ func TestClassifyTaskShape_DeadCode(t *testing.T) {
 		"functions with no inbound edges",
 		"find helpers that nothing calls",
 		"list types that are never used",
+		// #780: these match auditShapePattern ("find/show/list every|all|
+		// any X with no Y") but name callers — pre-fix the audit regex
+		// ran first and routed them to shapeAudit, which recommends the
+		// hardcoded `docstring IS NULL` query, ignoring the actual task.
+		// shapeDeadCode now runs before auditShapePattern.
+		"show every exported symbol with no callers",
+		"list any function with zero callers",
+		"find all exported functions that have no callers",
 	}
 	for _, task := range cases {
 		t.Run(task, func(t *testing.T) {
