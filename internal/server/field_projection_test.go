@@ -296,3 +296,114 @@ func toString(m map[string]any) string {
 	}
 	return out
 }
+
+// #712 C.2: projectFieldsChecked reports requested field names that
+// matched no key. _meta is never counted as unknown.
+func TestProjectFieldsChecked(t *testing.T) {
+	t.Parallel()
+	in := map[string]any{
+		"symbol":  "s",
+		"imports": "i",
+		"_meta":   map[string]any{"k": "v"},
+	}
+
+	// nil allow → untouched, no unknowns.
+	if got, unknown := projectFieldsChecked(in, nil); len(unknown) != 0 || len(got) != 3 {
+		t.Errorf("nil allow: got %v unknown %v", got, unknown)
+	}
+
+	// One valid, one bogus.
+	got, unknown := projectFieldsChecked(in, map[string]bool{"symbol": true, "id": true})
+	if !sameKeys(got, []string{"symbol", "_meta"}) {
+		t.Errorf("expected symbol+_meta; got %v", got)
+	}
+	if len(unknown) != 1 || unknown[0] != "id" {
+		t.Errorf("expected unknown=[id]; got %v", unknown)
+	}
+
+	// _meta in the allow set is not treated as unknown even though it's
+	// preserved unconditionally.
+	_, unknown = projectFieldsChecked(in, map[string]bool{"_meta": true})
+	if len(unknown) != 0 {
+		t.Errorf("_meta must never be reported unknown; got %v", unknown)
+	}
+}
+
+func TestProjectableKeys(t *testing.T) {
+	t.Parallel()
+	in := map[string]any{"symbol": 1, "callees": 2, "_meta": 3}
+	got := projectableKeys(in)
+	if len(got) != 2 || got[0] != "callees" || got[1] != "symbol" {
+		t.Errorf("expected sorted [callees symbol]; got %v", got)
+	}
+}
+
+// #712 C.2: handleContext with a fields list where EVERY entry is bogus
+// must warn and fall back to the full response — not ship a {_meta}-only
+// empty body.
+func TestHandleContext_AllFieldsUnknown_WarnsAndFallsBack(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "pc1"
+	store.UpsertProject(db.Project{ID: "pc1", Path: "/tmp/pc1", Name: "pc1", IndexedAt: time.Now()})
+	mustUpsertSymbols(t, store, []db.Symbol{
+		{ID: "pc1::pkg.Main#Function", ProjectID: "pc1", FilePath: "main.go",
+			Name: "Main", QualifiedName: "pkg.Main", Kind: "Function", Language: "Go",
+			ExtractionConfidence: 1.0},
+	})
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{
+		"id":     "pc1::pkg.Main#Function",
+		"fields": "id,bogus", // context's keys are symbol/imports/callees
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := decode(t, result)
+	// Full body preserved.
+	if _, ok := body["symbol"]; !ok {
+		t.Errorf("all-unknown fields should fall back to full response; got keys %v", mapKeys(body))
+	}
+	meta, _ := body["_meta"].(map[string]any)
+	warns, _ := meta["warnings"].([]any)
+	if len(warns) == 0 {
+		t.Fatalf("expected a warning about unknown fields; got _meta %v", meta)
+	}
+	if w, _ := warns[0].(string); !strings.Contains(w, "bogus") || !strings.Contains(w, "valid keys") {
+		t.Errorf("warning should name the bogus field + valid keys; got %q", w)
+	}
+}
+
+// #712 C.2: a mix of valid + bogus fields keeps the valid projection but
+// still warns about the dropped bogus name.
+func TestHandleContext_PartialUnknownFields_WarnsKeepsValid(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	srv.sessionID = "pc2"
+	store.UpsertProject(db.Project{ID: "pc2", Path: "/tmp/pc2", Name: "pc2", IndexedAt: time.Now()})
+	mustUpsertSymbols(t, store, []db.Symbol{
+		{ID: "pc2::pkg.Main#Function", ProjectID: "pc2", FilePath: "main.go",
+			Name: "Main", QualifiedName: "pkg.Main", Kind: "Function", Language: "Go",
+			ExtractionConfidence: 1.0},
+	})
+
+	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{
+		"id":     "pc2::pkg.Main#Function",
+		"fields": "symbol,bogus",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := decode(t, result)
+	if _, ok := body["symbol"]; !ok {
+		t.Errorf("valid field 'symbol' should survive; got keys %v", mapKeys(body))
+	}
+	if _, ok := body["imports"]; ok {
+		t.Errorf("projection should still drop unrequested 'imports'; got keys %v", mapKeys(body))
+	}
+	meta, _ := body["_meta"].(map[string]any)
+	warns, _ := meta["warnings"].([]any)
+	if len(warns) == 0 {
+		t.Fatalf("expected a warning about the bogus field; got _meta %v", meta)
+	}
+}

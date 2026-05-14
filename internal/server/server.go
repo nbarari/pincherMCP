@@ -3376,7 +3376,31 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 	if root != "" {
 		s.attachStalenessWarning(data, sym.ProjectID, sym, root)
 	}
-	data = projectFields(data, fieldSet)
+	// #712 C.2: project, but if the caller's `fields` named keys that
+	// don't exist on the response, warn instead of silently shipping a
+	// `{_meta}`-only body. If *every* requested field was unknown the
+	// projection is useless — fall back to the full unprojected data so
+	// the call still returns something actionable.
+	if fieldSet != nil {
+		valid := projectableKeys(data)
+		projected, unknown := projectFieldsChecked(data, fieldSet)
+		if len(unknown) > 0 {
+			realKeys := projectableKeys(projected)
+			if len(realKeys) == 0 {
+				// All requested fields were bogus — keep the full body.
+				attachWarning(data, fmt.Sprintf(
+					"fields=%v matched no keys; valid keys: %v — returning full response",
+					unknown, valid))
+			} else {
+				attachWarning(projected, fmt.Sprintf(
+					"fields %v matched no keys and were dropped; valid keys: %v",
+					unknown, valid))
+				data = projected
+			}
+		} else {
+			data = projected
+		}
+	}
 	responseJSON, _ := json.Marshal(data)
 	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(sym.ProjectID, root, allPaths, responseJSON)), nil
 }
@@ -7875,6 +7899,59 @@ func projectFields(m map[string]any, allow map[string]bool) map[string]any {
 		out["_meta"] = v
 	}
 	return out
+}
+
+// projectFieldsChecked is projectFields plus the list of requested
+// field names that matched no key in m (#712 C.2). Callers surface
+// those in _meta.warnings — a typo'd field name (`fields=id` on
+// `context`, whose top-level keys are symbol/imports/callees) would
+// otherwise silently produce a `{_meta-only}` empty response and the
+// caller never learns why. `_meta` is never counted as unknown — it's
+// always preserved and isn't a caller-projectable key.
+func projectFieldsChecked(m map[string]any, allow map[string]bool) (projected map[string]any, unknown []string) {
+	if allow == nil {
+		return m, nil
+	}
+	out := make(map[string]any, len(allow)+1)
+	for f := range allow {
+		if v, ok := m[f]; ok {
+			out[f] = v
+		} else if f != "_meta" {
+			unknown = append(unknown, f)
+		}
+	}
+	if v, ok := m["_meta"]; ok {
+		out["_meta"] = v
+	}
+	sort.Strings(unknown)
+	return out, unknown
+}
+
+// projectableKeys returns m's caller-facing top-level keys (everything
+// except the always-preserved _meta), sorted — used to build the
+// "valid keys: ..." half of an unknown-field warning.
+func projectableKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if k != "_meta" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// attachWarning appends a non-fatal advisory to data["_meta"].warnings,
+// creating the _meta map / warnings slice as needed. Mirrors the
+// _meta.warnings convention used by search/list/trace clamp warnings.
+func attachWarning(data map[string]any, msg string) {
+	meta, _ := data["_meta"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+		data["_meta"] = meta
+	}
+	warnings, _ := meta["warnings"].([]string)
+	meta["warnings"] = append(warnings, msg)
 }
 
 func intArg(args map[string]any, key string, def int) int {
