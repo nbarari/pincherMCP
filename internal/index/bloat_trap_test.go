@@ -1,4 +1,4 @@
-package main
+package index
 
 import (
 	"os"
@@ -24,9 +24,9 @@ func TestIsBloatTrap_FilesystemRoot(t *testing.T) {
 	}
 
 	for _, hook := range []bool{true, false} {
-		trap, reason := isBloatTrap(root, hook)
+		trap, reason := IsBloatTrap(root, hook)
 		if !trap {
-			t.Errorf("isBloatTrap(%q, hook=%v) = false; want true", root, hook)
+			t.Errorf("IsBloatTrap(%q, hook=%v) = false; want true", root, hook)
 		}
 		if reason == "" {
 			t.Errorf("hook=%v: empty reason for %s", hook, root)
@@ -40,9 +40,9 @@ func TestIsBloatTrap_UserHome(t *testing.T) {
 		t.Skip("no HOME available")
 	}
 	for _, hook := range []bool{true, false} {
-		trap, reason := isBloatTrap(home, hook)
+		trap, reason := IsBloatTrap(home, hook)
 		if !trap {
-			t.Errorf("isBloatTrap(%q, hook=%v) = false; want true", home, hook)
+			t.Errorf("IsBloatTrap(%q, hook=%v) = false; want true", home, hook)
 		}
 		if reason == "" {
 			t.Errorf("hook=%v: empty reason for HOME", hook)
@@ -55,7 +55,7 @@ func TestIsBloatTrap_HookModeRequiresProjectMarker(t *testing.T) {
 	dir := t.TempDir()
 
 	// Hook mode should refuse: no project marker.
-	trap, reason := isBloatTrap(dir, true)
+	trap, reason := IsBloatTrap(dir, true)
 	if !trap {
 		t.Errorf("hook mode in empty dir should refuse, got allow")
 	}
@@ -64,7 +64,7 @@ func TestIsBloatTrap_HookModeRequiresProjectMarker(t *testing.T) {
 	}
 
 	// Manual mode should allow: trusts the explicit user action.
-	trap, _ = isBloatTrap(dir, false)
+	trap, _ = IsBloatTrap(dir, false)
 	if trap {
 		t.Error("manual mode in empty dir should allow")
 	}
@@ -86,7 +86,7 @@ func TestIsBloatTrap_HookModeAllowsRecognizedProject(t *testing.T) {
 				}
 			}
 
-			trap, _ := isBloatTrap(dir, true)
+			trap, _ := IsBloatTrap(dir, true)
 			if trap {
 				t.Errorf("hook mode with %s should allow indexing", marker)
 			}
@@ -100,7 +100,7 @@ func TestIsBloatTrap_NonexistentPath(t *testing.T) {
 	// project-marker check finds nothing → refused in hook mode.
 	abs := filepath.Join(os.TempDir(), "definitely-not-a-real-path-pincher-test-12345")
 	_, _ = os.Stat(abs) // ensure it doesn't exist; harmless if it does
-	trap, _ := isBloatTrap(abs, true)
+	trap, _ := IsBloatTrap(abs, true)
 	if !trap {
 		t.Errorf("hook mode against nonexistent path should refuse")
 	}

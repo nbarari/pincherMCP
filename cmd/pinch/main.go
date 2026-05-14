@@ -340,7 +340,7 @@ func runIndexCLI(args []string) {
 	// non-project directory have no useful index to build. Hook mode
 	// exits 0 silently so the SessionStart hook doesn't fail loudly;
 	// manual mode exits 1 with a clear message.
-	if trap, reason := isBloatTrap(path, *hookMode); trap {
+	if trap, reason := index.IsBloatTrap(path, *hookMode); trap {
 		fmt.Fprintf(os.Stderr, "pincher: refusing to index %q (%s)\n", path, reason)
 		if *hookMode {
 			os.Exit(0)

@@ -2883,6 +2883,22 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	force := boolArg(args, "force")
 
+	// #790: refuse the catastrophic index targets (filesystem root,
+	// $HOME) on the MCP surface too — pre-fix only the `pincher index`
+	// CLI ran this guard, so an MCP `index` call could point at / or
+	// $HOME and bloat the shared DB with millions of cache "symbols".
+	// hookMode=false: an explicit `index` tool call is a deliberate
+	// action, same trust level as a manual CLI invocation — only the
+	// catastrophic cases trip, not the project-marker check.
+	if trap, reason := index.IsBloatTrap(path, false); trap {
+		return s.errResultRich(fmt.Sprintf("refusing to index %q (%s)", path, reason), []map[string]string{
+			{"tool": "index", "args": `{"path":"/abs/path/to/repo"}`,
+				"why": "point index at a project root, not a filesystem root or your home directory"},
+			{"tool": "list", "args": `{}`,
+				"why": "see which projects are already indexed"},
+		}), nil
+	}
+
 	// F1: refuse re-index when the existing project was stamped by a
 	// newer pincher binary. Running our older parsing logic over a
 	// project a newer binary already understood would silently

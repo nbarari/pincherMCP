@@ -1,14 +1,14 @@
-package main
+package index
 
 import (
 	"os"
 	"path/filepath"
 )
 
-// projectMarkers are filenames or directories whose presence at the top
+// ProjectMarkers are filenames or directories whose presence at the top
 // of a directory indicates a likely project root. The hook-mode bloat
 // trap guard requires at least one to be present before indexing.
-var projectMarkers = []string{
+var ProjectMarkers = []string{
 	".git", // any git repo (including worktrees and submodules)
 	".hg",
 	".svn",
@@ -24,7 +24,7 @@ var projectMarkers = []string{
 	"CMakeLists.txt",
 }
 
-// isBloatTrap reports whether path looks like a bad target for indexing.
+// IsBloatTrap reports whether path looks like a bad target for indexing.
 // Returns (true, reason) when refusal is warranted.
 //
 // Two failure modes from prior incidents drive the guard:
@@ -44,7 +44,12 @@ var projectMarkers = []string{
 // an explicit user action and only trips on the catastrophic cases ($HOME,
 // /). The SessionStart hook can target any directory and needs the
 // broader project-marker check.
-func isBloatTrap(path string, hookMode bool) (bool, string) {
+//
+// Lives in internal/index (not cmd/pinch) so both the CLI entry point
+// AND the MCP `index` tool handler share the guard — pre-#790 only the
+// CLI path was protected, so an MCP `index` call could still target /
+// or $HOME and bloat the DB.
+func IsBloatTrap(path string, hookMode bool) (bool, string) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return false, ""
@@ -76,7 +81,7 @@ func isBloatTrap(path string, hookMode bool) (bool, string) {
 
 	// Hook mode: require at least one project marker. Without it, the
 	// hook is firing in a directory that wasn't meant to be indexed.
-	for _, m := range projectMarkers {
+	for _, m := range ProjectMarkers {
 		if _, err := os.Stat(filepath.Join(abs, m)); err == nil {
 			return false, ""
 		}
