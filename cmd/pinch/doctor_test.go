@@ -226,6 +226,14 @@ func TestDoctorReport_BinaryVersionPopulated(t *testing.T) {
 	if r.BinaryVersion == "" {
 		t.Errorf("BinaryVersion should be populated; got empty string")
 	}
+	// #732: Advisories must be a non-nil slice (JSON invariant) and
+	// empty on a healthy tiny test DB.
+	if r.Advisories == nil {
+		t.Errorf("Advisories should be a non-nil slice; got nil")
+	}
+	if len(r.Advisories) != 0 {
+		t.Errorf("healthy tiny test DB should produce no advisories; got %v", r.Advisories)
+	}
 	md := formatDoctorMarkdown(r)
 	if !strings.Contains(md, "Binary:") {
 		t.Errorf("Markdown should include 'Binary:' line, got:\n%s", md)
@@ -244,6 +252,36 @@ func TestFormatDoctorMarkdown_BlankBinaryVersionSuppressed(t *testing.T) {
 	md := formatDoctorMarkdown(r)
 	if strings.Contains(md, "Binary:") {
 		t.Errorf("blank BinaryVersion should suppress the line, got:\n%s", md)
+	}
+}
+
+// #732: largeDBAdvisory (CLI copy) must stay behaviourally identical to
+// the internal/server copy — a multi-GB DB gets a concrete advisory, a
+// small one gets nothing, and the heaviest project is named.
+func TestLargeDBAdvisory_CLI(t *testing.T) {
+	if got := largeDBAdvisory(500<<20, nil); got != "" {
+		t.Errorf("500 MB DB should produce no advisory; got %q", got)
+	}
+	if got := largeDBAdvisory(1<<30, nil); got != "" {
+		t.Errorf("exactly 1 GiB should not trip the advisory; got %q", got)
+	}
+	projects := []DoctorProjectSummary{
+		{Name: "warp_rc", Symbols: 1453923, Files: 4363},
+		{Name: "pincher-repo", Symbols: 5169, Files: 394},
+	}
+	got := largeDBAdvisory(5<<30, projects)
+	if got == "" {
+		t.Fatal("5 GB DB should produce an advisory")
+	}
+	for _, want := range []string{"5.0 GB", "warp_rc", "1453923", "prune_dead", "VACUUM"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory missing %q\n  got: %s", want, got)
+		}
+	}
+	// formatDoctorMarkdown must surface a populated advisory.
+	md := formatDoctorMarkdown(&DoctorReport{DBSizeBytes: 5 << 30, Advisories: []string{got}})
+	if !strings.Contains(md, "Advisories:") || !strings.Contains(md, "warp_rc") {
+		t.Errorf("markdown should render the advisory block; got:\n%s", md)
 	}
 }
 

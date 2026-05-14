@@ -91,6 +91,11 @@ type DoctorReport struct {
 	ExtractionFailures   []DoctorFailureRow      `json:"extraction_failures"`
 	SlowQueries          []DoctorSlowQueryRow    `json:"slow_queries"`
 	LookbackHours        int                     `json:"lookback_hours"`
+	// Advisories are human-readable health warnings (#732). Always
+	// present — empty slice when healthy — so JSON consumers can
+	// iterate without a null check. Mirrors the MCP doctor tool's
+	// `advisories` field.
+	Advisories []string `json:"advisories"`
 }
 
 type DoctorProjectSummary struct {
@@ -218,7 +223,43 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int) (*Do
 		return r.Projects[i].Symbols > r.Projects[j].Symbols
 	})
 
+	// #732: health advisories. Always a non-nil slice (JSON invariant).
+	r.Advisories = []string{}
+	if a := largeDBAdvisory(r.DBSizeBytes, r.Projects); a != "" {
+		r.Advisories = append(r.Advisories, a)
+	}
+
 	return r, nil
+}
+
+// largeDBAdvisory returns a health advisory when the pincher DB is
+// pathologically large, or "" when it's fine. #732: failure-as-pedagogy
+// for the diagnostic itself — a multi-GB store is almost always stale
+// projects accumulated by old binaries, not live data. `projects` must
+// be sorted by symbol count descending so projects[0] is the heaviest.
+//
+// Deliberately duplicated from internal/server/admin.go's copy: the CLI
+// lives in package main and can't import the server package. The admin.go
+// header documents this bounded-duplication convention; the two copies
+// must stay behaviourally identical.
+func largeDBAdvisory(dbSizeBytes int64, projects []DoctorProjectSummary) string {
+	const threshold = 1 << 30 // 1 GiB
+	if dbSizeBytes <= threshold {
+		return ""
+	}
+	msg := fmt.Sprintf("database is %.1f GB — unusually large. This is almost always "+
+		"stale projects accumulated by older binaries, not live data.",
+		float64(dbSizeBytes)/(1<<30))
+	if len(projects) > 0 {
+		h := projects[0]
+		msg += fmt.Sprintf(" Heaviest project: %q (%d symbols across %d files).",
+			h.Name, h.Symbols, h.Files)
+	}
+	msg += " Remediation: `list prune_dead=true` removes projects whose on-disk path is gone; " +
+		"projects still on disk but indexed long ago have no automatic reclamation — re-index or " +
+		"remove them. SQLite does not shrink the file on row deletion, so a VACUUM is needed to " +
+		"actually reclaim the space afterward."
+	return msg
 }
 
 // formatDoctorMarkdown renders the report as a human-readable terminal
@@ -239,6 +280,16 @@ func formatDoctorMarkdown(r *DoctorReport) string {
 	fmt.Fprintf(&b, "Database size:    %s\n", humanBytes(r.DBSizeBytes))
 	fmt.Fprintf(&b, "WAL size:         %s\n", humanBytes(r.WALSizeBytes))
 	fmt.Fprintf(&b, "Projects:         %d\n\n", len(r.Projects))
+
+	// #732: health advisories — surfaced prominently right after the
+	// storage block, since today's only advisory is about DB size.
+	if len(r.Advisories) > 0 {
+		fmt.Fprintln(&b, "⚠ Advisories:")
+		for _, a := range r.Advisories {
+			fmt.Fprintf(&b, "  - %s\n", a)
+		}
+		fmt.Fprintln(&b)
+	}
 
 	// Project list (top-N by symbol count, just the names)
 	if len(r.Projects) > 0 {
