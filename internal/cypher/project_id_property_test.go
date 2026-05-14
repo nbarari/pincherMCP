@@ -87,6 +87,38 @@ func TestExecute_ProjectIDProperty_AliasAndFilter(t *testing.T) {
 	}
 }
 
+// #774: the documented property aliases (project/qn/label) resolved in
+// WHERE (via cypherPropToCol's SQL pushdown) but returned null in RETURN
+// — symRowToMap only carried the canonical keys. A cross-project query
+// asking `RETURN n.project` got rows with n.project=null even though
+// n.project_id had the value.
+func TestExecute_PropertyAliases_ResolveInReturn(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	insertSymInProject(t, db, "a1", "repoA", "Alpha", "Function")
+
+	e := &Executor{DB: db, MaxRows: 100, AllowAllProjects: true}
+	r, err := e.Execute(context.Background(),
+		`MATCH (n:Function) WHERE n.name = "Alpha" RETURN n.project, n.qn, n.label`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(r.Rows) != 1 {
+		t.Fatalf("rows=%d, want 1", len(r.Rows))
+	}
+	row := r.Rows[0]
+	// insertSymInProject sets qualified_name = name and kind = "Function".
+	for col, want := range map[string]string{
+		"n.project": "repoA",
+		"n.qn":      "Alpha",
+		"n.label":   "Function",
+	} {
+		if got, _ := row[col].(string); got != want {
+			t.Errorf("RETURN %s = %v, want %q — documented alias must resolve in RETURN, not just WHERE", col, row[col], want)
+		}
+	}
+}
+
 // contains is a tiny substring helper local to this test file.
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {

@@ -2531,6 +2531,16 @@ func symRowToMap(varName string, n *symRow) map[string]any {
 		prefix + "is_test":                n.IsTest,
 		prefix + "complexity":             n.Complexity,
 		prefix + "extraction_confidence":  n.ExtractionConfidence,
+		// #774: documented property aliases must resolve in RETURN
+		// projection and the in-Go matchesWhere fallback, not just in
+		// the SQL-pushdown path (cypherPropToCol). knownPropertyList
+		// advertises `project_id (project)`, `qualified_name (qn)`,
+		// `kind (label)` — without these keys `RETURN n.project` etc.
+		// silently returned null even though the validator accepted the
+		// name. Keep in sync with cypherPropToCol's alias cases.
+		prefix + "project": n.ProjectID,
+		prefix + "qn":      n.QualifiedName,
+		prefix + "label":   n.Kind,
 	}
 	// #438: nullable text columns. Use nil rather than "" so
 	// `WHERE n.docstring IS NULL` distinguishes unset from empty,
