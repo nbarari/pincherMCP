@@ -2187,10 +2187,62 @@ func findBlockEnd(source []byte, startOffset int, blockChar byte) int {
 // paren depth 0 as end-of-declaration — there is no braced body, return
 // end of that line. `{`/`}` inside the signature parens (default-value
 // lambdas) are ignored; only a `{` at paren depth 0 opens the body.
+//
+// #816: a newline at paren depth 0 is NOT always end-of-declaration —
+// a wrapped return type (`-> Type` on its own line) or a Rust `where`
+// clause continues the signature, and the braced body is reached only
+// past it. declContinuationAt peeks the next non-blank line before the
+// newline is treated as a terminator; a `where` clause whose body spans
+// several lines holds the scan open until the `{` (or a `;`).
+//
+// declContinuationAt peeks past the newline at nlIdx to decide whether
+// the declaration continues onto the next non-blank line.
+func declContinuationAt(source []byte, nlIdx int) (cont, isWhere bool) {
+	j := nlIdx + 1
+	for j < len(source) {
+		// Skip leading whitespace on this line.
+		for j < len(source) && (source[j] == ' ' || source[j] == '\t' || source[j] == '\r') {
+			j++
+		}
+		if j >= len(source) {
+			return false, false
+		}
+		if source[j] == '\n' { // blank line — look at the line after
+			j++
+			continue
+		}
+		c := source[j]
+		if c == '{' {
+			return true, false
+		}
+		if c == '-' && j+1 < len(source) && source[j+1] == '>' {
+			return true, false // wrapped return type on its own line
+		}
+		// `where` as a leading word (followed by a non-identifier char).
+		if c == 'w' && j+5 <= len(source) && string(source[j:j+5]) == "where" {
+			if j+5 == len(source) || !isIdentByte(source[j+5]) {
+				return true, true
+			}
+		}
+		return false, false
+	}
+	return false, false
+}
+
+// isIdentByte reports whether b can appear inside an identifier — used
+// to confirm a keyword match is whole-word, not a prefix.
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9')
+}
+
 func findBraceBlock(source []byte, startOffset int) int {
 	depth := 0
 	parenDepth := 0
 	started := false
+	inWhereClause := false
 	for i := startOffset; i < len(source); i++ {
 		c := source[i]
 		if !started {
@@ -2206,9 +2258,22 @@ func findBraceBlock(source []byte, startOffset int) int {
 					depth = 1
 					started = true
 				}
+			case ';':
+				if parenDepth == 0 {
+					return i + 1 // bodyless declaration (trait method, abstract decl)
+				}
 			case '\n':
 				if parenDepth == 0 {
-					return i // declaration ended with no braced body
+					if inWhereClause {
+						continue // where-clause body line; keep scanning for `{` or `;`
+					}
+					contDecl, isWhere := declContinuationAt(source, i)
+					if !contDecl {
+						return i // declaration ended with no braced body
+					}
+					if isWhere {
+						inWhereClause = true
+					}
 				}
 			}
 			continue

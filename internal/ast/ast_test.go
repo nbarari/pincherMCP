@@ -1512,6 +1512,67 @@ pub fn standalone_fn(x: i32) -> i32 { x + 1 }
 	}
 }
 
+// #816: a Rust function whose `where` clause (or wrapped `-> Type`)
+// sits on a line after the `(params)` close used to get a span of just
+// the signature's first line — findBraceBlock treated the newline at
+// paren depth 0 as end-of-declaration. declContinuationAt now peeks past
+// the newline; a `where` clause holds the scan open (across its own
+// multi-line body) until the braced body opens.
+func TestExtractRust_WhereClauseOnOwnLine(t *testing.T) {
+	src := []byte(`pub fn with_where<T>(x: T) -> T
+where
+    T: Clone,
+{
+    x
+}
+
+pub fn after(y: i32) -> i32 {
+    y + 1
+}
+`)
+	result := Extract(src, "Rust", "src/lib.rs")
+	byName := make(map[string]ExtractedSymbol)
+	for _, s := range result.Symbols {
+		byName[s.Name] = s
+	}
+	ww, ok := byName["with_where"]
+	if !ok {
+		t.Fatal("with_where not extracted")
+	}
+	if ww.StartLine != 1 || ww.EndLine != 6 {
+		t.Errorf("with_where span = %d-%d, want 1-6 (signature + where clause + braced body)", ww.StartLine, ww.EndLine)
+	}
+	// The where clause must not let the scan run into the next sibling.
+	if af, ok := byName["after"]; ok {
+		if af.StartLine != 8 || af.EndLine != 10 {
+			t.Errorf("after span = %d-%d, want 8-10 (its own body, not swallowed)", af.StartLine, af.EndLine)
+		}
+	} else {
+		t.Error("after not extracted — where-clause scan likely swallowed it")
+	}
+}
+
+// #816: a wrapped return type on its own line is also a declaration
+// continuation — the braced body is reached only past it.
+func TestExtractRust_WrappedReturnTypeOnOwnLine(t *testing.T) {
+	src := []byte(`pub fn wrapped(a: i32)
+    -> i32
+{
+    a
+}
+`)
+	result := Extract(src, "Rust", "src/lib.rs")
+	var w ExtractedSymbol
+	for _, s := range result.Symbols {
+		if s.Name == "wrapped" {
+			w = s
+		}
+	}
+	if w.StartLine != 1 || w.EndLine != 5 {
+		t.Errorf("wrapped span = %d-%d, want 1-5 (wrapped return type + braced body)", w.StartLine, w.EndLine)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // isExported: custom export function
 // ─────────────────────────────────────────────────────────────────────────────
