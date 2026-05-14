@@ -2227,15 +2227,34 @@ func formatStaleness(d time.Duration) string {
 	}
 }
 
-// DeleteProject removes a project and all its data.
+// DeleteProject removes a project and ALL its per-project rows.
+//
+// #799: this must cover every table carrying a project_id, not just the
+// obvious four. `closure` and `extraction_failures` carry a
+// `REFERENCES projects(id)` FK — omitting them made the final
+// `DELETE FROM projects` fail outright with "FOREIGN KEY constraint
+// failed" for any project that had extraction failures or a built
+// closure table. The unconstrained per-project tables (pending_edges,
+// struct_fields, interface_methods, symbol_moves, slow_queries) didn't
+// hard-fail but leaked orphan rows on every delete — a direct
+// contributor to the #732 DB bloat. `projects` stays last so every FK
+// child is gone first. (sessions / celebrations / hook_invocations are
+// intentionally global, not per-project — not touched here.)
 func (s *Store) DeleteProject(id string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		for _, q := range []string{
-			`DELETE FROM edges   WHERE project_id=?`,
-			`DELETE FROM symbols WHERE project_id=?`,
-			`DELETE FROM files   WHERE project_id=?`,
-			`DELETE FROM adrs    WHERE project_id=?`,
-			`DELETE FROM projects WHERE id=?`,
+			`DELETE FROM edges               WHERE project_id=?`,
+			`DELETE FROM symbols             WHERE project_id=?`,
+			`DELETE FROM files               WHERE project_id=?`,
+			`DELETE FROM adrs                WHERE project_id=?`,
+			`DELETE FROM extraction_failures WHERE project_id=?`,
+			`DELETE FROM closure             WHERE project_id=?`,
+			`DELETE FROM pending_edges       WHERE project_id=?`,
+			`DELETE FROM struct_fields       WHERE project_id=?`,
+			`DELETE FROM interface_methods   WHERE project_id=?`,
+			`DELETE FROM symbol_moves        WHERE project_id=?`,
+			`DELETE FROM slow_queries        WHERE project_id=?`,
+			`DELETE FROM projects            WHERE id=?`,
 		} {
 			if _, err := tx.Exec(q, id); err != nil {
 				return err

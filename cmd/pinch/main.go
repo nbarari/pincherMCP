@@ -317,6 +317,25 @@ func printHelpBanner(out io.Writer) {
 	fmt.Fprintln(out, "Flags (apply to the no-subcommand form — running as MCP server):")
 }
 
+// parseFlagsInterspersed parses fs allowing flags to appear before AND
+// after positional arguments. Go's stdlib flag.Parse stops at the first
+// non-flag token, so `pincher project rm NAME --force` left --force
+// unparsed and the flag was silently ignored (#798). Returns the
+// collected positional args in order; a genuine bad flag still trips
+// the FlagSet's ExitOnError as usual.
+func parseFlagsInterspersed(fs *flag.FlagSet, args []string) []string {
+	var positional []string
+	for {
+		fs.Parse(args)
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	return positional
+}
+
 func runIndexCLI(args []string) {
 	// Silence the DB/indexer log output — callers only want the result line.
 	log.SetOutput(io.Discard)
@@ -332,14 +351,17 @@ func runIndexCLI(args []string) {
 		fmt.Fprintln(os.Stderr, "  Indexes PATH (default: current directory) into the pincher knowledge graph.")
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	positional := parseFlagsInterspersed(fs, args)
 	if env := os.Getenv("PINCHER_MAX_FILE_SIZE_MB"); env != "" && *maxFileMB == int(index.DefaultMaxFileSize/(1024*1024)) {
 		if v, parseErr := strconv.Atoi(env); parseErr == nil && v >= 0 {
 			*maxFileMB = v
 		}
 	}
 
-	path := fs.Arg(0)
+	path := ""
+	if len(positional) > 0 {
+		path = positional[0]
+	}
 	if path == "" {
 		var err error
 		path, err = os.Getwd()

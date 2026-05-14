@@ -187,14 +187,14 @@ func runProjectRMCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) {
 		fmt.Fprintln(stderr, "  Removes one indexed project. Substring matches disambiguate via a list when ambiguous.")
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	positional := parseFlagsInterspersed(fs, args)
 
-	if fs.NArg() == 0 {
+	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "pincher project rm: <name|id|substring> required")
 		fs.Usage()
 		os.Exit(2)
 	}
-	target := fs.Arg(0)
+	target := positional[0]
 
 	store, dir, err := openProjectStore(*dataDir)
 	if err != nil {
