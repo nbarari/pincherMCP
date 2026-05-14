@@ -1,6 +1,7 @@
 package ast
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -581,6 +582,37 @@ func TestExtractPHP(t *testing.T) {
 	// Top-level functions without indentation are matched.
 	if _, ok := byName["formatDate"]; !ok {
 		t.Error("expected function 'formatDate'")
+	}
+	// #811: a class WITH an `extends` clause reports the superclass as
+	// parent; a class without one must report "" — not its own name.
+	if got := byName["UserController"].Parent; got != "BaseController" {
+		t.Errorf("UserController.Parent = %q, want %q", got, "BaseController")
+	}
+}
+
+// #811: a superclass-less class must not report its own name as parent.
+// The old extractGroup returned the first non-empty positional group, so
+// asking for "parent" fell through to the "name" group.
+func TestExtractClass_NoSuperclassHasEmptyParent(t *testing.T) {
+	cases := []struct{ lang, src string }{
+		{"PHP", "<?php\nclass Lonely {\n}\n"},
+		{"Java", "public class Lonely {\n}\n"},
+		{"TypeScript", "export class Lonely {\n}\n"},
+	}
+	for _, c := range cases {
+		result := Extract([]byte(c.src), c.lang, "m/Lonely."+c.lang)
+		var found bool
+		for _, s := range result.Symbols {
+			if s.Kind == "Class" && s.Name == "Lonely" {
+				found = true
+				if s.Parent != "" {
+					t.Errorf("%s: Lonely.Parent = %q, want \"\" (no superclass)", c.lang, s.Parent)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected Class symbol 'Lonely'", c.lang)
+		}
 	}
 }
 
@@ -1341,30 +1373,39 @@ func TestIsExported_CustomFn(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// extractGroup: regex match group extraction
+// namedGroup: regex named capture group extraction (#811)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestExtractGroup_FirstNonEmpty(t *testing.T) {
-	m := []string{"full", "", "second", "third"}
-	got := extractGroup(m, "ignored")
-	if got != "second" {
-		t.Errorf("expected second, got %q", got)
+func TestNamedGroup_ResolvesByName(t *testing.T) {
+	re := regexp.MustCompile(`^(?P<name>\w+)(?:\s*<\s*(?P<parent>\w+))?`)
+	m := re.FindStringSubmatch("Child < Base")
+	if got := namedGroup(re, m, "name"); got != "Child" {
+		t.Errorf(`namedGroup "name" = %q, want "Child"`, got)
+	}
+	if got := namedGroup(re, m, "parent"); got != "Base" {
+		t.Errorf(`namedGroup "parent" = %q, want "Base"`, got)
 	}
 }
 
-func TestExtractGroup_AllEmpty(t *testing.T) {
-	m := []string{"full", "", ""}
-	got := extractGroup(m, "ignored")
-	if got != "" {
-		t.Errorf("expected empty string, got %q", got)
+// The bug #811 fixes: a superclass-less class must NOT report its own
+// name as parent. The old extractGroup returned the first non-empty
+// positional group, so "parent" fell through to the "name" group.
+func TestNamedGroup_AbsentGroupIsEmptyNotName(t *testing.T) {
+	re := regexp.MustCompile(`^(?P<name>\w+)(?:\s*<\s*(?P<parent>\w+))?`)
+	m := re.FindStringSubmatch("Orphan")
+	if got := namedGroup(re, m, "name"); got != "Orphan" {
+		t.Errorf(`namedGroup "name" = %q, want "Orphan"`, got)
+	}
+	if got := namedGroup(re, m, "parent"); got != "" {
+		t.Errorf(`namedGroup "parent" = %q, want "" (no superclass clause)`, got)
 	}
 }
 
-func TestExtractGroup_NoSubgroups(t *testing.T) {
-	m := []string{"full"}
-	got := extractGroup(m, "ignored")
-	if got != "" {
-		t.Errorf("expected empty string for no subgroups, got %q", got)
+func TestNamedGroup_UnknownGroupIsEmpty(t *testing.T) {
+	re := regexp.MustCompile(`^(?P<name>\w+)`)
+	m := re.FindStringSubmatch("foo")
+	if got := namedGroup(re, m, "nonexistent"); got != "" {
+		t.Errorf(`namedGroup "nonexistent" = %q, want ""`, got)
 	}
 }
 

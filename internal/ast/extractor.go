@@ -1252,11 +1252,11 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		// Track class scope for method qualified names
 		if rx.classRE != nil {
 			if m := rx.classRE.FindStringSubmatch(line); m != nil {
-				name := extractGroup(m, "name")
+				name := namedGroup(rx.classRE, m, "name")
 				if name != "" {
 					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
-					parent := extractGroup(m, "parent")
+					parent := namedGroup(rx.classRE, m, "parent")
 					currentClass = name
 					currentClassEnd = endLine
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
@@ -1283,7 +1283,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		// Interface
 		if rx.interfaceRE != nil {
 			if m := rx.interfaceRE.FindStringSubmatch(line); m != nil {
-				name := extractGroup(m, "name")
+				name := namedGroup(rx.interfaceRE, m, "name")
 				if name != "" {
 					endByte := blockEnd(source, lineStart, opts)
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
@@ -1304,7 +1304,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		// Enum
 		if rx.enumRE != nil {
 			if m := rx.enumRE.FindStringSubmatch(line); m != nil {
-				name := extractGroup(m, "name")
+				name := namedGroup(rx.enumRE, m, "name")
 				if name != "" {
 					endByte := blockEnd(source, lineStart, opts)
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
@@ -1325,7 +1325,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		funcMatched := false
 		if funcPattern != nil {
 			if m := funcPattern.FindStringSubmatch(line); m != nil {
-				name := extractGroup(m, "name")
+				name := namedGroup(funcPattern, m, "name")
 				if name != "" {
 					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
@@ -1373,7 +1373,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		// `kind=Variable` searches.
 		if !funcMatched && rx.varRE != nil {
 			if m := rx.varRE.FindStringSubmatch(line); m != nil {
-				name := extractGroup(m, "name")
+				name := namedGroup(rx.varRE, m, "name")
 				if name != "" {
 					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
@@ -1401,9 +1401,9 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 		// Imports
 		if rx.importRE != nil {
 			if m := rx.importRE.FindStringSubmatch(line); m != nil {
-				imp := extractGroup(m, "path")
+				imp := namedGroup(rx.importRE, m, "path")
 				if imp == "" {
-					imp = extractGroup(m, "name")
+					imp = namedGroup(rx.importRE, m, "name")
 				}
 				if imp != "" {
 					result.Edges = append(result.Edges, ExtractedEdge{
@@ -1537,9 +1537,9 @@ func extractPython(source []byte, relPath string) *FileResult {
 var jsRE = &regexExtractor{
 	funcRE: regexp.MustCompile(
 		`(?m)(?:^|\s)(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)|` +
-			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name2>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>|` +
-			`(?m)^\s*(?P<name3>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(|` +
-			`(?m)^\s*(?P<name4>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>`),
+			`(?m)(?:^|\s)(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>|` +
+			`(?m)^\s*(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(|` +
+			`(?m)^\s*(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s*)?\((?:[^()]|\([^)]*\))*\)\s*=>`),
 	// #261: top-level const/let/var emit Variable symbols. Caught
 	// only when funcRE didn't already claim the line as Function —
 	// see the !funcMatched gate in regexExtractor.extract.
@@ -1719,15 +1719,10 @@ func rewriteCMacroSymbols(result *FileResult, source []byte, relPath string) {
 		if m == nil {
 			continue
 		}
-		// extractGroup() in this file is a "first-non-empty-subgroup"
-		// helper that pre-dates this fix; it does NOT honour the name
-		// argument. cMacroRE has TWO named groups (macro + arg) so we
-		// must look up arg by its real index.
-		argIdx := cMacroRE.SubexpIndex("arg")
-		if argIdx < 0 || argIdx >= len(m) {
-			continue
-		}
-		arg := m[argIdx]
+		// cMacroRE has TWO named groups (macro + arg); resolve arg by
+		// name. Pre-#811 this had to bypass extractGroup, which ignored
+		// the name argument; namedGroup now honours it.
+		arg := namedGroup(cMacroRE, m, "arg")
 		if arg == "" {
 			continue
 		}
@@ -2177,11 +2172,23 @@ func moduleQN(relPath, sep string) string {
 
 // extractGroup extracts a named capture group from a regex match.
 // Falls back to group 2 if "name" group is empty (for alternation patterns).
-func extractGroup(m []string, name string) string {
-	// Try to find the group named "name" — but regexp doesn't give us named group indices easily.
-	// For simplicity, return the first non-empty group after the full match.
-	for i := 1; i < len(m); i++ {
-		if m[i] != "" {
+// namedGroup returns the first non-empty capture group named `name`, or
+// "" if no such group participated in the match.
+//
+// It replaces the old extractGroup, which ignored its name argument and
+// returned the first non-empty *positional* subgroup — so for a regex
+// like classRE (groups: name, parent), asking for "parent" handed back
+// the "name" group whenever the superclass clause was absent, leaving
+// every superclass-less class with parent == its own name (#811).
+//
+// "First non-empty with this name" (rather than SubexpIndex's strict
+// "first index with this name") is deliberate: funcRE patterns are an
+// alternation of branches that each carry a `name` group, and only the
+// matched branch's group is populated. Resolving by name keeps that
+// working while still distinguishing `name` from `parent`.
+func namedGroup(re *regexp.Regexp, m []string, name string) string {
+	for i, gname := range re.SubexpNames() {
+		if gname == name && i < len(m) && m[i] != "" {
 			return m[i]
 		}
 	}
