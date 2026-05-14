@@ -103,6 +103,9 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 		// would be noise — the agent isn't confused.
 		if res.Total == 0 {
 			res.Warnings = append(res.Warnings, e.collectUnknownEnumValueWarnings(ctx, q)...)
+			// #744: a node label that's a valid kind but doesn't match
+			// the kind of the WHERE-named symbol — same silent-zero class.
+			res.Warnings = append(res.Warnings, e.collectKindLabelMismatchWarnings(ctx, q)...)
 		}
 	}
 	return res, nil
@@ -449,6 +452,124 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// collectKindLabelMismatchWarnings (#744) catches the silent-zero where
+// a node pattern carries a kind LABEL (`MATCH (a:Function)`) and the
+// WHERE pins that variable's name to a literal that DOES exist in the
+// project — but only under a different kind. The classic case:
+// `MATCH (a:Function) WHERE a.name = "handleSearch"` returns 0 rows
+// because handleSearch is a Method, not a Function. `:Function` is a
+// valid kind value (so collectUnknownEnumValueWarnings stays silent),
+// the property name is valid (so collectUnknownPropertyWarnings stays
+// silent) — without this check the agent reads the empty result as
+// "no such symbol" instead of "wrong label".
+//
+// Called only when the query returned zero rows. One DB query per
+// distinct (labelled-var, name-literal) pair.
+func (e *Executor) collectKindLabelMismatchWarnings(ctx context.Context, q *queryAST) []string {
+	if e == nil || e.DB == nil || q == nil {
+		return nil
+	}
+	// var → its kind label from the MATCH pattern (only labelled vars).
+	labelOf := map[string]string{}
+	for _, pat := range q.patterns {
+		if pat.fromVar != "" && pat.fromKind != "" {
+			labelOf[pat.fromVar] = pat.fromKind
+		}
+		if pat.toVar != "" && pat.toKind != "" {
+			labelOf[pat.toVar] = pat.toKind
+		}
+	}
+	if len(labelOf) == 0 {
+		return nil
+	}
+	// Collect `<labelledVar>.name = "literal"` equality predicates from
+	// both the flat AND-chain and the recursive WHERE tree.
+	type nameProbe struct{ variable, label, name string }
+	probes := map[nameProbe]bool{}
+	consider := func(c condition) {
+		if c.op != "=" || c.property != "name" || c.value == "" {
+			return
+		}
+		label, ok := labelOf[c.variable]
+		if !ok {
+			return
+		}
+		probes[nameProbe{variable: c.variable, label: label, name: c.value}] = true
+	}
+	for _, c := range q.conditions {
+		consider(c)
+	}
+	var walk func(w whereExpr)
+	walk = func(w whereExpr) {
+		switch x := w.(type) {
+		case condExpr:
+			consider(x.c)
+		case binaryExpr:
+			walk(x.left)
+			walk(x.right)
+		case notExpr:
+			walk(x.inner)
+		}
+	}
+	walk(q.where)
+	if len(probes) == 0 {
+		return nil
+	}
+	keys := make([]nameProbe, 0, len(probes))
+	for p := range probes {
+		keys = append(keys, p)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].name != keys[j].name {
+			return keys[i].name < keys[j].name
+		}
+		return keys[i].label < keys[j].label
+	})
+	out := []string{}
+	for _, p := range keys {
+		kinds := e.kindsForSymbolName(ctx, p.name)
+		if len(kinds) == 0 {
+			continue // name doesn't exist at all — not a label problem
+		}
+		if containsString(kinds, p.label) {
+			continue // label IS one of the kinds — zero rows is some other cause
+		}
+		out = append(out, fmt.Sprintf(
+			"node label %q matched 0 nodes named %q — a symbol with that name exists with kind %s. Use the matching label, or drop the label to match any kind.",
+			p.label, p.name, strings.Join(kinds, "/")))
+	}
+	return out
+}
+
+// kindsForSymbolName returns the distinct kinds of symbols with the
+// given exact name in scope. Mirrors distinctSymbolsColumn's
+// project-scoping + nil-on-error contract.
+func (e *Executor) kindsForSymbolName(ctx context.Context, name string) []string {
+	var rows *sql.Rows
+	var err error
+	if e.ProjectID != "" {
+		rows, err = e.DB.QueryContext(ctx,
+			"SELECT DISTINCT kind FROM symbols WHERE project_id=? AND name=? ORDER BY kind",
+			e.ProjectID, name)
+	} else {
+		rows, err = e.DB.QueryContext(ctx,
+			"SELECT DISTINCT kind FROM symbols WHERE name=? ORDER BY kind", name)
+	}
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // symCols is the canonical SELECT column list for the symbols table.
