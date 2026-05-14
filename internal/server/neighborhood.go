@@ -30,7 +30,12 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 
 	id := str(args, "id")
 	if id == "" {
-		return errResult("id is required"), nil
+		// #712: failure-as-pedagogy — the caller has no id; the way to
+		// get one is `search` for the symbol by name.
+		return s.errResultRich("id is required", []map[string]string{
+			{"tool": "search", "args": `{"query":"<symbol-name>"}`,
+				"why": "search returns symbol IDs — pass one back as neighborhood's id"},
+		}), nil
 	}
 	projectArg := str(args, "project")
 	includeSource := boolArg(args, "include_source") // default false

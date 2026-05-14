@@ -2846,7 +2846,14 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		path = s.sessionRoot
 	}
 	if path == "" {
-		return errResult("path is required (no session root detected)"), nil
+		// #712: failure-as-pedagogy — index needs an absolute path; show
+		// the shape and point at `list` to see what's already indexed.
+		return s.errResultRich("path is required (no session root detected)", []map[string]string{
+			{"tool": "index", "args": `{"path":"/abs/path/to/repo"}`,
+				"why": "index walks a repo and builds the symbol graph — pass an absolute path"},
+			{"tool": "list", "args": `{}`,
+				"why": "see which projects are already indexed before re-indexing"},
+		}), nil
 	}
 	force := boolArg(args, "force")
 
@@ -2864,7 +2871,13 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 
 	result, err := s.indexer.Index(ctx, path, force)
 	if err != nil {
-		return errResult(fmt.Sprintf("index error: %v", err)), nil
+		// #712: failure-as-pedagogy — the most common index error is a
+		// path that doesn't exist on disk; point at `list` so the caller
+		// can check what IS indexed and confirm the path shape.
+		return s.errResultRich(fmt.Sprintf("index error: %v", err), []map[string]string{
+			{"tool": "list", "args": `{}`,
+				"why": "confirm the path — list shows every indexed project's absolute path"},
+		}), nil
 	}
 
 	// #401: a successful index/re-index can introduce new project
@@ -2900,7 +2913,12 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 
 	id := str(args, "id")
 	if id == "" {
-		return errResult("id is required"), nil
+		// #712: failure-as-pedagogy — point the caller at `search`, which
+		// is where symbol IDs come from.
+		return s.errResultRich("id is required", []map[string]string{
+			{"tool": "search", "args": `{"query":"<symbol-name>"}`,
+				"why": "search returns symbol IDs — pass one back as symbol's id"},
+		}), nil
 	}
 	projectArg := str(args, "project")
 	fieldsArg := str(args, "fields")
@@ -3239,7 +3257,12 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 
 	id := str(args, "id")
 	if id == "" {
-		return errResult("id is required"), nil
+		// #712: failure-as-pedagogy — context needs a symbol ID; search
+		// is the tool that produces them.
+		return s.errResultRich("id is required", []map[string]string{
+			{"tool": "search", "args": `{"query":"<symbol-name>"}`,
+				"why": "search returns symbol IDs — pass one back as context's id"},
+		}), nil
 	}
 	// #400: response-level field projection. Caller-driven cut.
 	fieldSet := parseFieldsArg(str(args, "fields"))
@@ -3379,7 +3402,16 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// instead.
 	query := strings.TrimSpace(str(args, "query"))
 	if query == "" {
-		return errResult("query is required (and must contain non-whitespace characters)"), nil
+		// #712: failure-as-pedagogy — show the caller what a valid query
+		// looks like instead of just rejecting the empty one.
+		return s.errResultRich("query is required (and must contain non-whitespace characters)", []map[string]string{
+			{"tool": "search", "args": `{"query":"handleSearch"}`,
+				"why": "exact identifier lookup — single token, no wildcards"},
+			{"tool": "search", "args": `{"query":"auth*"}`,
+				"why": "prefix match; also supports \"quoted phrases\" and AND/OR"},
+			{"tool": "architecture", "args": `{}`,
+				"why": "if you don't know what to search for, orient first"},
+		}), nil
 	}
 	// #489: catch an unmatched double-quote before it leaks through to
 	// FTS5 as "SQL logic error: unterminated string". Phrase queries
@@ -4392,7 +4424,14 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		cql = str(args, "cypher")
 	}
 	if cql == "" {
-		return errResult("pinchql query is required (parameter `pinchql`; legacy alias `cypher` also accepted)"), nil
+		// #712: failure-as-pedagogy — pinchQL is unfamiliar; show a
+		// working query + point at `schema` for the node/edge kinds.
+		return s.errResultRich("pinchql query is required (parameter `pinchql`; legacy alias `cypher` also accepted)", []map[string]string{
+			{"tool": "query", "args": `{"pinchql":"MATCH (f:Function) WHERE f.name=\"main\" RETURN f.file_path LIMIT 10"}`,
+				"why": "pinchQL is a Cypher-shaped subset — MATCH/WHERE/RETURN/LIMIT"},
+			{"tool": "schema", "args": `{}`,
+				"why": "lists the node kinds (Function, Class, ...) and edge kinds (CALLS, ...) available to match on"},
+		}), nil
 	}
 	maxRows := intArg(args, "max_rows", 200)
 	minConfidence := floatArg(args, "min_confidence", 0.0)
@@ -4585,7 +4624,14 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	id := str(args, "id")
 	name := str(args, "name")
 	if id == "" && name == "" {
-		return errResult("either `id` or `name` is required"), nil
+		// #712: failure-as-pedagogy — trace needs a seed; both shapes
+		// (by-name and by-id) are valid, show each.
+		return s.errResultRich("either `id` or `name` is required", []map[string]string{
+			{"tool": "trace", "args": `{"name":"<function-name>"}`,
+				"why": "trace by short name — the common case"},
+			{"tool": "search", "args": `{"query":"<function-name>"}`,
+				"why": "if the name is ambiguous, search first, then trace by the exact id"},
+		}), nil
 	}
 	direction := str(args, "direction")
 	if direction == "" {
@@ -5824,11 +5870,22 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		return errRes, nil
 	}
 
+	// #712: failure-as-pedagogy — every adr arg-validation error points
+	// the caller at a concrete valid call shape instead of just naming
+	// the missing field.
+	adrUsageSteps := []map[string]string{
+		{"tool": "adr", "args": `{"action":"list"}`,
+			"why": "list all stored decisions/conventions for this project"},
+		{"tool": "adr", "args": `{"action":"set","key":"STACK","value":"Go+SQLite"}`,
+			"why": "store a decision — key is a short label, value is the body"},
+		{"tool": "adr", "args": `{"action":"get","key":"STACK"}`,
+			"why": "retrieve one entry by key"},
+	}
 	var data map[string]any
 	switch action {
 	case "get":
 		if key == "" {
-			return errResult("key is required for action=get"), nil
+			return s.errResultRich("key is required for action=get", adrUsageSteps), nil
 		}
 		val, ok, err := s.store.GetADR(projectID, key)
 		if err != nil {
@@ -5841,7 +5898,7 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 	case "set":
 		if key == "" || value == "" {
-			return errResult("key and value are required for action=set"), nil
+			return s.errResultRich("key and value are required for action=set", adrUsageSteps), nil
 		}
 		// #534: enforce length limits — pre-fix the form accepted
 		// arbitrary-length input, and a paste-of-an-entire-transcript
@@ -5872,7 +5929,7 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 	case "delete":
 		if key == "" {
-			return errResult("key is required for action=delete"), nil
+			return s.errResultRich("key is required for action=delete", adrUsageSteps), nil
 		}
 		if err := s.store.DeleteADR(projectID, key); err != nil {
 			return errResult(err.Error()), nil
@@ -5880,7 +5937,9 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		data = map[string]any{"key": key, "deleted": true}
 
 	default:
-		return errResult(fmt.Sprintf("unknown action %q", action)), nil
+		return s.errResultRich(
+			fmt.Sprintf("unknown action %q — valid actions: get, set, list, delete", action),
+			adrUsageSteps), nil
 	}
 
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
@@ -6296,12 +6355,21 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 
 	rawURL := str(args, "url")
 	if rawURL == "" {
-		return errResult("url is required"), nil
+		// #712: failure-as-pedagogy — show a concrete valid fetch call.
+		return s.errResultRich("url is required", []map[string]string{
+			{"tool": "fetch", "args": `{"url":"https://pkg.go.dev/net/http"}`,
+				"why": "fetch pulls external docs/specs into the searchable knowledge base — http/https only"},
+		}), nil
 	}
 	titleOverride := str(args, "title")
 
 	if err := s.validateFetchURL(rawURL); err != nil {
-		return errResult(fmt.Sprintf("invalid url %q: %v", rawURL, err)), nil
+		// #712: failure-as-pedagogy — the URL was rejected (bad scheme,
+		// blocked address, ...); show the accepted shape.
+		return s.errResultRich(fmt.Sprintf("invalid url %q: %v", rawURL, err), []map[string]string{
+			{"tool": "fetch", "args": `{"url":"https://example.com/docs"}`,
+				"why": "only public http/https URLs are accepted — loopback, link-local, and private addresses are blocked"},
+		}), nil
 	}
 
 	projectID, errRes := s.mustProject(args)
@@ -7105,7 +7173,14 @@ func (s *Server) handleGuide(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	start, tool, args := beginCall(req)
 	task := str(args, "task")
 	if task == "" {
-		return errResult("task is required (free-form description of what you're trying to do)"), nil
+		// #712: failure-as-pedagogy — guide takes a free-form task; show
+		// the shape so the caller doesn't have to guess.
+		return s.errResultRich("task is required (free-form description of what you're trying to do)", []map[string]string{
+			{"tool": "guide", "args": `{"task":"fix the login retry bug"}`,
+				"why": "describe the goal in plain words — guide returns 2-3 recommended tool calls"},
+			{"tool": "guide", "args": `{"task":"understand how indexing handles symlinks"}`,
+				"why": "works for understanding tasks too, not just fixes"},
+		}), nil
 	}
 	shape := classifyTaskShape(task)
 	hint := taskHintFromString(task)
