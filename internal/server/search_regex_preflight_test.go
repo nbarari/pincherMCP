@@ -194,6 +194,16 @@ func TestHandleSearch_SlashDelimitedRegex_RejectedWithFriendlyError(t *testing.T
 			if !strings.Contains(body, "=~") {
 				t.Errorf("error should redirect to the query tool with =~; got %q", body)
 			}
+			// #788: pinchQL's =~ takes a BARE regex — the redirect must
+			// strip the surrounding slashes, not echo them into the
+			// example (`=~ '/bar/'` matches a literal slash, zero rows).
+			inner := q[1 : len(q)-1]
+			if !strings.Contains(body, "=~ '"+inner+"'") {
+				t.Errorf("=~ example should use the slash-stripped regex %q; got %q", inner, body)
+			}
+			if strings.Contains(body, "=~ '/") {
+				t.Errorf("=~ example must not keep the leading slash delimiter; got %q", body)
+			}
 		})
 	}
 }

@@ -3524,9 +3524,18 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// signature — single `.` (e.g. `os.Stat`) is rescued by the
 	// per-token sanitizer, and `auth*` is a valid FTS5 prefix wildcard.
 	if seq := firstFTS5IncompatibleRegexChar(query); seq != "" {
+		// #788: pinchQL's =~ takes a BARE regex, not slash-delimited.
+		// A slash-wrapped query (the #786 case) must have its delimiters
+		// stripped before it goes into the =~ example — otherwise the
+		// redirect recommends `=~ '/handle.*/'`, which matches a literal
+		// slash and returns zero rows.
+		regexHint := query
+		if len(regexHint) > 2 && regexHint[0] == '/' && regexHint[len(regexHint)-1] == '/' {
+			regexHint = regexHint[1 : len(regexHint)-1]
+		}
 		return errResult(fmt.Sprintf(
 			"query contains regex sequence %q that FTS5 doesn't understand. For pattern matching use the `query` tool: MATCH (n:Function) WHERE n.name =~ '%s' RETURN n.name. Or search a literal keyword instead.",
-			seq, query)), nil
+			seq, regexHint)), nil
 	}
 	// #736: a stem-less prefix wildcard ("*", "**") is not a valid FTS5
 	// query — SQLite rejects it with the raw "unknown special query"
