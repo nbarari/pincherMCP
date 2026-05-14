@@ -393,12 +393,13 @@ Responses compress ~65% with `Accept-Encoding: gzip`. Tested clients: curl, Pyth
 | `/v1/dashboard` | GET | No | Self-contained HTML dashboard (stats, search, project cards, sparkline). No external deps. |
 | `/v1/dashboard.css` | GET | No | Dashboard stylesheet. Served separately so CSP can drop `'unsafe-inline'`. |
 | `/v1/dashboard.js` | GET | No | Dashboard JavaScript. Same CSP rationale. |
-| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 16 tool endpoints. Import into Postman or Cursor. |
+| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 22 tool endpoints + the GET routes. Import into Postman or Cursor. |
 | `/v1/stats` | GET | Yes | Current session + all-time savings as JSON. |
 | `/v1/sessions` | GET | Yes | Per-session history, last 90 sessions, sorted by recency. |
 | `/v1/projects` | GET | Yes | All indexed projects with file/symbol/edge counts. |
 | `/v1/projects` | DELETE | Yes | Remove a project and all its symbols. Body: `{"id":"<project-id>"}`. |
 | `/v1/index-progress` | POST | Yes | Live indexing progress: `{files_done, files_total, active}`. |
+| `/v1/events` | GET | Yes* | Server-Sent Events stream — `index_started`, `index_complete`, `binary_drift`. Sends a `binary_drift` snapshot on connect, then live events. Optional `?project=<id>` filter. \*Honors `--http-key` when set. |
 
 CORS: all responses include `Access-Control-Allow-Origin: *` so browsers can call directly without a proxy.
 
@@ -524,9 +525,22 @@ pincher project list --json               # machine-readable JSON
 pincher project rm <name>                 # interactive Y/n confirmation (alias: remove, delete)
 pincher project rm <name> --force         # skip confirmation
 pincher project rm <name> --json --force  # JSON receipt; --force required in JSON mode
+pincher project prune-stale               # drop projects schema-stale AND idle (default --days 30)
+pincher project prune-stale --days 7 --force
 ```
 
 `<name>` resolves in this order: full project id → exact name (case-insensitive) → substring on name or path. A substring that matches multiple projects errors with a disambiguation list rather than picking one. JSON mode requires `--force` (no interactive prompt is possible in a scripted workflow).
+
+`prune-stale` drops every project that is **both** schema-stale (indexed by an older binary) **and** not re-indexed in `--days` N days (default 30) — pairing the two conditions scopes the prune to genuinely-abandoned projects, not one a developer touched yesterday that just needs a re-index.
+
+### `pincher vacuum`
+
+```bash
+pincher vacuum                            # reclaim DB file space (checkpoint → VACUUM → checkpoint)
+pincher vacuum --json                     # JSON receipt: bytes_before / bytes_after / bytes_reclaimed
+```
+
+SQLite does not shrink the database file when rows are deleted — `pincher project rm` / `prune-stale` free pages internally but the file stays large. `pincher vacuum` rewrites the file to reclaim that space. It is a deliberate, explicit CLI step (VACUUM holds an exclusive lock for the duration) kept out of the hot MCP path; run it after a prune, when no agent is mid-query.
 
 ---
 
@@ -763,7 +777,7 @@ Each release tier names a theme and the issues that close it. Issue numbers link
 
 ### v1.0 — Stable API
 
-- Tool schemas frozen — no breaking changes to the 16 tool I/O shapes after this.
+- Tool schemas frozen — no breaking changes to the 22 tool I/O shapes after this.
 - Symbol-ID format frozen — `{file_path}::{qualified_name}#{kind}` is the contract.
 - HTTP REST surface frozen — `POST /v1/{tool}`, basepath/trust-proxy/rate-limit/SSRF behaviours all locked.
 - `SECURITY.md` — documented threat model.
