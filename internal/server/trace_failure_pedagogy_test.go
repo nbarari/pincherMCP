@@ -77,6 +77,79 @@ func TestTrace_DepthNegativeClamps(t *testing.T) {
 	}
 }
 
+// TestTrace_InvalidDirectionWarnsAndRecovers confirms #839: a non-canonical
+// `direction` value used to fall through every branch in db.traceViaCTE and
+// silently return 0 hops — indistinguishable from a genuine "no callers"
+// result. `callers`/`callees` now map to inbound/outbound with a warning;
+// anything else falls back to `both` with a warning. In every case the
+// trace still produces real hops.
+func TestTrace_InvalidDirectionWarnsAndRecovers(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	store.UpsertProject(db.Project{ID: "p", Path: "/tmp/p", Name: "p", EdgeCount: 1})
+	srv.sessionID = "p"
+	callerID := "x.go::pkg.Caller#Function"
+	calleeID := "x.go::pkg.Callee#Function"
+	store.BulkUpsertSymbols([]db.Symbol{
+		{ID: callerID, ProjectID: "p", Name: "Caller", QualifiedName: "pkg.Caller", Kind: "Function", FilePath: "x.go"},
+		{ID: calleeID, ProjectID: "p", Name: "Callee", QualifiedName: "pkg.Callee", Kind: "Function", FilePath: "x.go"},
+	})
+	store.BulkUpsertEdges([]db.Edge{
+		{ProjectID: "p", FromID: callerID, ToID: calleeID, Kind: "CALLS"},
+	})
+
+	cases := []struct {
+		name       string
+		direction  string
+		traceName  string // symbol to trace
+		wantHops   int    // expected hop count after synonym/fallback mapping
+		warnSubstr string
+	}{
+		// callers → inbound: tracing Callee inbound finds Caller.
+		{"callers maps to inbound", "callers", "Callee", 1, `direction="callers"`},
+		// callees → outbound: tracing Caller outbound finds Callee.
+		{"callees maps to outbound", "callees", "Caller", 1, `direction="callees"`},
+		// garbage → both: tracing Caller "both" still finds Callee.
+		{"garbage falls back to both", "sideways", "Caller", 1, `direction="sideways"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := srv.handleTrace(context.Background(), makeReq(map[string]any{
+				"name":      c.traceName,
+				"direction": c.direction,
+				"depth":     1,
+			}))
+			if err != nil {
+				t.Fatalf("handleTrace: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("trace returned IsError: %s", textOf(t, res))
+			}
+			body := decode(t, res)
+
+			total, _ := body["total"].(float64)
+			if int(total) != c.wantHops {
+				t.Errorf("direction=%q: total=%d, want %d — invalid direction must still produce hops, not a silent 0 (response: %s)",
+					c.direction, int(total), c.wantHops, textOf(t, res))
+			}
+
+			meta, _ := body["_meta"].(map[string]any)
+			warnings, _ := meta["warnings"].([]any)
+			found := false
+			for _, w := range warnings {
+				if s, ok := w.(string); ok && strings.Contains(s, c.warnSubstr) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("direction=%q: expected _meta.warnings to mention %q; got: %v",
+					c.direction, c.warnSubstr, warnings)
+			}
+		})
+	}
+}
+
 // TestTrace_NameNotFoundCarriesNextSteps confirms the failure-as-pedagogy
 // envelope on the name-not-found path — search remediation is surfaced,
 // not just a bare error string.

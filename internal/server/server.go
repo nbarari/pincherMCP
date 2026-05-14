@@ -4864,6 +4864,28 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if direction == "" {
 		direction = "both"
 	}
+	// #839: validate direction. The DB layer's traceViaCTE only branches
+	// on inbound/outbound/both — any other value falls through every
+	// branch and silently returns 0 hops, indistinguishable from a
+	// genuine "no callers" result. `callers`/`callees` are the obvious
+	// words an agent reaches for (this tool's own description says "find
+	// callers (inbound)"), so map those two synonyms with a warning; for
+	// anything else, warn and fall back to `both`. Same failure-as-
+	// pedagogy shape as the unknown-edge-kind warnings below.
+	var traceDirWarning string
+	switch direction {
+	case "inbound", "outbound", "both":
+		// canonical — no warning
+	case "callers":
+		traceDirWarning = `direction="callers" is not a valid value — interpreted as "inbound". Use direction="inbound" (the canonical term) to silence this warning.`
+		direction = "inbound"
+	case "callees":
+		traceDirWarning = `direction="callees" is not a valid value — interpreted as "outbound". Use direction="outbound" (the canonical term) to silence this warning.`
+		direction = "outbound"
+	default:
+		traceDirWarning = fmt.Sprintf(`direction=%q is not a valid value — falling back to "both". Valid values: inbound, outbound, both.`, direction)
+		direction = "both"
+	}
 	depth := intArg(args, "depth", 3)
 	// #703: clamp negative/zero depth. Schema declares depth 1-5; callers
 	// passing depth<1 previously got `{hops:[], total:N>0, risk_summary
@@ -5106,6 +5128,9 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	var traceWarnings []string
 	if traceDepthClampMsg != "" {
 		traceWarnings = append(traceWarnings, traceDepthClampMsg)
+	}
+	if traceDirWarning != "" {
+		traceWarnings = append(traceWarnings, traceDirWarning)
 	}
 	traceWarnings = append(traceWarnings, traceKindWarnings...)
 	if len(traceWarnings) > 0 {
