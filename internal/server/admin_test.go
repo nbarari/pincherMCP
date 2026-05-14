@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestHandleDoctor_HealthyEmptyDB(t *testing.T) {
 	for _, k := range []string{
 		"generated_at", "binary_version", "lookback_hours",
 		"schema_version", "db_size_bytes", "wal_size_bytes",
-		"projects", "extraction_failures", "slow_queries",
+		"projects", "extraction_failures", "slow_queries", "advisories",
 	} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("doctor response missing field %q", k)
@@ -36,11 +37,53 @@ func TestHandleDoctor_HealthyEmptyDB(t *testing.T) {
 	if got := body["binary_version"]; got != "0.21.0-test" {
 		t.Errorf("binary_version: got %v want 0.21.0-test", got)
 	}
-	// Empty DB → empty slices, never nil. (#328 invariant)
-	for _, k := range []string{"projects", "extraction_failures", "slow_queries"} {
+	// Empty DB → empty slices, never nil. (#328 invariant). advisories
+	// is #732 — a healthy (tiny) test DB is well under the 1 GiB
+	// threshold, so it must come back as [] not nil and not populated.
+	for _, k := range []string{"projects", "extraction_failures", "slow_queries", "advisories"} {
 		if v, ok := body[k].([]any); !ok || v == nil {
 			t.Errorf("%s should be [] not nil; got %T %v", k, body[k], body[k])
 		}
+	}
+	if adv, _ := body["advisories"].([]any); len(adv) != 0 {
+		t.Errorf("healthy test DB should produce no advisories; got %v", adv)
+	}
+}
+
+// #732: largeDBAdvisory turns a bare db_size_bytes number into an
+// actionable health warning when the store is pathologically large.
+func TestLargeDBAdvisory(t *testing.T) {
+	t.Parallel()
+
+	// Under the 1 GiB threshold → no advisory.
+	if got := largeDBAdvisory(500<<20, nil); got != "" {
+		t.Errorf("500 MB DB should produce no advisory; got %q", got)
+	}
+	if got := largeDBAdvisory(1<<30, nil); got != "" {
+		t.Errorf("exactly 1 GiB should not trip the advisory (threshold is strictly greater); got %q", got)
+	}
+
+	// Over the threshold → advisory that names the heaviest project and
+	// gives concrete remediation.
+	projects := []doctorProjectSummary{
+		{Name: "warp_rc", Symbols: 1453923, Files: 4363},
+		{Name: "pincher-repo", Symbols: 5169, Files: 394},
+	}
+	got := largeDBAdvisory(5<<30, projects)
+	if got == "" {
+		t.Fatal("5 GB DB should produce an advisory")
+	}
+	for _, want := range []string{"5.0 GB", "warp_rc", "1453923", "prune_dead", "VACUUM"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory missing %q\n  got: %s", want, got)
+		}
+	}
+
+	// Over the threshold but no project list → still advises, just
+	// without the heaviest-project detail.
+	bare := largeDBAdvisory(2<<30, nil)
+	if bare == "" || strings.Contains(bare, "Heaviest project") {
+		t.Errorf("empty project list should still advise, without the heaviest-project clause; got %q", bare)
 	}
 }
 

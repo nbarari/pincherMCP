@@ -364,7 +364,7 @@ var outputSchemas = map[string]string{
 	// 20. doctor — diagnostic report (#558 phase 2).
 	"doctor": `{
 		"type":"object",
-		"required":["binary_version","schema_version","db_size_bytes","wal_size_bytes","projects","extraction_failures","slow_queries","_meta"],
+		"required":["binary_version","schema_version","db_size_bytes","wal_size_bytes","projects","extraction_failures","slow_queries","advisories","_meta"],
 		"properties":{
 			"binary_version":{"type":"string"},
 			"generated_at":{"type":"string"},
@@ -375,6 +375,7 @@ var outputSchemas = map[string]string{
 			"projects":{"type":"array","items":{"type":"object"}},
 			"extraction_failures":{"type":"array","items":{"type":"object"}},
 			"slow_queries":{"type":"array","items":{"type":"object"}},
+			"advisories":{"type":"array","items":{"type":"string"},"description":"Human-readable health advisories — e.g. a pathologically large DB (#732). Empty array when healthy."},
 			"_meta":` + metaRef + `
 		}
 	}`,

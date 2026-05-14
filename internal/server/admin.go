@@ -26,6 +26,50 @@ import (
 // truth is the Store APIs both surfaces call (`ListProjects`,
 // `ListExtractionFailures`, `ListSlowQueries`, `RebuildFTS`).
 
+// doctorProjectSummary is one row of the doctor report's projects list.
+// Package-level (not function-local) so largeDBAdvisory can take a slice
+// of them.
+type doctorProjectSummary struct {
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Path                 string `json:"path"`
+	Files                int    `json:"files"`
+	Symbols              int    `json:"symbols"`
+	Edges                int    `json:"edges"`
+	IndexedAt            string `json:"indexed_at"`
+	SchemaVersionAtIndex *int   `json:"schema_version_at_index,omitempty"`
+	BinaryVersion        string `json:"binary_version,omitempty"`
+}
+
+// largeDBAdvisory returns a human-readable health advisory when the
+// pincher DB is pathologically large, or "" when it's fine. #732:
+// failure-as-pedagogy for the diagnostic itself — `doctor` used to
+// report db_size_bytes as a bare number, so a 4.7 GB store looked no
+// different from a 4.7 MB one. A multi-GB store is almost always stale
+// projects accumulated by old binaries, not live data. `projects` must
+// be sorted by symbol count descending (handleDoctor already does this)
+// so projects[0] is the heaviest — naming it makes the advisory
+// concrete.
+func largeDBAdvisory(dbSizeBytes int64, projects []doctorProjectSummary) string {
+	const threshold = 1 << 30 // 1 GiB
+	if dbSizeBytes <= threshold {
+		return ""
+	}
+	msg := fmt.Sprintf("database is %.1f GB — unusually large. This is almost always "+
+		"stale projects accumulated by older binaries, not live data.",
+		float64(dbSizeBytes)/(1<<30))
+	if len(projects) > 0 {
+		h := projects[0]
+		msg += fmt.Sprintf(" Heaviest project: %q (%d symbols across %d files).",
+			h.Name, h.Symbols, h.Files)
+	}
+	msg += " Remediation: `list prune_dead=true` removes projects whose on-disk path is gone; " +
+		"projects still on disk but indexed long ago have no automatic reclamation — re-index or " +
+		"remove them. SQLite does not shrink the file on row deletion, so a VACUUM is needed to " +
+		"actually reclaim the space afterward."
+	return msg
+}
+
 // handleDoctor builds a structured diagnostic report from the live DB:
 // schema version, file sizes, project staleness, recent extraction
 // failures, recent slow queries. Read-only — no DB mutations.
@@ -53,33 +97,21 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	data["schema_version"] = schemaVersion
 
 	dbPath := s.store.Path
+	var dbSizeBytes, walSizeBytes int64
 	if info, err := os.Stat(dbPath); err == nil {
-		data["db_size_bytes"] = info.Size()
-	} else {
-		data["db_size_bytes"] = int64(0)
+		dbSizeBytes = info.Size()
 	}
 	if info, err := os.Stat(dbPath + "-wal"); err == nil {
-		data["wal_size_bytes"] = info.Size()
-	} else {
-		data["wal_size_bytes"] = int64(0)
+		walSizeBytes = info.Size()
 	}
+	data["db_size_bytes"] = dbSizeBytes
+	data["wal_size_bytes"] = walSizeBytes
 
-	type projectSummary struct {
-		ID                   string `json:"id"`
-		Name                 string `json:"name"`
-		Path                 string `json:"path"`
-		Files                int    `json:"files"`
-		Symbols              int    `json:"symbols"`
-		Edges                int    `json:"edges"`
-		IndexedAt            string `json:"indexed_at"`
-		SchemaVersionAtIndex *int   `json:"schema_version_at_index,omitempty"`
-		BinaryVersion        string `json:"binary_version,omitempty"`
-	}
-	projects := []projectSummary{}
+	projects := []doctorProjectSummary{}
 	plist, err := s.store.ListProjects()
 	if err == nil {
 		for _, p := range plist {
-			projects = append(projects, projectSummary{
+			projects = append(projects, doctorProjectSummary{
 				ID:                   p.ID,
 				Name:                 p.Name,
 				Path:                 p.Path,
@@ -106,6 +138,18 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 		projects = projects[:top]
 	}
 	data["projects"] = projects
+
+	// #732: failure-as-pedagogy for the diagnostic itself. doctor used
+	// to report db_size_bytes as a bare number — a 4.7 GB store looked
+	// no different from a 4.7 MB one. Surface an actionable advisory
+	// when the DB is pathologically large. `projects` is already sorted
+	// by symbol count desc, so projects[0] is the global heaviest even
+	// after the `top` truncation above.
+	advisories := []string{}
+	if a := largeDBAdvisory(dbSizeBytes, projects); a != "" {
+		advisories = append(advisories, a)
+	}
+	data["advisories"] = advisories
 
 	type failureRow struct {
 		Project    string `json:"project"`
