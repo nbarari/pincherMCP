@@ -2059,22 +2059,65 @@ func findEndKeywordBlock(source []byte, startOffset int) int {
 	return len(source)
 }
 
+// findIndentBlock finds the byte offset just past the last line of an
+// indentation-delimited block (Python def/class) opened at startOffset
+// — the byte offset of the start of the opening line. The block runs
+// to the line before the first later non-blank line whose
+// leading-whitespace indentation is <= the opener's. Blank lines and
+// comment-only lines do not terminate the block (they routinely appear
+// inside a function body). A block with no dedent line runs to EOF —
+// correct for the last def in a file (#807).
+func findIndentBlock(source []byte, startOffset int) int {
+	if startOffset >= len(source) {
+		return len(source)
+	}
+	openIndent := 0
+	for i := startOffset; i < len(source) && (source[i] == ' ' || source[i] == '\t'); i++ {
+		openIndent++
+	}
+	// Advance past the opening line; lastEnd tracks the end of the last
+	// line confirmed to belong to the block.
+	i := startOffset
+	for i < len(source) && source[i] != '\n' {
+		i++
+	}
+	lastEnd := i
+	for i < len(source) {
+		i++ // step over '\n' to the next line start
+		ls := i
+		indent := 0
+		for ls < len(source) && (source[ls] == ' ' || source[ls] == '\t') {
+			ls++
+			indent++
+		}
+		lineEnd := ls
+		for lineEnd < len(source) && source[lineEnd] != '\n' {
+			lineEnd++
+		}
+		blank := ls >= lineEnd // nothing but whitespace on the line
+		if !blank && indent <= openIndent {
+			// Dedent: this line belongs to an enclosing scope.
+			return lastEnd
+		}
+		if !blank {
+			lastEnd = lineEnd // a deeper-indented line is part of the body
+		}
+		i = lineEnd
+	}
+	return len(source)
+}
+
 func findBlockEnd(source []byte, startOffset int, blockChar byte) int {
 	if startOffset >= len(source) {
 		return len(source)
 	}
 	if blockChar == 0 {
-		// Indentation-based (Python): find next line with ≤ indent level
-		// Simplified: just return 80 lines worth of bytes
-		end := startOffset
-		count := 0
-		for end < len(source) && count < 80 {
-			if source[end] == '\n' {
-				count++
-			}
-			end++
-		}
-		return min(end, len(source))
+		// Indentation-delimited (Python): the block runs until the first
+		// later non-blank line whose indentation is <= the opener's.
+		// #807: this used to be "just return 80 lines worth of bytes",
+		// so every Python def/class got an 80-line span clamped to EOF
+		// and symbol/context returned wildly wrong source.
+		return findIndentBlock(source, startOffset)
 	}
 	// Brace-delimited: find the matching close character.
 	var closeChar byte

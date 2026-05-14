@@ -1247,14 +1247,34 @@ def standalone():
 	if result == nil || len(result.Symbols) == 0 {
 		t.Fatal("expected Python symbols")
 	}
+	byName := make(map[string]ExtractedSymbol)
 	hasClass := false
 	for _, sym := range result.Symbols {
+		byName[sym.Name] = sym
 		if sym.Kind == "Class" {
 			hasClass = true
 		}
 	}
 	if !hasClass {
 		t.Error("expected at least one Class symbol from Python extraction")
+	}
+
+	// #807: the blockChar=0 path used to "just return 80 lines worth of
+	// bytes", so every Python def/class got an 80-line span clamped to
+	// EOF and `symbol`/`context` returned wildly wrong source. The
+	// indentation-block finder must span each block to the first line
+	// dedented to (or past) its opening indent.
+	if got := byName["MyService"]; got.StartLine != 1 || got.EndLine != 6 {
+		t.Errorf("MyService span = %d-%d, want 1-6 (class body, not EOF)", got.StartLine, got.EndLine)
+	}
+	if got := byName["__init__"]; got.StartLine != 2 || got.EndLine != 3 {
+		t.Errorf("__init__ span = %d-%d, want 2-3 — must end before the sibling def", got.StartLine, got.EndLine)
+	}
+	if got := byName["process"]; got.StartLine != 5 || got.EndLine != 6 {
+		t.Errorf("process span = %d-%d, want 5-6 — must not run to EOF", got.StartLine, got.EndLine)
+	}
+	if got := byName["standalone"]; got.StartLine != 8 || got.EndLine != 9 {
+		t.Errorf("standalone span = %d-%d, want 8-9 — the last def ends at EOF here", got.StartLine, got.EndLine)
 	}
 }
 
