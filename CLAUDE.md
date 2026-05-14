@@ -84,6 +84,13 @@ These fail when changes elsewhere don't update them in lockstep:
 make build PINCHER_BIN=./pincher.exe     # Windows
 make build                               # Linux/macOS
 
+# Build + swap the on-PATH binary (autonomous dogfood path — supervisor
+# auto-restart picks up the swap on next MCP tool call, no manual /mcp).
+# Uses scripts/swap-active-binary.sh's rename-out trick on Windows where
+# `cp` over a running .exe fails with "Device or resource busy" (#705).
+make install PINCHER_BIN=./pincher.exe   # Windows
+make install                             # Linux/macOS
+
 # Bare go build (skips version stamping — `pincher --version` reports "dev")
 go build -o pincher.exe ./cmd/pinch/     # Windows, dev-stamped
 go build -o pincher ./cmd/pinch/         # Linux/macOS, dev-stamped

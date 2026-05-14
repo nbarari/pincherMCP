@@ -27,7 +27,7 @@ SNAPSHOT_NOISE_FIELDS := db_size_kb,duration_ms
 # Equivalent to: del(.db_size_kb, .duration_ms)
 JQ_STRIP := 'del(.$(shell echo "$(SNAPSHOT_NOISE_FIELDS)" | sed "s/,/, ./g"))'
 
-.PHONY: build test corpus-test corpus-snapshot-update bench bench-index bench-server corpus-bench corpus-bench-update
+.PHONY: build test install corpus-test corpus-snapshot-update bench bench-index bench-server corpus-bench corpus-bench-update
 
 # Version stamped at build time via -ldflags. `git describe` produces e.g.
 # `v0.10.0` on a clean tag, `v0.10.0-3-gabcdef` ahead of one, `-dirty`
@@ -39,6 +39,14 @@ LDFLAGS         := -s -w -X main.version=$(PINCHER_VERSION)
 
 build:
 	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(PINCHER_BIN) ./cmd/pinch/
+
+# install: build + swap the on-PATH binary in place. The rename-out trick
+# in scripts/swap-active-binary.sh is required on Windows because the OS
+# locks running .exe files (#705). The supervisor's auto-restart-on-drift
+# picks up the swap on the next MCP tool call — the dogfood loop needs
+# zero manual user intervention (no /mcp, no kill, no copy).
+install: build
+	@bash scripts/swap-active-binary.sh --source=$(PINCHER_BIN)
 
 test:
 	$(GO) test ./...
