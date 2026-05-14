@@ -71,6 +71,38 @@ if [[ "$(realpath "$SOURCE" 2>/dev/null || echo "$SOURCE")" == "$(realpath "$TAR
     exit 0
 fi
 
+# Pre-swap safety: refuse to swap a binary that can't even start its MCP
+# loop (#710 follow-up). Two probes:
+#   1) --version  — checks the binary loads + the version string is stamped
+#   2) health-check — full MCP handshake + tools/list call against the
+#      $SOURCE binary itself. If this fails, the supervisor's next respawn
+#      would crash-loop and the autonomous (AFK) user would come back to
+#      a dead MCP. Cost ~1-3s per swap; cheap insurance.
+# `health-check` exits 0 = healthy, non-zero = anything wrong. Default
+# --timeout is 10s; we cap to 15s to absorb cold-disk variance without
+# letting a hung binary stall the loop indefinitely.
+# `SKIP_PROBE=1` bypasses both for the rare case where the new binary
+# legitimately can't health-check (e.g. early-stage build that hasn't
+# wired the MCP loop yet).
+if [[ "${SKIP_PROBE:-0}" != "1" ]]; then
+    if ! "$SOURCE" --version >/dev/null 2>&1; then
+        echo "swap-active-binary: REFUSING swap — $SOURCE failed --version (broken binary?)" >&2
+        "$SOURCE" --version 2>&1 | sed 's/^/  /' >&2 || true
+        echo "  No swap performed. Existing $TARGET unchanged. Investigate the build before retrying." >&2
+        exit 1
+    fi
+    echo "swap-active-binary: probing MCP handshake on $SOURCE..."
+    if ! "$SOURCE" health-check --timeout 15s >/tmp/swap-probe.$$.log 2>&1; then
+        echo "swap-active-binary: REFUSING swap — $SOURCE health-check failed (MCP handshake or tools/list broken)" >&2
+        echo "  Last 20 lines of probe output:" >&2
+        tail -n 20 /tmp/swap-probe.$$.log 2>/dev/null | sed 's/^/  /' >&2 || true
+        echo "  No swap performed. Existing $TARGET unchanged. Investigate the build before retrying." >&2
+        rm -f /tmp/swap-probe.$$.log 2>/dev/null || true
+        exit 1
+    fi
+    rm -f /tmp/swap-probe.$$.log 2>/dev/null || true
+fi
+
 OLD_VERSION="$("$TARGET" --version 2>&1 || echo "(unable to invoke)")"
 
 if [[ "$IS_WINDOWS" == "1" ]]; then
@@ -81,7 +113,11 @@ if [[ "$IS_WINDOWS" == "1" ]]; then
     if [[ -e "${TARGET}.old" ]]; then
         rm -f "${TARGET}.old" 2>/dev/null || true
     fi
-    mv -f "$TARGET" "${TARGET}.old"
+    # Only rename if $TARGET exists — fresh installs have nothing to
+    # rename out of the way.
+    if [[ -e "$TARGET" ]]; then
+        mv -f "$TARGET" "${TARGET}.old"
+    fi
     cp -f "$SOURCE" "$TARGET"
 else
     # POSIX: cp over the live binary is safe because open file handles

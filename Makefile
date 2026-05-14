@@ -37,8 +37,13 @@ JQ_STRIP := 'del(.$(shell echo "$(SNAPSHOT_NOISE_FIELDS)" | sed "s/,/, ./g"))'
 PINCHER_VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null | sed 's/^v//' || echo dev)
 LDFLAGS         := -s -w -X main.version=$(PINCHER_VERSION)
 
+# build: produces $(PINCHER_BIN). Always routes through scripts/build.sh
+# so Windows source-side file locks (#710) don't bite — the script does a
+# side-name build + atomic rename, which works even when the existing
+# $(PINCHER_BIN) is held open by a running pincher process (e.g. one
+# launched earlier by `pincher web` from the project dir).
 build:
-	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(PINCHER_BIN) ./cmd/pinch/
+	@PINCHER_VERSION='$(PINCHER_VERSION)' bash scripts/build.sh --bin=$(PINCHER_BIN)
 
 # install: build + swap the on-PATH binary in place. The rename-out trick
 # in scripts/swap-active-binary.sh is required on Windows because the OS
