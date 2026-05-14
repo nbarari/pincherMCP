@@ -596,30 +596,48 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// dogfood DB had 4820 orphan symbols and 0 files). Cheap: one SELECT
 	// plus N small DELETEs at index tail; only fires when a file actually
 	// disappeared.
+	//
+	// #756: the GC iterates the UNION of the `files` table and the distinct
+	// file paths in `symbols`. Pre-fix it scanned only `files`, so symbols
+	// whose `files` row was never written — a crash between flushBatch and
+	// SetFileHash — stayed orphaned forever, invisible to the GC. The
+	// per-file deletes are all idempotent, so reconsidering a path that has
+	// symbols but no file_hash row (or vice versa) is safe.
 	var totalDeleted int
+	gcPaths := map[string]bool{}
 	if storedFiles, listErr := idx.store.ListFilesForProject(projectID); listErr == nil {
-		for _, stored := range storedFiles {
-			if seenFiles[stored] {
-				continue
-			}
-			if err := idx.store.DeleteSymbolsForFile(projectID, stored); err != nil {
-				slog.Warn("pincher.index.gc.delete_symbols.err", "err", err, "file", stored)
-				continue
-			}
-			if err := idx.store.DeleteFileHash(projectID, stored); err != nil {
-				slog.Warn("pincher.index.gc.delete_hash.err", "err", err, "file", stored)
-			}
-			// #457: drop any pending_edges rows that pointed out from
-			// the removed file so re-resolution doesn't try to bind
-			// dangling FromQN→ToName candidates against the now-shrunk
-			// symbol set.
-			if err := idx.store.DeletePendingEdgesForFile(projectID, stored); err != nil {
-				slog.Warn("pincher.index.gc.delete_pending_edges.err", "err", err, "file", stored)
-			}
-			totalDeleted++
+		for _, p := range storedFiles {
+			gcPaths[p] = true
 		}
 	} else {
 		slog.Warn("pincher.index.gc.list.err", "err", listErr)
+	}
+	if symPaths, listErr := idx.store.ListSymbolFilePaths(projectID); listErr == nil {
+		for _, p := range symPaths {
+			gcPaths[p] = true
+		}
+	} else {
+		slog.Warn("pincher.index.gc.list_sym_paths.err", "err", listErr)
+	}
+	for stored := range gcPaths {
+		if seenFiles[stored] {
+			continue
+		}
+		if err := idx.store.DeleteSymbolsForFile(projectID, stored); err != nil {
+			slog.Warn("pincher.index.gc.delete_symbols.err", "err", err, "file", stored)
+			continue
+		}
+		if err := idx.store.DeleteFileHash(projectID, stored); err != nil {
+			slog.Warn("pincher.index.gc.delete_hash.err", "err", err, "file", stored)
+		}
+		// #457: drop any pending_edges rows that pointed out from
+		// the removed file so re-resolution doesn't try to bind
+		// dangling FromQN→ToName candidates against the now-shrunk
+		// symbol set.
+		if err := idx.store.DeletePendingEdgesForFile(projectID, stored); err != nil {
+			slog.Warn("pincher.index.gc.delete_pending_edges.err", "err", err, "file", stored)
+		}
+		totalDeleted++
 	}
 
 	duration := time.Since(start)

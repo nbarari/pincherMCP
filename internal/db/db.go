@@ -3501,6 +3501,30 @@ func (s *Store) ListFilesForProject(projectID string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// ListSymbolFilePaths returns the distinct file paths that currently have
+// at least one symbol row for projectID. #756: the #326 tail-pass GC
+// iterated only the `files` table, so symbols whose `files` row was
+// never written (a crash between flushBatch and SetFileHash) or was
+// removed without their symbols stayed orphaned forever — invisible to
+// the GC because ListFilesForProject didn't return them. The GC now
+// unions both, so any file_path with orphan symbols is reconsidered.
+func (s *Store) ListSymbolFilePaths(projectID string) ([]string, error) {
+	rows, err := s.ro.Query(`SELECT DISTINCT file_path FROM symbols WHERE project_id=?`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ADR operations
 // ─────────────────────────────────────────────────────────────────────────────
