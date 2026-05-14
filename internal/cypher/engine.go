@@ -1944,21 +1944,31 @@ func (e *Executor) bfsViaCTE(ctx context.Context, startID string, kinds []string
 	}
 
 	// UNION ALL + WHERE depth < maxHops terminates even on cyclic graphs.
-	// GROUP BY id + MIN(depth) returns each reachable node once at shortest path.
+	// reachAgg collapses each reachable node to its shortest path, THEN
+	// we CROSS JOIN symbols. The CROSS JOIN is load-bearing: without it
+	// SQLite has no row-count stats for the `reach` CTE, mis-plans the
+	// join, and full-scans `symbols` (5k+ rows) probing the tiny CTE for
+	// each — a ~2500× slowdown (1.3s vs 0.5ms on pincher-repo). CROSS
+	// JOIN pins reachAgg as the outer loop so symbols is seeked by its
+	// `id` primary key. The join is still an equijoin on s.id = ra.id;
+	// CROSS only fixes the planner's table order, not the semantics.
 	cteQ := `WITH RECURSIVE reach(id, depth) AS (
 		SELECT ?, 0
 		UNION ALL
 		` + recursiveStep + ` AND e.kind IN (` + in + `)` + projectFilter + `
 		WHERE r.depth < ?
+	),
+	reachAgg AS (
+		SELECT id, MIN(depth) AS min_depth FROM reach
+		WHERE depth >= ? AND id != ?
+		GROUP BY id
 	)
 	SELECT s.id, s.project_id, s.file_path, s.name, s.qualified_name, s.kind, s.language,
 		s.start_byte, s.end_byte, s.start_line, s.end_line, s.is_exported, s.is_entry_point, s.complexity,
-		s.extraction_confidence, s.signature, s.return_type, s.docstring, s.is_test, MIN(r.depth) AS min_depth
-	FROM reach r
-	JOIN symbols s ON s.id = r.id
-	WHERE r.depth >= ? AND r.id != ?
-	GROUP BY s.id
-	ORDER BY min_depth
+		s.extraction_confidence, s.signature, s.return_type, s.docstring, s.is_test, ra.min_depth
+	FROM reachAgg ra
+	CROSS JOIN symbols s ON s.id = ra.id
+	ORDER BY ra.min_depth
 	LIMIT ?`
 
 	args := []any{startID}
