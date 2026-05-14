@@ -528,6 +528,20 @@ func TestExtractRuby(t *testing.T) {
 	if _, ok := byName["speak"]; !ok {
 		t.Error("expected method 'speak'")
 	}
+
+	// #805: Ruby closes def/class with `end`, not a brace. Pre-fix the
+	// blockChar=0 path gave every symbol an 80-line span clamped to EOF,
+	// so `symbol`/`context` returned wildly wrong source. The
+	// end-keyword finder must span each block to its own `end`.
+	if got := byName["Animal"]; got.StartLine != 1 || got.EndLine != 9 {
+		t.Errorf("Animal span = %d-%d, want 1-9 (class ... end)", got.StartLine, got.EndLine)
+	}
+	if got := byName["initialize"]; got.StartLine != 2 || got.EndLine != 4 {
+		t.Errorf("initialize span = %d-%d, want 2-4 — must end at its own `end`, not the class's", got.StartLine, got.EndLine)
+	}
+	if got := byName["standalone_helper"]; got.StartLine != 17 || got.EndLine != 19 {
+		t.Errorf("standalone_helper span = %d-%d, want 17-19 — the last def must not run to EOF", got.StartLine, got.EndLine)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

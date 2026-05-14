@@ -1254,7 +1254,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 			if m := rx.classRE.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
 				if name != "" {
-					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
 					parent := extractGroup(m, "parent")
 					currentClass = name
@@ -1285,7 +1285,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 			if m := rx.interfaceRE.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
 				if name != "" {
-					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endByte := blockEnd(source, lineStart, opts)
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
 					result.Symbols = append(result.Symbols, ExtractedSymbol{
 						Name:          name,
@@ -1306,7 +1306,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 			if m := rx.enumRE.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
 				if name != "" {
-					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endByte := blockEnd(source, lineStart, opts)
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
 					result.Symbols = append(result.Symbols, ExtractedSymbol{
 						Name: name, QualifiedName: qn, Kind: "Enum",
@@ -1327,7 +1327,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 			if m := funcPattern.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
 				if name != "" {
-					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
 					sig := strings.TrimSpace(line)
 					if len(sig) > 200 {
@@ -1375,7 +1375,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 			if m := rx.varRE.FindStringSubmatch(line); m != nil {
 				name := extractGroup(m, "name")
 				if name != "" {
-					endByte := findBlockEnd(source, lineStart, opts.blockChar)
+					endByte := blockEnd(source, lineStart, opts)
 					endLine := offsetToLine(lineOffsets, endByte)
 					sig := strings.TrimSpace(line)
 					if len(sig) > 200 {
@@ -1477,6 +1477,11 @@ type extractOpts struct {
 	blockChar  byte
 	exportedFn func(string) bool
 	isTest     func(string) bool
+	// endKeyword selects the `end`-keyword block finder instead of the
+	// brace matcher / 80-line indentation fallback. Ruby/Elixir close
+	// def/class/module/do with `end`, not a brace — without this every
+	// such symbol got an 80-line span clamped to EOF (#805).
+	endKeyword bool
 }
 
 // Language-specific extractors
@@ -1631,7 +1636,9 @@ var rubyRE = &regexExtractor{
 }
 
 func extractRuby(source []byte, relPath string) *FileResult {
-	return rubyRE.extract(source, relPath, "Ruby", simpleOpts("::", 0))
+	opts := simpleOpts("::", 0)
+	opts.endKeyword = true // Ruby closes def/class/module/do with `end` (#805)
+	return rubyRE.extract(source, relPath, "Ruby", opts)
 }
 
 var phpRE = &regexExtractor{
@@ -1991,6 +1998,67 @@ func splitLines(source []byte) []string {
 // findBlockEnd finds the byte offset of the closing brace/dedent after startOffset.
 // For brace-delimited languages (blockChar='{'), walks forward counting braces.
 // For indent-delimited languages (blockChar=0), finds the next line with equal or less indent.
+// blockEnd dispatches to the right block-end finder for the language:
+// the `end`-keyword scanner for Ruby-style languages, the brace matcher
+// / indentation fallback otherwise.
+func blockEnd(source []byte, startOffset int, opts extractOpts) int {
+	if opts.endKeyword {
+		return findEndKeywordBlock(source, startOffset)
+	}
+	return findBlockEnd(source, startOffset, opts.blockChar)
+}
+
+// findEndKeywordBlock finds the byte offset just past the `end` keyword
+// that closes a Ruby-style block opened at startOffset (the byte offset
+// of the start of the def/class/module line). Ruby closes blocks with
+// `end`, not a brace — the brace matcher and the 80-line indentation
+// fallback both mis-span these, so every Ruby symbol got an 80-line
+// span clamped to EOF (#805).
+//
+// Heuristic: the closing `end` is the first later line whose
+// indentation (in leading-whitespace characters) matches the opener's
+// and whose first token is `end`. Conventional Ruby indentation makes
+// this reliable; a malformed or un-indented file falls back to EOF.
+func findEndKeywordBlock(source []byte, startOffset int) int {
+	if startOffset >= len(source) {
+		return len(source)
+	}
+	openIndent := 0
+	for i := startOffset; i < len(source) && (source[i] == ' ' || source[i] == '\t'); i++ {
+		openIndent++
+	}
+	// Advance past the opening line.
+	i := startOffset
+	for i < len(source) && source[i] != '\n' {
+		i++
+	}
+	for i < len(source) {
+		i++ // step over '\n' to the next line start
+		ls := i
+		indent := 0
+		for ls < len(source) && (source[ls] == ' ' || source[ls] == '\t') {
+			ls++
+			indent++
+		}
+		if indent == openIndent && ls+3 <= len(source) && string(source[ls:ls+3]) == "end" {
+			after := ls + 3
+			// `end` must be a whole token, not a prefix of `endpoint` etc.
+			if after >= len(source) || source[after] == '\n' || source[after] == '\r' ||
+				source[after] == ' ' || source[after] == '\t' || source[after] == '#' {
+				e := after
+				for e < len(source) && source[e] != '\n' {
+					e++
+				}
+				return e
+			}
+		}
+		for i < len(source) && source[i] != '\n' {
+			i++
+		}
+	}
+	return len(source)
+}
+
 func findBlockEnd(source []byte, startOffset int, blockChar byte) int {
 	if startOffset >= len(source) {
 		return len(source)
