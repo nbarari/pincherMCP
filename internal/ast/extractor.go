@@ -1641,9 +1641,13 @@ func extractRuby(source []byte, relPath string) *FileResult {
 	return rubyRE.extract(source, relPath, "Ruby", opts)
 }
 
+// phpRE patterns lead with `^\s*` so indented class methods match —
+// the regex extractor feeds these one line at a time, so `\s` cannot
+// span newlines here. Without it, every method inside a PHP class was
+// silently dropped (#813).
 var phpRE = &regexExtractor{
-	funcRE:  regexp.MustCompile(`(?m)^(?:public|private|protected)?\s*(?:static\s+)?function\s+(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)`),
-	classRE: regexp.MustCompile(`(?m)^(?:abstract\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
+	funcRE:  regexp.MustCompile(`(?m)^\s*(?:public|private|protected)?\s*(?:static\s+)?function\s+(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)`),
+	classRE: regexp.MustCompile(`(?m)^\s*(?:abstract\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
 }
 
 func extractPHP(source []byte, relPath string) *FileResult {

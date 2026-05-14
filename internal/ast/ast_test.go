@@ -578,10 +578,24 @@ func TestExtractPHP(t *testing.T) {
 	if _, ok := byName["UserController"]; !ok {
 		t.Error("expected class 'UserController'")
 	}
-	// Note: indented class methods (e.g. 'index') are not matched by the regex extractor.
-	// Top-level functions without indentation are matched.
 	if _, ok := byName["formatDate"]; !ok {
 		t.Error("expected function 'formatDate'")
+	}
+	// #813: indented class methods are now matched (phpRE leads with
+	// `^\s*`) and scoped to their class as Methods rather than being
+	// silently dropped.
+	for _, m := range []string{"index", "validate"} {
+		sym, ok := byName[m]
+		if !ok {
+			t.Errorf("expected indented PHP method %q to be extracted", m)
+			continue
+		}
+		if sym.Kind != "Method" {
+			t.Errorf("%s.Kind = %q, want Method", m, sym.Kind)
+		}
+		if !strings.HasSuffix(sym.Parent, "UserController") {
+			t.Errorf("%s.Parent = %q, want it to end with UserController", m, sym.Parent)
+		}
 	}
 	// #811: a class WITH an `extends` clause reports the superclass as
 	// parent; a class without one must report "" — not its own name.
