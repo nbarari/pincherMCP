@@ -237,8 +237,18 @@ func init() {
 	Register(&langAdapter{
 		primary: "Python",
 		exts:    map[string]string{".py": "Python", ".pyw": "Python"},
+		// Same convention as the JS adapter below: registered confidence
+		// stays at 0.85 so the regex fallback is honest about its accuracy.
+		// When pyASTEnabled() returns true and the CPython subprocess
+		// succeeds, the symbols are AST-exact; on parse failure, missing
+		// python3, or PINCHER_DISABLE_PY_AST=1 the regex path runs.
 		confidence: 0.85,
 		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
+			if pyASTEnabled() {
+				if r, ok := extractPythonAST(s, p); ok {
+					return r
+				}
+			}
 			return extractPython(s, p)
 		},
 	})

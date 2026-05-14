@@ -257,6 +257,12 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// the rewrite — external imports stay unresolved as before.
 	modulePath := readGoModulePath(absPath)
 
+	// Python source-root prefixes (e.g. "src" for a src-layout repo).
+	// Bridges Python's module-path imports and pincher's file-path-derived
+	// QNs in resolveImports. Empty slice (only "") for non-Python projects
+	// is harmless: resolveImports still tries the identity candidate.
+	pythonRoots := ast.PythonSourceRoots(absPath)
+
 	// Walk source files using gocodewalker (respects .gitignore)
 	fileListQueue := make(chan *gocodewalker.File, 256)
 	walker := gocodewalker.NewFileWalker(absPath, fileListQueue)
@@ -477,7 +483,11 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				}
 				toID := nameToID[e.ToName]
 				if fromID == "" || toID == "" {
-					if e.Kind == "CALLS" && lang == "Go" {
+					// Python CALLS are AST-grade (the regex extractor doesn't
+					// emit any), so they're as trustworthy as Go's for cross-
+					// file resolution. Other regex extractors still get the
+					// drop-on-per-file-miss policy to keep noise out.
+					if e.Kind == "CALLS" && (lang == "Go" || lang == "Python") {
 						deferredCalls = append(deferredCalls, e)
 					}
 					continue
@@ -614,12 +624,12 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// LoadPendingEdges returns nil/[] on the first index (no prior
 	// rows), at which point the resolve passes are effectively no-ops.
 	allImports := loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
-	if n := idx.resolveImports(projectID, allImports); n > 0 {
+	if n := idx.resolveImports(projectID, allImports, pythonRoots); n > 0 {
 		totalEdges += n
 	}
 
 	allCalls := loadOrFallback(idx, projectID, "CALLS", pendingCalls)
-	if n := idx.resolveCalls(projectID, allCalls); n > 0 {
+	if n := idx.resolveCalls(projectID, allCalls, pythonRoots); n > 0 {
 		totalEdges += n
 	}
 
@@ -1223,6 +1233,14 @@ func isSkippedDir(name string) bool {
 	return skippedDirs[name] || strings.HasPrefix(name, ".")
 }
 
+// isPythonFile reports whether path is a Python source file. Used by
+// resolveImports to decide whether to expand to_name via Python's
+// source-root-aware candidate generator vs the literal lookup that
+// works for Go/Rust/Java/etc.
+func isPythonFile(path string) bool {
+	return strings.HasSuffix(path, ".py") || strings.HasSuffix(path, ".pyw")
+}
+
 // safeExtractWithModule wraps ast.ExtractWithModule in a recover() that
 // persists an "extractor_panicked" failure row instead of crashing the
 // per-file goroutine. Returns nil on panic so the caller skips the file.
@@ -1336,7 +1354,7 @@ func readGoModulePath(repoPath string) string {
 // by matching both endpoints against Module symbols in the project. Edges
 // with no matching Module on either side are dropped. Returns the number
 // of edges actually persisted.
-func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge) int {
+func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge, pythonRoots []string) int {
 	if len(pending) == 0 {
 		return 0
 	}
@@ -1372,13 +1390,33 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		return canonical
 	}
 
+	// Python imports use dotted module paths ("zelosmcp.config"), but
+	// pincher's QNs are file-path-derived ("src.zelosmcp.config" for a
+	// src-layout repo). PythonImportCandidates expands toName with each
+	// detected source-root prefix plus the identity fallback; lookupPython
+	// returns the first hit. Non-Python edges keep the cheap single-lookup
+	// path. See internal/ast/python_resolve.go.
+	lookupPython := func(toName, fromFile string) string {
+		for _, c := range ast.PythonImportCandidates(toName, fromFile, pythonRoots) {
+			if id := lookup(c); id != "" {
+				return id
+			}
+		}
+		return ""
+	}
+
 	// Dedupe by (fromID, toID) — one pair of files can appear many times
 	// when there are multiple Module rows per package.
 	seen := make(map[string]bool)
 	edges := make([]db.Edge, 0, len(pending))
 	for _, e := range pending {
 		fromID := lookup(e.FromQN)
-		toID := lookup(e.ToName)
+		var toID string
+		if isPythonFile(e.FromFile) {
+			toID = lookupPython(e.ToName, e.FromFile)
+		} else {
+			toID = lookup(e.ToName)
+		}
 		if fromID == "" || toID == "" {
 			continue
 		}
@@ -1767,7 +1805,7 @@ func resolveMethodByName(store *db.Store, projectID, name string) string {
 //
 // Only Go CALLS reach this path; non-Go regex extractors emit noisy ToName
 // values that would create false-positive cross-package edges.
-func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) int {
+func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, pythonRoots []string) int {
 	if len(pending) == 0 {
 		return 0
 	}
@@ -2028,6 +2066,20 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) 
 		return ""
 	}
 
+	// lookupPythonCall expands a Python call's to_name through every
+	// source-root candidate, returning the first hit. The extractor has
+	// already alias-rewritten imported names and self.X → class.X, so
+	// what we get here is either a bare local name, a dotted path that
+	// might need a src-prefix, or a relative-import path (rare for calls).
+	lookupPythonCall := func(toName, fromFile string) string {
+		for _, c := range ast.PythonImportCandidates(toName, fromFile, pythonRoots) {
+			if id := lookupQN(c); id != "" {
+				return id
+			}
+		}
+		return ""
+	}
+
 	seen := make(map[string]bool)
 	edges := make([]db.Edge, 0, len(pending))
 	for _, e := range pending {
@@ -2038,9 +2090,17 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge) 
 		if fromID == "" {
 			continue
 		}
-		toID := lookupQN(e.ToName)
-		if toID == "" && !strings.Contains(e.ToName, ".") {
-			toID = lookupName(e.ToName)
+		var toID string
+		if isPythonFile(e.FromFile) {
+			toID = lookupPythonCall(e.ToName, e.FromFile)
+			if toID == "" && !strings.Contains(e.ToName, ".") {
+				toID = lookupName(e.ToName)
+			}
+		} else {
+			toID = lookupQN(e.ToName)
+			if toID == "" && !strings.Contains(e.ToName, ".") {
+				toID = lookupName(e.ToName)
+			}
 		}
 		// #423 piece 3: precise receiver-type binding before the
 		// looser project-wide receiver-method fallback.
