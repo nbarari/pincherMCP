@@ -997,6 +997,58 @@ func TestUpsertProject_Update(t *testing.T) {
 	}
 }
 
+// #724: a stale process (older binary → older schema) Watch()ing a
+// shared DB must not stomp schema_version_at_index / binary_version
+// back to its values. The monotonic guard in UpsertProject's ON
+// CONFLICT clause blocks the downgrade.
+func TestUpsertProject_MonotonicMetadataGuard(t *testing.T) {
+	s := newTestStore(t)
+	p := testProject("guard-proj")
+	if err := s.UpsertProject(p); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	// Simulate a *newer* binary having indexed this project: bump
+	// schema_version_at_index above anything UpsertProject would pass,
+	// and set a distinctive binary_version.
+	if _, err := s.db.Exec(
+		`UPDATE projects SET schema_version_at_index=999, binary_version='9.9.9-newer' WHERE id=?`,
+		"guard-proj"); err != nil {
+		t.Fatalf("seed newer row: %v", err)
+	}
+	// Now a stale process re-upserts. UpsertProject passes the *current*
+	// (lower) schema. The guard must keep the newer metadata.
+	p.BinaryVersion = "0.1.0-ancient-orphan"
+	if err := s.UpsertProject(p); err != nil {
+		t.Fatalf("UpsertProject (stale writer): %v", err)
+	}
+	got, _ := s.GetProject("guard-proj")
+	if got.SchemaVersionAtIndex == nil || *got.SchemaVersionAtIndex != 999 {
+		t.Errorf("schema_version_at_index = %v, want 999 (stale writer must not downgrade it)", got.SchemaVersionAtIndex)
+	}
+	if got.BinaryVersion != "9.9.9-newer" {
+		t.Errorf("binary_version = %q, want %q (stale writer must not stomp it)", got.BinaryVersion, "9.9.9-newer")
+	}
+
+	// Reverse direction: a project stuck at a *low* schema must still be
+	// upgraded by a current-binary re-index.
+	if _, err := s.db.Exec(
+		`UPDATE projects SET schema_version_at_index=1, binary_version='0.1.0-stale' WHERE id=?`,
+		"guard-proj"); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+	p.BinaryVersion = "0.55.0-current"
+	if err := s.UpsertProject(p); err != nil {
+		t.Fatalf("UpsertProject (current writer): %v", err)
+	}
+	got, _ = s.GetProject("guard-proj")
+	if got.SchemaVersionAtIndex == nil || *got.SchemaVersionAtIndex <= 1 {
+		t.Errorf("schema_version_at_index = %v, want > 1 (current writer must upgrade it)", got.SchemaVersionAtIndex)
+	}
+	if got.BinaryVersion != "0.55.0-current" {
+		t.Errorf("binary_version = %q, want %q (current writer must update it)", got.BinaryVersion, "0.55.0-current")
+	}
+}
+
 func TestUpdateProjectCounts(t *testing.T) {
 	s := newTestStore(t)
 	p := testProject("counts-proj")

@@ -1852,14 +1852,29 @@ type SearchResult struct {
 // schema bump it again; binaries that don't re-index leave it stale.
 func (s *Store) UpsertProject(p Project) error {
 	currentSchema := len(schemaMigrations) + 1
+	// #724: monotonic guard on the freshness-tracking columns. Multiple
+	// pincher processes can Watch() the same project against one shared
+	// DB — and an orphaned old process (one whose parent died but whose
+	// Watch() loop lives on) would otherwise stomp schema_version_at_index
+	// and binary_version back to its stale values on every poll, breaking
+	// the index_drift detector and CLAUDE.md's freshness check.
+	//
+	// A binary running an older schema is, by definition, an older binary.
+	// So: never let schema_version_at_index go backwards, and only adopt
+	// the incoming binary_version when its schema is >= the stored one.
+	// Path/name/counts always update — those are cheap and a stale
+	// re-walk of the same files is still accurate for them. The full
+	// reaping fix (parent-liveness self-exit) is the other half of #724.
 	_, err := s.db.Exec(`
 		INSERT INTO projects(id, path, name, indexed_at, file_count, sym_count, edge_count, schema_version_at_index, binary_version)
 		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			path=excluded.path, name=excluded.name, indexed_at=excluded.indexed_at,
 			file_count=excluded.file_count, sym_count=excluded.sym_count, edge_count=excluded.edge_count,
-			schema_version_at_index=excluded.schema_version_at_index,
-			binary_version=excluded.binary_version`,
+			binary_version=CASE
+				WHEN excluded.schema_version_at_index >= schema_version_at_index
+				THEN excluded.binary_version ELSE binary_version END,
+			schema_version_at_index=MAX(schema_version_at_index, excluded.schema_version_at_index)`,
 		p.ID, p.Path, p.Name, p.IndexedAt.Unix(),
 		p.FileCount, p.SymCount, p.EdgeCount, currentSchema, p.BinaryVersion,
 	)
