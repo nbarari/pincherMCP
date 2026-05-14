@@ -734,13 +734,35 @@ func findStatementEnd(source []byte, start int) int {
 				return i + 1
 			}
 		case '\n':
-			if depth == 0 {
+			if depth == 0 && !continuesNextLine(source, i) {
 				return i
 			}
 		}
 		i++
 	}
 	return len(source)
+}
+
+// continuesNextLine reports whether the statement continues past the
+// newline at source[nl]. JS ASI does NOT insert a semicolon when the
+// next non-blank line starts with a continuation token — a method
+// chain (`.`), optional chaining (`?.`), or a ternary arm (`?` / `:`).
+// Without this, `findStatementEnd` truncated `const x = items\n .filter(…)`
+// to just the first line (#825). Operator-at-end-of-line continuations
+// (`x +\n y`) remain a residual.
+func continuesNextLine(source []byte, nl int) bool {
+	i := nl + 1
+	for i < len(source) && (source[i] == ' ' || source[i] == '\t' || source[i] == '\r' || source[i] == '\n') {
+		i++
+	}
+	if i >= len(source) {
+		return false
+	}
+	switch source[i] {
+	case '.', '?', ':':
+		return true
+	}
+	return false
 }
 
 func skipJSString(source []byte, start int, quote byte) int {

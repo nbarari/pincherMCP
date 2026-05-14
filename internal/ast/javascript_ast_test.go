@@ -389,6 +389,34 @@ const y = 2 /* block ; comment */ + 3;
 	}
 }
 
+// #825: a var initializer that continues onto the next line via a
+// method chain must span the whole statement — findStatementEnd used
+// to stop at the first newline at depth 0, truncating the span.
+func TestJSAST_MethodChainSpansAllLines(t *testing.T) {
+	t.Setenv("PINCHER_EXPERIMENTAL_JS_AST", "1")
+	src := []byte(`const chain = items
+    .filter(x => x > 0)
+    .map(x => x * 2);
+
+const plain = 5;
+`)
+	r, ok := extractJavaScriptAST(src, "vars.js")
+	if !ok {
+		t.Fatal("expected parse")
+	}
+	byName := map[string]ExtractedSymbol{}
+	for _, s := range r.Symbols {
+		byName[s.Name] = s
+	}
+	if got := byName["chain"]; got.StartLine != 1 || got.EndLine != 3 {
+		t.Errorf("chain span = %d-%d, want 1-3 (the full method chain)", got.StartLine, got.EndLine)
+	}
+	// A plain single-line statement must still end at its own line.
+	if got := byName["plain"]; got.StartLine != 5 || got.EndLine != 5 {
+		t.Errorf("plain span = %d-%d, want 5-5", got.StartLine, got.EndLine)
+	}
+}
+
 // propertyNameToString filters out string-literal and computed property
 // names so we don't emit `Method "'string-name'"` or `Method "[expr]"`.
 func TestJSAST_StringLiteralPropertyNamesSkipped(t *testing.T) {
