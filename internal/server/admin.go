@@ -125,12 +125,26 @@ func largeDBAdvisory(dbSizeBytes int64, projects []doctorProjectSummary) string 
 // failures, recent slow queries. Read-only — no DB mutations.
 func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
-	lookbackHours := intArg(args, "lookback_hours", 168)
-	top := intArg(args, "top", 10)
+	rawLookback := intArg(args, "lookback_hours", 168)
+	rawTop := intArg(args, "top", 10)
+	lookbackHours := rawLookback
+	top := rawTop
+	// #1015: surface input clamps so caller sees what defaults landed.
+	// Same shape as search (#879) / neighborhood (#1013) — silent clamps
+	// leave the caller thinking they got what they asked for.
+	var clampWarnings []string
 	if lookbackHours <= 0 {
+		if _, present := args["lookback_hours"]; present {
+			clampWarnings = append(clampWarnings,
+				fmt.Sprintf("doctor: lookback_hours=%d clamped to 168 (must be positive)", rawLookback))
+		}
 		lookbackHours = 168
 	}
 	if top <= 0 {
+		if _, present := args["top"]; present {
+			clampWarnings = append(clampWarnings,
+				fmt.Sprintf("doctor: top=%d clamped to 10 (must be positive)", rawTop))
+		}
 		top = 10
 	}
 
@@ -138,6 +152,9 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"generated_at":   time.Now().UTC().Format(time.RFC3339),
 		"binary_version": s.version,
 		"lookback_hours": lookbackHours,
+	}
+	for _, w := range clampWarnings {
+		attachWarning(data, w)
 	}
 
 	var schemaVersion int
