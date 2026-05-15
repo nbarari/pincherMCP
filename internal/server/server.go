@@ -4301,6 +4301,25 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	ftsQuery := sanitizeFTS5Query(query)
 	results, err := s.store.SearchSymbolsByCorpus(projectID, ftsQuery, kind, language, corpus, fetchLimit)
 	if err != nil {
+		// #1022: FTS5 syntax errors leak as raw "fts5: syntax error near"
+		// messages with no recovery affordance. The dominant case is a
+		// trailing/leading boolean (`foo AND`, `OR bar`) — the sanitizer
+		// catches dotted identifiers and unmatched quotes (#289/#489) but
+		// can't repair an incomplete boolean expression. Wrap with the
+		// rich envelope so the caller sees what to do.
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "fts5: syntax error") {
+			return s.errResultRich(
+				fmt.Sprintf("search error: FTS5 rejected the query %q — %s", query, errMsg),
+				[]map[string]string{
+					{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, stripTrailingBoolean(query)),
+						"why": "drop trailing AND/OR/NOT — these need a term on both sides"},
+					{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, "\""+query+"\""),
+						"why": "wrap the whole query in double quotes to treat boolean operators as literal phrase tokens"},
+					{"tool": "guide", "args": `{"task":"<describe what you're searching for>"}`,
+						"why": "guide can propose the right tool + query shape from a free-form task description"},
+				}), nil
+		}
 		return errResult(fmt.Sprintf("search error: %v", err)), nil
 	}
 
@@ -4812,6 +4831,22 @@ func verifyEmptySearchCause(
 //     alphanumerics gets wrapped per token, which is fine; intentional
 //     `colname:term` with no alphanum-colon-alphanum gap survives.
 //   - Already-correct queries with no special chars.
+
+// stripTrailingBoolean trims an incomplete trailing FTS5 boolean
+// operator (`AND`, `OR`, `NOT`) from `q`. #1022 helper used when an
+// FTS5 syntax error fires — the dominant cause is a dangling operator
+// the caller probably didn't mean to include. Whitespace-trims after.
+// Idempotent: a query with no trailing operator is returned unchanged.
+func stripTrailingBoolean(q string) string {
+	q = strings.TrimRight(q, " \t")
+	for _, op := range []string{" AND", " OR", " NOT"} {
+		if strings.HasSuffix(q, op) {
+			return strings.TrimRight(q[:len(q)-len(op)], " \t")
+		}
+	}
+	return q
+}
+
 func sanitizeFTS5Query(q string) string {
 	if q == "" {
 		return q
