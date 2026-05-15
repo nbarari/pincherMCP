@@ -85,12 +85,21 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	// names looked successful. Same silent-fallback shape as #1023
 	// (health) and #1024 (stats).
 	var resolvedProjectID string
+	// #1038: capture the project-resolve failure in a dedicated var so
+	// it can be stacked into the not-found error message below. Pre-fix
+	// the warning only surfaced in _meta.warnings on success — when
+	// both the project AND the id were bogus, the error reported only
+	// the id miss, and the agent didn't learn their project name was
+	// also wrong until their next call. Mirrors #1037 (symbol).
+	var projectResolveWarning string
 	if projectArg != "" {
 		if pid, err := s.resolveProjectID(projectArg); err == nil {
 			resolvedProjectID = pid
 		} else {
-			clampWarnings = append(clampWarnings,
-				fmt.Sprintf("neighborhood: project %q did not resolve — falling back to global symbol lookup. Call `list` to see indexed projects.", projectArg))
+			projectResolveWarning = fmt.Sprintf(
+				"neighborhood: project %q did not resolve — falling back to global symbol lookup. Call `list` to see indexed projects.",
+				projectArg)
+			clampWarnings = append(clampWarnings, projectResolveWarning)
 		}
 	}
 
@@ -122,8 +131,15 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 		// matching handleSymbol and handleTrace. Stale-ID redirect via
 		// symbol_moves was already attempted above; if it failed, the
 		// next move is name-based discovery.
+		//
+		// #1038: stack the project-resolve warning into the error when
+		// both args were bogus — same shape as #1037 (symbol).
+		errMsg := fmt.Sprintf("symbol %q not found", id)
+		if projectResolveWarning != "" {
+			errMsg = projectResolveWarning + " ALSO: " + errMsg
+		}
 		return s.errResultRich(
-			fmt.Sprintf("symbol %q not found", id),
+			errMsg,
 			[]map[string]string{
 				{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, shortNameFromID(id)),
 					"why": "id resolution failed (also tried symbol_moves redirect) — search by short name"},
