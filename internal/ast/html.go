@@ -329,22 +329,19 @@ func canonicalImportPath(href string) string {
 	return href
 }
 
-// bytesFindHeading searches `source` for a heading-tag opening that
-// likely contains `title`. Best-effort byte-offset recovery since
-// x/net/html doesn't preserve them on nodes.
+// bytesFindHeadingAfter searches `source` for a heading-tag opening that
+// likely contains `title`, starting at offset `start`. Best-effort byte-
+// offset recovery since x/net/html doesn't preserve them on nodes.
 //
 // We look for "<h{level}" (case-insensitive) followed within ~1KB by
-// the title text. Returns 0 on no match (will land at the file start,
-// which is acceptable — Section retrieval still works, just less
-// precise byte ranges for malformed corner cases).
-func bytesFindHeading(source []byte, level int, title string) int {
-	return bytesFindHeadingAfter(source, level, title, 0)
-}
-
-// bytesFindHeadingAfter starts the search at offset `start`. Used by the
-// HTML walker to advance past previously-located headings so duplicate
-// (level, title) pairs in the document don't all resolve to the same
-// first-occurrence offset.
+// the title text. Returns 0 on no match (lands at file start, which is
+// acceptable — Section retrieval still works, just less precise byte
+// ranges for malformed corner cases).
+//
+// `start` is what advances the search past previously-located headings
+// so duplicate (level, title) pairs in the document don't all resolve
+// to the same first-occurrence offset (#1004). Callers that don't need
+// duplicate-suppression pass start=0.
 func bytesFindHeadingAfter(source []byte, level int, title string, start int) int {
 	if start < 0 {
 		start = 0
