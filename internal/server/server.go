@@ -7204,9 +7204,19 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 	// real project out of the response window. min_edges=1 keeps the
 	// orientation view useful; pass min_edges=0 to opt back into the
 	// legacy unfiltered shape.
+	// #1041: clamp negative min_edges to 0 with a warning. Pre-fix
+	// negative values were accepted silently — `if minEdges > 0`
+	// downstream made them behave like 0, but the documented contract
+	// is non-negative and a typo'd negative deserves the same signal
+	// limit/offset/active_within_days clamps already give.
 	minEdges := 1
 	if v, ok := args["min_edges"].(float64); ok {
 		minEdges = int(v)
+		if minEdges < 0 {
+			listClampWarnings = append(listClampWarnings,
+				fmt.Sprintf("min_edges=%d clamped to 0 (must be >= 0; negative behaves like 0 but the documented contract requires non-negative)", minEdges))
+			minEdges = 0
+		}
 	}
 
 	// Filter first, paginate after — `count` reports the post-filter
