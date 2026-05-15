@@ -4693,6 +4693,21 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 				}
 			}
 		}
+	} else if searchTotal > 0 && offset >= searchTotal {
+		// #1033: empty results because the caller paged past the end of
+		// the result set — NOT because the query matched nothing. Pre-fix
+		// this branch fell into the generic "no exact-term matches"
+		// diagnosis below, which contradicted the `total > 0` field in
+		// the same response. Agents reading the diagnosis concluded the
+		// symbol didn't exist; agents reading total knew it did. The
+		// confidently-wrong text won.
+		meta["diagnosis"] = fmt.Sprintf(
+			"offset=%d is past the end of the result set (total=%d) — pagination overshoot. Pass offset=0 (or omit) to start at the top, or a value < %d to land inside the result window.",
+			offset, searchTotal, searchTotal)
+		meta["next_steps"] = []map[string]string{
+			{"tool": "search", "args": nextStepArgs(map[string]any{"query": query, "kind": kind, "language": language, "corpus": corpus}),
+				"why": fmt.Sprintf("retry without offset — the query matched %d symbol(s) at offset=0", searchTotal)},
+		}
 	} else {
 		// Zero results, even after corpus fallthrough. Surface a
 		// best-guess diagnosis + concrete recovery suggestions so the
