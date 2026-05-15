@@ -2441,16 +2441,46 @@ func (s *Server) resolveProjectID(projectArg string) (string, error) {
 		s.storeProjectIDCache(projectArg, p.ID)
 		return p.ID, nil
 	}
-	// Try matching by name
+	// Try matching by name. When multiple projects share the same
+	// name (common after a project gets moved or renamed on disk —
+	// the stale row stays in the DB until prune_dead), prefer one
+	// whose path still exists on disk over a dead-on-disk
+	// collision. Pre-fix, the first match wins regardless of liveness,
+	// so a stale empty `D:\…\pincher` row routinely out-resolved the
+	// live `D:\ClaudeCode\pincher-repo` and downstream tools returned
+	// silently empty results. Caught dogfooding this session.
 	all, err := s.store.ListProjects()
 	if err != nil {
 		return "", err
 	}
-	for _, proj := range all {
-		if proj.Name == projectArg {
-			s.storeProjectIDCache(projectArg, proj.ID)
-			return proj.ID, nil
+	var liveMatch, deadMatch *db.Project
+	for i := range all {
+		proj := &all[i]
+		if proj.Name != projectArg {
+			continue
 		}
+		if _, statErr := os.Stat(proj.Path); statErr == nil {
+			liveMatch = proj
+			break
+		}
+		if deadMatch == nil {
+			deadMatch = proj
+		}
+	}
+	if liveMatch != nil {
+		s.storeProjectIDCache(projectArg, liveMatch.ID)
+		return liveMatch.ID, nil
+	}
+	if deadMatch != nil {
+		// Live match not found; falling back to a dead-on-disk row.
+		// The caller's project arg matched, but the directory is
+		// gone — surface this in slog for ops dashboards.
+		slog.Warn("pincher.resolve.dead_project_match",
+			"project_arg", projectArg,
+			"path", deadMatch.Path,
+			"recommendation", "prune the dead row (list prune_dead=true) or re-index the intended path")
+		s.storeProjectIDCache(projectArg, deadMatch.ID)
+		return deadMatch.ID, nil
 	}
 	return "", fmt.Errorf("project %q not found — use `list` to see available projects", projectArg)
 }
