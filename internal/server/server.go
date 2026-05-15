@@ -5754,6 +5754,20 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 				"why": "if the name is ambiguous, search first, then trace by the exact id"},
 		}), nil
 	}
+	// #1036: trace's schema documents `id` and `name` as mutually
+	// exclusive ("id wins"), but pre-fix passing both produced a
+	// silent precedence with no signal. An agent that included both
+	// (e.g. by templating from a search result that has the id AND
+	// passing the short name in parallel) couldn't tell which one
+	// was honored — the trace returned what felt like name-resolution
+	// but was actually id-resolution. Surface a warning naming the
+	// dropped arg so the failure teaches.
+	var traceIDNameWarning string
+	if id != "" && name != "" {
+		traceIDNameWarning = fmt.Sprintf(
+			"trace: both `id` and `name` were passed — `id` wins per the documented contract; the name=%q arg was ignored. Pass only one to silence this warning.",
+			name)
+	}
 	direction := str(args, "direction")
 	if direction == "" {
 		direction = "both"
@@ -6055,6 +6069,9 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	if traceMinConfWarn != "" {
 		traceWarnings = append(traceWarnings, traceMinConfWarn)
+	}
+	if traceIDNameWarning != "" {
+		traceWarnings = append(traceWarnings, traceIDNameWarning)
 	}
 	traceWarnings = append(traceWarnings, traceKindWarnings...)
 	if len(traceWarnings) > 0 {
