@@ -5161,6 +5161,22 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if cql == "" {
 		cql = cypherAlias
 	}
+	// Surface a deprecation warning when ONLY the legacy `cypher`
+	// alias is used. Pre-fix the alias was honored silently — agents
+	// using it had no signal the migration window was closing, and
+	// the day the alias is removed every cached call site breaks at
+	// once with no advance notice. Matches the corpus="all"
+	// deprecation pattern (#935): observable redirect beats silent
+	// rewrite. Detect on the ORIGINAL args (str(args, "pinchql"))
+	// rather than the post-fallback cql, since the fallback above has
+	// already copied cypherAlias into cql when pinchql was empty.
+	if str(args, "pinchql") == "" && cypherAlias != "" {
+		slog.Warn("pincher.query.cypher_alias_deprecated",
+			"action", "honored cypher arg",
+			"recommendation", "rename the parameter to `pinchql`; the cypher alias will be removed in a future release")
+		queryWarnings = append(queryWarnings,
+			"the `cypher` parameter is a deprecated alias kept for one release — rename it to `pinchql` before the alias is removed")
+	}
 	if cql == "" {
 		// #712: failure-as-pedagogy — pinchQL is unfamiliar; show a
 		// working query + point at `schema` for the node/edge kinds.
