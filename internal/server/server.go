@@ -5492,6 +5492,19 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 		scope = "unstaged"
 	}
 	depth := intArg(args, "depth", 3)
+	// #877: clamp depth to the documented 1-5 range. Pre-fix an out-of-
+	// range value (depth=0, depth=99) was passed straight through to
+	// TraceByID which silently coerced it to 3 — the user got a depth-3
+	// blast radius while believing they got what they asked for. Mirrors
+	// the trace depth clamp (#703/#712).
+	var changesDepthClampMsg string
+	if depth < 1 {
+		changesDepthClampMsg = fmt.Sprintf("changes: depth=%d clamped to 1 (valid range 1-5)", depth)
+		depth = 1
+	} else if depth > 5 {
+		changesDepthClampMsg = fmt.Sprintf("changes: depth=%d clamped to 5 (valid range 1-5)", depth)
+		depth = 5
+	}
 
 	projectID, err := s.resolveProjectID(projectArg)
 	if err != nil {
@@ -5648,6 +5661,9 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 		return fmt.Sprint(impacted[i]["id"]) < fmt.Sprint(impacted[j]["id"])
 	})
 	var changesTrimWarnings []string
+	if changesDepthClampMsg != "" {
+		changesTrimWarnings = append(changesTrimWarnings, changesDepthClampMsg)
+	}
 	if len(impacted) > changesMaxList {
 		changesTrimWarnings = append(changesTrimWarnings, fmt.Sprintf(
 			"impacted trimmed to the %d highest-risk of %d — see summary.total_impacted for the full count, or pass fields=summary,tests_to_run to drop the lists",
