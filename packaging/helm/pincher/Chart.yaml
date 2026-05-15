@@ -1,0 +1,21 @@
+apiVersion: v2
+name: pincher
+description: |
+  pincherMCP — local MCP code-intelligence server. Prototype Helm chart
+  for single-tenant cluster deployment. Mirrors the documented v1.0
+  single-tenant boundary (#661): one Deployment per release, persistent
+  SQLite + WAL volume, HTTP gateway (+ optional streamable-HTTP MCP),
+  liveness probe to /v1/health and readiness to /v1/ready.
+type: application
+version: 0.1.0
+appVersion: "0.58.0"
+keywords:
+  - code-intelligence
+  - mcp
+  - sqlite
+home: https://github.com/kwad77/pincher
+sources:
+  - https://github.com/kwad77/pincher
+maintainers:
+  - name: Kevin Waddell
+    url: https://github.com/kwad77

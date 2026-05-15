@@ -1,0 +1,29 @@
+pincher {{ .Chart.AppVersion }} is installing as release {{ .Release.Name }} in
+namespace {{ .Release.Namespace }}.
+
+Health & readiness (#660 split):
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "pincher.fullname" . }} {{ .Values.service.httpPort }}:{{ .Values.service.httpPort }}
+  curl -fsS http://127.0.0.1:{{ .Values.service.httpPort }}/v1/health
+  curl -fsS http://127.0.0.1:{{ .Values.service.httpPort }}/v1/ready
+
+{{- if .Values.auth.enabled }}
+
+Auth is enabled — every HTTP call must carry:
+  Authorization: Bearer $(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.auth.secretName }} -o jsonpath='{.data.{{ .Values.auth.secretKey }}}' | base64 -d)
+{{- else }}
+
+Auth is DISABLED. The HTTP gateway is open inside the cluster. Either set
+`auth.enabled=true` and provide a Secret, or front this Service with a
+namespace NetworkPolicy / mTLS sidecar before exposing externally.
+{{- end }}
+
+{{- if .Values.mcpHTTPPath }}
+
+Streamable-HTTP MCP transport (#651) is mounted at:
+  http://{{ include "pincher.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}{{ .Values.mcpHTTPPath }}
+{{- end }}
+
+Single-writer reminder: pincher's SQLite store is single-writer (#51). Do
+not scale `replicaCount` above 1 — the chart uses `strategy: Recreate` to
+keep two pods from racing on the same WAL during rolling updates.

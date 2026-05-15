@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pincher.fullname" . }}
+  labels:
+    {{- include "pincher.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # SQLite single-writer (#51) — Recreate avoids two pincher processes
+    # competing for the same on-disk WAL during a rolling update.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pincher.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pincher.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "pincher.serviceAccountName" . }}
+      containers:
+        - name: pincher
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --http=:{{ .Values.service.httpPort }}
+            {{- if .Values.auth.enabled }}
+            - --http-key=$(PINCHER_HTTP_KEY)
+            {{- end }}
+            {{- if .Values.mcpHTTPPath }}
+            - --mcp-http-path={{ .Values.mcpHTTPPath }}
+            {{- end }}
+            {{- if .Values.supervised.enabled }}
+            - --supervised
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: PINCHER_DATA_DIR
+              value: /var/lib/pincher
+            {{- if .Values.supervised.enabled }}
+            - name: PINCHER_AUTO_RESTART_ON_DRIFT
+              value: "1"
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: PINCHER_HTTP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "auth.secretName is required when auth.enabled" .Values.auth.secretName }}
+                  key: {{ .Values.auth.secretKey }}
+            {{- end }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pincher
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "pincher.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

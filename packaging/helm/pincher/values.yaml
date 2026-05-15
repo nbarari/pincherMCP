@@ -1,0 +1,85 @@
+# Default values for pincher Helm chart prototype (#661).
+#
+# Reasonable defaults for a single-tenant pincher deployment. Tune
+# `image.tag`, `persistence.size`, and the auth/MCP toggles for your
+# cluster.
+
+image:
+  repository: ghcr.io/kwad77/pincher
+  # tag defaults to the chart's appVersion when unset.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Number of pincher replicas. Pincher's SQLite store is single-writer
+# (#51) — DO NOT scale this above 1 unless you've sharded the
+# persistent volume per-replica (out of scope for the prototype).
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  # Set true to expose the streamable-HTTP MCP transport (#651) on the
+  # same Service. Requires `mcpHTTPPath` to be set below.
+  exposeMCP: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+persistence:
+  enabled: true
+  size: 10Gi
+  # Set to a specific class name if your cluster has multiple
+  # StorageClasses; empty uses the default.
+  storageClassName: ""
+
+# Auth — bearer-token HTTP gateway protection. When enabled, the chart
+# expects a Secret in the release namespace with key `http-key`
+# containing the bearer token; reference it here.
+auth:
+  enabled: false
+  # Secret name in the release namespace. Required when auth.enabled.
+  secretName: ""
+  secretKey: http-key
+
+# Streamable-HTTP MCP transport (#651) — mount the MCP server on the
+# HTTP gateway at this path so MCP-aware clients can connect without
+# stdio sub-process spawning.
+mcpHTTPPath: ""
+
+# Supervised mode (#352) — set true to enable auto-restart-on-drift.
+# The container's entrypoint detects a freshly-installed pincher.exe
+# in PATH and respawns transparently on next MCP tool call.
+supervised:
+  enabled: false
+
+# Probes — wired to the dedicated endpoints (liveness ≠ readiness).
+livenessProbe:
+  httpGet:
+    path: /v1/health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+readinessProbe:
+  httpGet:
+    path: /v1/ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Optional: extra env vars forwarded to the container.
+env: {}
+# PINCHER_AUTO_RESTART_ON_DRIFT: "1"
+
+# Pod-level overrides.
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+serviceAccount:
+  create: true
+  name: ""
