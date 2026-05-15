@@ -4937,8 +4937,15 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 
 	responseJSON, _ := json.Marshal(rows)
-	meta := map[string]any{
-		"confidence_distribution": confidenceDistribution(confs),
+	meta := map[string]any{}
+	// #873: only emit the confidence histogram when the query actually
+	// projected an extraction_confidence column. A pinchQL query that
+	// RETURNs only `n.name` carries no confidence data, but
+	// confidenceDistribution([]) returns an all-zero map — emitting it
+	// reads as "every result is confidence 0", the opposite of the truth.
+	// Omit when there's no data to summarize.
+	if len(confs) > 0 {
+		meta["confidence_distribution"] = confidenceDistribution(confs)
 	}
 	// #473: surface unknown-property warnings from the cypher engine.
 	// Typo'd property names (n.foo on a kind that has no foo column)
@@ -5036,14 +5043,43 @@ func firstRowID(rows []map[string]any) string {
 // carry confidence at all — filter logic falls back to pass-through in that
 // case rather than silently dropping the row.
 func rowConfidence(row map[string]any) (float64, bool) {
-	v, ok := row["extraction_confidence"]
-	if !ok {
-		return 0, false
+	// Bare key — non-pinchQL callers and pinchQL aggregates without a
+	// variable prefix.
+	if v, ok := row["extraction_confidence"]; ok {
+		if f, ok := asFloat(v); ok {
+			return f, true
+		}
 	}
+	// #873: pinchQL projects with the variable prefix, so
+	// `RETURN n.extraction_confidence` yields a row key
+	// "n.extraction_confidence". The `confidence` short alias produces
+	// "n.confidence". Match any key ending in either form so the
+	// query-handler's min_confidence filter AND
+	// confidence_distribution histogram actually see the data — pre-fix
+	// rowConfidence's bare-key lookup never matched any pinchQL row,
+	// silently disabling both.
+	for k, v := range row {
+		if strings.HasSuffix(k, ".extraction_confidence") || strings.HasSuffix(k, ".confidence") {
+			if f, ok := asFloat(v); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// asFloat converts a JSON-decoded number to float64 (the JSON unmarshal
+// typically yields float64, but float32 / int variants are accepted for
+// future-proofing against alternative scan paths).
+func asFloat(v any) (float64, bool) {
 	switch f := v.(type) {
 	case float64:
 		return f, true
 	case float32:
+		return float64(f), true
+	case int:
+		return float64(f), true
+	case int64:
 		return float64(f), true
 	}
 	return 0, false
