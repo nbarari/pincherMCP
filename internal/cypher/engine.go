@@ -2291,7 +2291,29 @@ func aggColName(rv returnVar) string {
 // returns 0.0 over an empty set, COUNT returns 0.
 func computeAgg(rows []map[string]any, rv returnVar) any {
 	if rv.fn == "COUNT" {
-		return len(rows)
+		// #906: Cypher (and SQL) semantics distinguish two shapes:
+		//   COUNT(n)         — count rows (the node variable); == COUNT(*)
+		//   COUNT(n.prop)    — count rows where n.prop IS NOT NULL
+		// Pre-fix both returned len(rows), so `COUNT(n.docstring)` against
+		// a corpus where most functions have NULL docstring returned the
+		// total function count instead of the documented-function count.
+		// Silently confidently wrong on the canonical "how many functions
+		// are documented" query.
+		if rv.property == "" {
+			return len(rows)
+		}
+		key := rv.variable + "." + rv.property
+		n := 0
+		for _, row := range rows {
+			raw, ok := row[key]
+			if !ok || raw == nil {
+				continue
+			}
+			// SQL counts empty-string TEXT values as non-null — only
+			// genuine NULL is excluded.
+			n++
+		}
+		return n
 	}
 	key := rv.variable
 	if rv.property != "" {
