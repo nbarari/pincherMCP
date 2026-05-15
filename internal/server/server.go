@@ -17,6 +17,7 @@
 package server
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -7449,14 +7450,28 @@ func (s *Server) handleFetch(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// "extraction" is verbatim copy and the ratio approaches 1).
 	if !strings.Contains(contentType, "text/markdown") && !strings.Contains(contentType, "text/plain") {
 		if len(rawBytes) > 10000 && len(text)*200 < len(rawBytes) {
+			// #945: sanity-check by counting <p> tags in the raw HTML before
+			// blaming JS rendering. If the page has many paragraph tags but
+			// extraction produced near-zero text, the bug is in the
+			// extractor (or this prefix-match family), not in the page. Pre-fix
+			// Wikipedia (100+ <p> tags, fully static) was misdiagnosed as
+			// JS-rendered — sending users in the wrong direction.
+			pTags := bytes.Count(bytes.ToLower(rawBytes), []byte("<p>")) +
+				bytes.Count(bytes.ToLower(rawBytes), []byte("<p "))
 			meta, _ := data["_meta"].(map[string]any)
 			if meta == nil {
 				meta = map[string]any{}
 			}
 			warnings, _ := meta["warnings"].([]string)
-			warnings = append(warnings,
-				fmt.Sprintf("fetched %d bytes but extracted only %d chars of text (%.2f%%) — page is likely JS-rendered. Static HTML extraction won't surface the visible content. For GitHub/GitLab repos try the raw README URL (e.g. https://raw.githubusercontent.com/<owner>/<repo>/<branch>/README.md); for other SPAs prefer the project's REST/JSON API or a markdown mirror.",
-					len(rawBytes), len(text), float64(len(text))*100/float64(len(rawBytes))))
+			var msg string
+			if pTags >= 5 {
+				msg = fmt.Sprintf("fetched %d bytes but extracted only %d chars of text (%.2f%%) — page has %d <p> tags so the static HTML is not empty. The extractor failed on this page structure. File against pincher fetch with the URL and content-type.",
+					len(rawBytes), len(text), float64(len(text))*100/float64(len(rawBytes)), pTags)
+			} else {
+				msg = fmt.Sprintf("fetched %d bytes but extracted only %d chars of text (%.2f%%) — page is likely JS-rendered. Static HTML extraction won't surface the visible content. For GitHub/GitLab repos try the raw README URL (e.g. https://raw.githubusercontent.com/<owner>/<repo>/<branch>/README.md); for other SPAs prefer the project's REST/JSON API or a markdown mirror.",
+					len(rawBytes), len(text), float64(len(text))*100/float64(len(rawBytes)))
+			}
+			warnings = append(warnings, msg)
 			meta["warnings"] = warnings
 			data["_meta"] = meta
 		}
@@ -8379,21 +8394,53 @@ func extractTextFromHTML(raw string) (title, text string) {
 	}
 
 	// Remove noisy blocks wholesale before tag stripping.
+	//
+	// #945: open is matched as a literal prefix, NOT a whole tag name. Pre-fix
+	// `<head` matched both `<head>` (the document head) AND `<header>`. The
+	// closing tag `</head>` did not match `</header>`, so the "no closing tag
+	// found" branch fired and chopped raw[:si] — truncating everything from
+	// the first <header> in the body to end-of-document. Wikipedia + most
+	// modern HTML5 documents have <header> elements in body content, so this
+	// reduced their extracted text to just the pre-<header> skip-link
+	// (~15 chars from 400+ KB of raw HTML).
+	//
+	// Fix: require the byte after the tag name to be `>`, `/`, or whitespace
+	// (an HTML tag-name terminator) before treating the match as our tag.
+	// And when no closing tag is found, skip this open instead of truncating
+	// the document.
 	for _, tag := range []string{"script", "style", "head", "nav", "footer"} {
 		open := "<" + tag
 		close := "</" + tag + ">"
+		searchFrom := 0
 		for {
 			lo := strings.ToLower(raw)
-			si := strings.Index(lo, open)
+			if searchFrom >= len(lo) {
+				break
+			}
+			si := strings.Index(lo[searchFrom:], open)
 			if si < 0 {
 				break
 			}
+			si += searchFrom
+			// Tag-boundary check: char after the tag name must terminate it.
+			next := si + len(open)
+			if next < len(raw) {
+				c := raw[next]
+				if c != '>' && c != '/' && c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+					// Not our tag — e.g. <head matched against <header>.
+					searchFrom = si + 1
+					continue
+				}
+			}
 			ei := strings.Index(lo[si:], close)
 			if ei < 0 {
-				raw = raw[:si]
-				break
+				// No closing tag found; skip past this open rather than
+				// truncating the document body.
+				searchFrom = si + len(open)
+				continue
 			}
 			raw = raw[:si] + " " + raw[si+ei+len(close):]
+			searchFrom = si + 1 // restart near where we cut
 		}
 	}
 
