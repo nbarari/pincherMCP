@@ -2432,6 +2432,19 @@ func (s *Server) resolveProjectID(projectArg string) (string, error) {
 		}
 		return s.sessionID, nil
 	}
+	// #1056: explicit reject for "*" with a clear-rejection error.
+	// "*" is the documented cross-project sentinel on `search` and
+	// `query` — those handlers branch BEFORE calling resolveProjectID,
+	// so this code path is only reached by tools that scope to a single
+	// project (architecture / schema / trace / dead_code / changes /
+	// neighborhood / context / etc.). Pre-fix the bare "project '*'
+	// not found" error treated the deliberate sentinel as a typo and
+	// pointed the agent at `list` — which never contains "*", deepening
+	// the confusion. Surface the cross-project distinction so the
+	// caller can either pin scope or use a tool that supports it.
+	if projectArg == "*" {
+		return "", fmt.Errorf(`project="*" is the cross-project sentinel — only supported on search + query. This tool scopes to a single project; pass an explicit project name (use list to see them) or omit the arg to use the session project`)
+	}
 	// #401: cache the projectArg → ID resolution for 60s. Hot path
 	// for every MCP call that passes an explicit project arg —
 	// pre-fix this hit GetProject (1 SQL) and on miss fell through
