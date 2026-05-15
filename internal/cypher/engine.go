@@ -524,6 +524,16 @@ func sampleLiteralFor(propType string) string {
 // Aggregate ORDER BY targets (`ORDER BY COUNT(n)`) and edge-bound
 // columns are out of scope — they have their own resolution paths and
 // the whitelist doesn't apply.
+//
+// #927: RETURN-clause aliases (`RETURN n.complexity AS c`, `RETURN
+// COUNT(*) AS cnt`) are ALSO valid ORDER BY targets — the
+// post-projection sort in buildResult (and the aggregate path in the
+// hasAgg branch) resolves them correctly via aggColName + the
+// sourceToProjected alias map. Pre-fix this warning fired for them
+// anyway because the resolver only consulted cypherPropToCol's
+// whitelist, telling the user their sort was "silently dropped" when
+// it actually ran. Returns nil when the orderBy target matches a
+// returnVar alias (the post-projection paths handle it).
 func collectUnknownOrderByWarnings(q *queryAST) []string {
 	if q == nil || q.orderBy == "" {
 		return nil
@@ -531,6 +541,12 @@ func collectUnknownOrderByWarnings(q *queryAST) []string {
 	ob := q.orderBy
 	if strings.Contains(ob, "(") {
 		return nil // aggregate target
+	}
+	// #927: RETURN ... AS <alias> — alias is a valid ORDER BY target.
+	for _, rv := range q.returnVars {
+		if rv.alias != "" && rv.alias == ob {
+			return nil
+		}
 	}
 	// Split `var.prop` (or bare `prop`).
 	prop := ob
