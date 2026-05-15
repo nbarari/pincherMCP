@@ -2398,7 +2398,17 @@ func parseFileURI(uri string) (string, bool) {
 func (s *Server) mustProject(args map[string]any) (string, *mcp.CallToolResult) {
 	pid, err := s.resolveProjectID(str(args, "project"))
 	if err != nil {
-		return "", errResult(err.Error())
+		// Rich envelope so agents hitting "project not found" learn the
+		// two recovery paths inline instead of staring at a bare error.
+		// list shows the available projects with their exact IDs; index
+		// onboards a new project from a path. Shared by every tool that
+		// scopes to a project (architecture / schema / query / trace /
+		// dead_code / neighborhood / changes / search / etc.) so this
+		// one envelope upgrade improves every per-tool error path.
+		return "", s.errResultRich(err.Error(), []map[string]string{
+			{"tool": "list", "args": `{}`, "why": "see every indexed project with its exact id + on-disk path"},
+			{"tool": "index", "args": `{"path":"/abs/path/to/repo"}`, "why": "onboard a new project from a directory path"},
+		})
 	}
 	return pid, nil
 }
