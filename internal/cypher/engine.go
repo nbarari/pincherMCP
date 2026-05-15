@@ -1602,6 +1602,18 @@ func (p *parser) parsePattern() (pattern, error) {
 			if p.peek().value == ">" {
 				p.next()
 				pat.directed = true
+			} else {
+				// #916: the undirected pattern `-[r:KIND]-` parses cleanly
+				// here but the executor only consults outbound edges, so
+				// the result silently drops inbound matches a Cypher user
+				// would expect. pinchQL's stance on partially-supported
+				// syntax (#871 multi-MATCH) is to reject early with a
+				// remediation rather than half-implement. Same shape here:
+				// fail cleanly so the user sees the actual coverage gap.
+				return pat, fmt.Errorf(
+					"pinchQL: undirected edges (-[r:KIND]-) are not supported. " +
+						"Use -[r:KIND]-> for outbound, <-[r:KIND]- for inbound, " +
+						"or run both directions as separate MATCH queries and union the results client-side")
 			}
 		}
 
