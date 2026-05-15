@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "pincher",
-      "description": "Codebase intelligence for LLM agents. Indexes any repo into a byte-offset symbol store, knowledge graph, and BM25 full-text search. 15 MCP tools with real BPE token-savings accounting. Pure Go, local-only, no cloud.",
+      "description": "Codebase intelligence for LLM agents. Indexes any repo into a byte-offset symbol store, knowledge graph, and BM25 full-text search. 22 MCP tools with real BPE token-savings accounting. Pure Go, local-only, no cloud.",
       "source": {
         "source": "github",
         "repo": "kwad77/pincher",

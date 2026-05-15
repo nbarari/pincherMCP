@@ -31,10 +31,11 @@ Once 1.0 is tagged, the SQLite schema becomes part of the public contract:
 
 ### Tool-contract policy (post-1.0)
 
-The 15 MCP tools (`index`, `symbol`, `symbols`, `context`, `search`, `query`,
-`trace`, `changes`, `architecture`, `schema`, `list`, `adr`, `health`, `stats`,
-`fetch`) and their JSON Schemas are pinned by golden-file tests in
-`internal/server/`. After 1.0:
+The 22 MCP tools (`index`, `symbol`, `symbols`, `context`, `search`, `query`,
+`trace`, `changes`, `dead_code`, `architecture`, `schema`, `list`, `adr`,
+`health`, `stats`, `fetch`, `guide`, `neighborhood`, `init`, `doctor`,
+`rebuild_fts`, `self_test`) and their JSON Schemas are pinned by golden-file
+tests in `internal/server/`. After 1.0:
 
 - **Adding** a new tool, or new fields on an existing tool's input or output,
   is a **MINOR** bump.

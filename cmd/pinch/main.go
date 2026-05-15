@@ -214,7 +214,8 @@ func main() {
 	idx.SetMaxFileSize(int64(*maxFileMB) * 1024 * 1024)
 	idx.SetBinaryVersion(version) // #304: stamp on every project at index time
 
-	// Build MCP server with all 15 tools
+	// Build MCP server with the full tool set (see internal/server/server.go
+	// registerTools for the authoritative list).
 	srv := server.New(store, idx, version)
 
 	// Slow-query capture (#42 part 2) applies to BOTH MCP stdio calls and
