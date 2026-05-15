@@ -3908,6 +3908,10 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	//
 	// Callers pass min_confidence explicitly to override either default.
 	minConfidence := floatArg(args, "min_confidence", defaultMinConfidenceFor(query, corpus))
+	minConfidence, searchMinConfWarn := clampMinConfidence(minConfidence)
+	if searchMinConfWarn != "" {
+		searchClampWarnings = append(searchClampWarnings, searchMinConfWarn)
+	}
 
 	// project=* searches all indexed projects — no project filter applied.
 	var projectID string
@@ -4868,6 +4872,10 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	maxRows := intArg(args, "max_rows", 200)
 	minConfidence := floatArg(args, "min_confidence", 0.0)
+	minConfidence, queryMinConfWarn := clampMinConfidence(minConfidence)
+	if queryMinConfWarn != "" {
+		queryWarnings = append(queryWarnings, queryMinConfWarn)
+	}
 
 	// project=* opts in to cross-project pinchQL — same shape as
 	// search's `project=*`. Useful for "where do I import lib X
@@ -5161,6 +5169,7 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	_, depthExplicit := args["depth"]
 	addRisk := boolArgDefault(args, "risk", true)
 	minConfidence := floatArg(args, "min_confidence", 0.0)
+	minConfidence, traceMinConfWarn := clampMinConfidence(minConfidence)
 	// #398: by default, drop hops in *_test.go and testdata/__fixtures__/
 	// paths. Mirrors the architecture filter (#305 + #393): test
 	// files have legitimate inbound edges from every test that
@@ -5376,6 +5385,9 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	if traceDirWarning != "" {
 		traceWarnings = append(traceWarnings, traceDirWarning)
+	}
+	if traceMinConfWarn != "" {
+		traceWarnings = append(traceWarnings, traceMinConfWarn)
 	}
 	traceWarnings = append(traceWarnings, traceKindWarnings...)
 	if len(traceWarnings) > 0 {
@@ -5923,6 +5935,10 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 	// regex-tier languages at known false-positive cost (their CALLS
 	// edges under-resolve cross-file).
 	minConfidence := floatArg(args, "min_confidence", 0.95)
+	minConfidence, deadMinConfWarn := clampMinConfidence(minConfidence)
+	if deadMinConfWarn != "" {
+		kindWarnings = append(kindWarnings, deadMinConfWarn)
+	}
 	limit := intArg(args, "limit", 100)
 	if limit > 500 {
 		limit = 500
@@ -8770,6 +8786,19 @@ func boolArgDefault(args map[string]any, key string, def bool) bool {
 //
 // Used for #34 Phase 3's `min_confidence` parameter on search/query/trace.
 // Default 0.0 means "no filter" — every symbol passes through.
+// clampMinConfidence enforces the documented [0.0, 1.0] range for the
+// min_confidence parameter (#875). Values > 1.0 used to filter every
+// result silently — extraction_confidence is in [0,1], so `> 1.0` is
+// never satisfied. Same silent-confidently-wrong class as the trace
+// `depth` clamp (#703); same remediation shape (clamp + warn). Returns
+// the clamped value and a warning string ("" when in range).
+func clampMinConfidence(v float64) (float64, string) {
+	if v > 1.0 {
+		return 1.0, fmt.Sprintf("min_confidence=%g clamped to 1.0 (valid range 0.0-1.0; out-of-range silently filtered every result)", v)
+	}
+	return v, ""
+}
+
 func floatArg(args map[string]any, key string, def float64) float64 {
 	v, ok := args[key]
 	if !ok {
