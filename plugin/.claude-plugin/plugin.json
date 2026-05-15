@@ -1,6 +1,6 @@
 {
   "name": "pincher",
-  "description": "Codebase intelligence for LLM agents. Indexes any repo into a byte-offset symbol store, knowledge graph, and BM25 full-text search. 16 MCP tools with real BPE token-savings accounting. Pure Go, local-only, no cloud.",
+  "description": "Codebase intelligence for LLM agents. Indexes any repo into a byte-offset symbol store, knowledge graph, and BM25 full-text search. 22 MCP tools with real BPE token-savings accounting. Pure Go, local-only, no cloud.",
   "version": "0.3.0",
   "author": {
     "name": "Kevin Waddell",

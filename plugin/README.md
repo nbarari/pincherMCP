@@ -4,7 +4,7 @@ Wraps the [pincherMCP](https://github.com/kwad77/pincher) codebase-intelligence 
 
 ## What gets added to your session
 
-- 16 MCP tools for codebase search, graph queries, and token-efficient symbol retrieval. See the main [REFERENCE](https://github.com/kwad77/pincher/blob/master/docs/REFERENCE.md#the-16-mcp-tools) for the full list.
+- 22 MCP tools for codebase search, graph queries, and token-efficient symbol retrieval. See the main [REFERENCE](https://github.com/kwad77/pincher/blob/master/docs/REFERENCE.md#the-22-mcp-tools) for the full list.
 - A SessionStart hook that runs `pincher index --hook` after install, injecting a "pincher is ready" additionalContext envelope so agents are primed to use pincher tools instead of defaulting to Read/Grep ([#138](https://github.com/kwad77/pincher/issues/138)).
 - A `_meta` envelope on every tool response with real BPE token counts and latency.
 - Persistent per-project session stats and all-time savings totals in SQLite.
