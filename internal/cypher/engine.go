@@ -2972,10 +2972,37 @@ func buildResult(allRows []map[string]any, q *queryAST) (*Result, error) {
 	// fmt.Sprint, which sorted "1004" before "126" (lex). Numeric
 	// columns (start_line, end_line, complexity) are the typical
 	// ORDER BY target so the silent wrongness was easy to hit.
+	//
+	// #904: when RETURN renames a column via AS (e.g. `RETURN n.name
+	// AS funcname`), an ORDER BY on the source name (`ORDER BY n.name`)
+	// silently no-op'd because the projected row map's key was the
+	// alias (`funcname`), not the source. Resolve the ORDER BY target
+	// against the projection's alias map so both `ORDER BY n.name` and
+	// `ORDER BY funcname` find the same column.
 	if q.orderBy != "" {
 		desc := q.orderDir == "DESC"
+		// Build source→projectedKey lookup: maps "n.name" (or "n", for
+		// bare-var returns) to whatever key actually lives in the
+		// projected row map.
+		sourceToProjected := map[string]string{}
+		for i, rv := range q.returnVars {
+			projectedKey := cols[i]
+			var sourceKey string
+			if rv.property != "" {
+				sourceKey = rv.variable + "." + rv.property
+			} else {
+				sourceKey = rv.variable
+			}
+			if sourceKey != "" && sourceKey != projectedKey {
+				sourceToProjected[sourceKey] = projectedKey
+			}
+		}
+		orderKey := q.orderBy
+		if alias, ok := sourceToProjected[orderKey]; ok {
+			orderKey = alias
+		}
 		sort.SliceStable(projected, func(i, j int) bool {
-			return cypherLessThan(projected[i][q.orderBy], projected[j][q.orderBy], desc)
+			return cypherLessThan(projected[i][orderKey], projected[j][orderKey], desc)
 		})
 	}
 
