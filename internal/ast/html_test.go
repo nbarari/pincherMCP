@@ -228,6 +228,57 @@ func TestHTML_RegisteredForExtensions(t *testing.T) {
 // TestHTML_HierarchyAcrossLevelGaps covers the case where a heading
 // jumps levels (h1 → h3 with no h2). Stack semantics should still
 // produce a correct hierarchy with the h3 nested under the h1.
+// Duplicate (level, title) headings — common in long pages with
+// repeating sub-sections like "Phase 2: Configuration" under multiple
+// h1 parents — used to all resolve to the same first-occurrence
+// byte offset. Pre-fix, the section-emit loop computed end_byte=
+// start_byte=N for every section after the first dup, and
+// recordExtractionHeuristics caught these as byte_range_negative
+// extraction failures on real HTML docs. bytesFindHeadingAfter
+// advances the search bound past each previously-located heading.
+func TestHTML_DuplicateHeadingsHaveDistinctByteRanges(t *testing.T) {
+	src := []byte(`<!DOCTYPE html>
+<html><body>
+<h1>Honcho</h1>
+<h2>Phase 1: Spec</h2>
+<p>Body of phase 1.</p>
+<h2>Phase 2: Configuration</h2>
+<p>Body of phase 2 first occurrence.</p>
+<h1>Hermes</h1>
+<h2>Phase 1: Spec</h2>
+<p>Body of phase 1 (hermes).</p>
+<h2>Phase 2: Configuration</h2>
+<p>Body of phase 2 second occurrence.</p>
+</body></html>
+`)
+	got := (&htmlExtractor{}).Extract(src, "HTML", "docs/dup.html", ExtractOptions{})
+
+	for _, sym := range got.Symbols {
+		if sym.Kind != "Section" {
+			continue
+		}
+		if sym.EndByte <= sym.StartByte {
+			t.Errorf("Section %q has empty byte range start=%d end=%d — duplicate-heading byte-find regression",
+				sym.QualifiedName, sym.StartByte, sym.EndByte)
+		}
+	}
+
+	// Each duplicate heading should produce a distinct Section. The QN
+	// hierarchy gives us the disambiguator since the two "Phase 2:
+	// Configuration" sections live under different h1 parents.
+	seen := map[int]bool{}
+	for _, sym := range got.Symbols {
+		if sym.Kind != "Section" {
+			continue
+		}
+		if seen[sym.StartByte] {
+			t.Errorf("two Sections share the same StartByte=%d (%q) — duplicate-heading byte-find regression",
+				sym.StartByte, sym.QualifiedName)
+		}
+		seen[sym.StartByte] = true
+	}
+}
+
 func TestHTML_HierarchyAcrossLevelGaps(t *testing.T) {
 	src := []byte(`<!DOCTYPE html>
 <html><body>

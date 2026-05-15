@@ -102,6 +102,15 @@ func (h *htmlExtractor) Extract(source []byte, _, relPath string, _ ExtractOptio
 		imports = append(imports, ref)
 	}
 
+	// searchFrom advances past each successfully-located heading so
+	// duplicate (level, title) pairs in the document don't all resolve
+	// to the same first-occurrence offset. Pre-fix, two h2 "Phase 2:
+	// Configuration" sections both got startByte=N (the first), and the
+	// section-emit loop produced end_byte=start_byte=N for the first
+	// (since the second heading's startByte == its own startByte) —
+	// recordExtractionHeuristics caught these as byte_range_negative
+	// failures on real HTML docs (atrium/website, hermes/docs).
+	searchFrom := 0
 	var walk func(n *html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
@@ -110,7 +119,10 @@ func (h *htmlExtractor) Extract(source []byte, _, relPath string, _ ExtractOptio
 				level := int(n.Data[1] - '0') // "h3" → 3
 				title := strings.TrimSpace(htmlInnerText(n))
 				if title != "" {
-					off := bytesFindHeading(source, level, title)
+					off := bytesFindHeadingAfter(source, level, title, searchFrom)
+					if off >= searchFrom {
+						searchFrom = off + 1
+					}
 					headings = append(headings, headingInfo{
 						level: level, title: title, startByte: off,
 					})
@@ -326,9 +338,23 @@ func canonicalImportPath(href string) string {
 // which is acceptable — Section retrieval still works, just less
 // precise byte ranges for malformed corner cases).
 func bytesFindHeading(source []byte, level int, title string) int {
+	return bytesFindHeadingAfter(source, level, title, 0)
+}
+
+// bytesFindHeadingAfter starts the search at offset `start`. Used by the
+// HTML walker to advance past previously-located headings so duplicate
+// (level, title) pairs in the document don't all resolve to the same
+// first-occurrence offset.
+func bytesFindHeadingAfter(source []byte, level int, title string, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(source) {
+		return 0
+	}
 	tagPrefix := []byte("<h" + string(rune('0'+level)))
 	titleBytes := []byte(title)
-	off := 0
+	off := start
 	for {
 		idx := bytesIndexFold(source[off:], tagPrefix)
 		if idx < 0 {
