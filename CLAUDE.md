@@ -177,7 +177,7 @@ All three populated in a single `ast.Extract()` call per file during indexing.
 
 - **`internal/index/lockfile.go`** — Cross-process project lockfile with PID liveness + 24h stale reclaim.
 
-- **`cmd/pinch/bloat_trap.go`** — `isBloatTrap(absPath, hookMode)` refuses fs root and `$HOME`; in hook mode also requires a project marker (`.git`, `go.mod`, `package.json`, etc.).
+- **`internal/index/bloat_trap.go`** — `IsBloatTrap(absPath, hookMode)` refuses fs root and `$HOME`; in hook mode also requires a project marker (`.git`, `go.mod`, `package.json`, etc.). Lives in `internal/index` (moved from `cmd/pinch` in #790) so both the CLI entry point AND the MCP `index` tool handler share the guard.
 
 - **`internal/server/server.go`** — MCP server + HTTP REST gateway. All tools registered in `registerTools()`. Every handler calls `jsonResultWithMeta()` which wraps result in `_meta` and atomically increments session stats. `StartSessionFlusher` flushes every 10s. `cypher.Executor` is initialised with `ProjectID` so all query paths are scoped.
 

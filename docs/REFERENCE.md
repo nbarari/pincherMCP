@@ -663,8 +663,6 @@ Migration history:
 pincherMCP/
 ├── cmd/pinch/
 │   ├── main.go                   # Sole entry point: MCP server + subcommand dispatch
-│   ├── bloat_trap.go             # isBloatTrap: refuse filesystem root + $HOME;
-│   │                             # hook mode also requires a project marker
 │   ├── doctor.go                 # `pincher doctor` subcommand
 │   ├── rebuild_fts.go            # `pincher rebuild-fts` subcommand
 │   ├── selftest.go               # `pincher self-test` subcommand
@@ -686,6 +684,8 @@ pincherMCP/
 │   ├── cypher/engine.go          # Cypher → SQL: tokenizer → parser → 3 query paths
 │   ├── index/
 │   │   ├── indexer.go            # Walk → hash → extract → resolve → store → watch
+│   │   ├── bloat_trap.go         # IsBloatTrap: refuse filesystem root + $HOME;
+│   │   │                         # hook mode also requires a project marker
 │   │   └── lockfile.go           # Cross-process project lockfile w/ stale reclaim
 │   └── server/server.go          # 22 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
 │                                 # basepath / reverse-proxy support, sessions persistence
