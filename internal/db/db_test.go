@@ -507,6 +507,10 @@ var readerRoutedStoreMethods = map[string]bool{
 	"ListExtractionFailures":         true,
 	"ExtractionFailureCountsByReason": true,
 	"ListSlowQueries":         true,
+	// HealthCheck is pure SELECT — previously misclassified under writer
+	// "for transactional consistency" but there is no write path. Moved
+	// to reader so health probes don't block on indexer write contention.
+	"HealthCheck":             true,
 	"GetAllTimeSavings":         true,
 	"GetAllTimeCallsByLanguage": true,
 	"GetAllTimeQueryMetrics":    true,
@@ -564,7 +568,6 @@ var writerRoutedStoreMethods = map[string]bool{
 	"LogHookInvocation":               true,
 	"ResolveHookInvocationsForSession": true,
 	// Mixed read+write — kept on writer for transactional consistency.
-	"HealthCheck": true,
 	"BuildClosure": true, // #652 phase 1 — DELETE + INSERT in a tx
 	// Pragmas / lifecycle (writer-pool by definition).
 	"Optimize":           true,

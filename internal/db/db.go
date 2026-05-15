@@ -2136,8 +2136,12 @@ func (s *Store) HealthCheck(projectID string) (*HealthReport, error) {
 	// always range over safely. Same field, same endpoint — same shape.
 	report := &HealthReport{DBPath: s.Path, Coverage: []LanguageCoverage{}}
 
-	// Schema version
-	if err := s.db.QueryRow(`SELECT version FROM schema_version`).Scan(&report.SchemaVersion); err != nil {
+	// Schema version — route through the reader pool so health probes
+	// don't queue behind the single-writer connection during indexing
+	// (#960 binaryDriftForce can hold the writer for tens of seconds
+	// on a full corpus re-extract). Pure SELECT — safe by the reader-
+	// pool invariant in CLAUDE.md.
+	if err := s.ro.QueryRow(`SELECT version FROM schema_version`).Scan(&report.SchemaVersion); err != nil {
 		report.SchemaVersion = -1
 	}
 
@@ -2157,8 +2161,8 @@ func (s *Store) HealthCheck(projectID string) (*HealthReport, error) {
 		report.StalenessHuman = formatStaleness(stale)
 	}
 
-	// Per-language extraction coverage
-	rows, err := s.db.Query(`
+	// Per-language extraction coverage — reader pool, same rationale.
+	rows, err := s.ro.Query(`
 		SELECT language, AVG(extraction_confidence), COUNT(*)
 		FROM symbols
 		WHERE project_id = ?
@@ -2203,7 +2207,7 @@ func (s *Store) populateKindCoverage(report *HealthReport, projectID string) err
 		Kind     string
 		Conf     float64
 	}
-	tupleRows, err := s.db.Query(`
+	tupleRows, err := s.ro.Query(`
 		SELECT language, kind, extraction_confidence
 		FROM symbols
 		WHERE project_id = ?`, projectID)
