@@ -8596,6 +8596,12 @@ func taskHintFromString(task string) string {
 		"private": true, "public": true, "exported": true, "unexported": true,
 		"internal": true, "external": true, "global": true, "local": true,
 		"stub":     true, "stubs":   true, "static":   true, "dynamic":  true,
+		// auxiliary verbs + negation. "find symbols that have no test
+		// coverage" used to extract "have no" as the hint (longest non-
+		// stopword run), and the templated search recommendation searched
+		// for the literal phrase "have no" — never the subject of any task.
+		"have": true, "has": true, "had": true, "having": true,
+		"no":   true, "not": true, "without": true,
 	}
 	// #942: strip apostrophes before tokenizing so contractions don't
 	// leave stray single-letter tokens. Pre-fix "indexer's" split into

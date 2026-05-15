@@ -32,6 +32,41 @@ func TestTaskHintFromString_StripsCallFamilyVerbs(t *testing.T) {
 	}
 }
 
+// taskHintFromString must drop auxiliary-verb + negation tokens
+// (have/has/had/no/not/without). Pre-fix "find symbols that have no
+// test coverage" extracted "have no" as the discriminator (longest
+// run between stopword breaks), and the templated search
+// recommendation searched for the literal phrase — never the subject
+// of any task. Same family as the #933 call-family-verb strip and
+// the #615 visibility-noun strip.
+func TestTaskHintFromString_StripsAuxiliaryAndNegation(t *testing.T) {
+	cases := []struct {
+		task string
+		want string
+	}{
+		// "find" + "test" + "have"/"no" all stopwords; runs become
+		// [symbols], [coverage]. "coverage" wins on later-position tie
+		// (both 1-token; "coverage" has more chars than "symbols").
+		{"find symbols that have no test coverage", "coverage"},
+		// "list" is non-stopword; "functions" + "without" are stopwords;
+		// runs become [list], [docstrings]. Both 1-token; "docstrings"
+		// wins on char count.
+		{"list functions without docstrings", "docstrings"},
+		// "find" + "that" + "have" + "no" + "error" all stopwords;
+		// runs become [handlers], [returns]. "handlers" wins on char
+		// count (8 > 7).
+		{"find handlers that have no error returns", "handlers"},
+	}
+	for _, c := range cases {
+		t.Run(c.task, func(t *testing.T) {
+			got := taskHintFromString(c.task)
+			if got != c.want {
+				t.Errorf("taskHintFromString(%q) = %q, want %q", c.task, got, c.want)
+			}
+		})
+	}
+}
+
 // Regression guards: existing hint extraction behavior preserved.
 func TestTaskHintFromString_StillHandlesNonCallTasks(t *testing.T) {
 	cases := []struct {
