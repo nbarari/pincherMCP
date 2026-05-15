@@ -3711,12 +3711,22 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 	includeSource := fieldSet == nil || fieldSet["source"]
 	root := s.sessionRoot
 	var resolvedProjectID string
+	var symbolsProjectResolveWarning string
 	if projectArg != "" {
 		if pid, err := s.resolveProjectID(projectArg); err == nil {
 			resolvedProjectID = pid
 			if r, err := s.resolveProjectRoot(pid); err == nil {
 				root = r
 			}
+		} else {
+			// #1027: same silent-fallback bug as #1023/#1024/#1025/#1026.
+			// Caller passed project=foo, foo didn't resolve, handler
+			// silently fell back to unscoped batch lookup. Surface the
+			// failure further down via attachWarning.
+			symbolsProjectResolveWarning = fmt.Sprintf(
+				"project %q did not resolve — falling back to unscoped batch lookup. Call `list` to see indexed projects.",
+				projectArg,
+			)
 		}
 	}
 
@@ -3812,6 +3822,11 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 	data := map[string]any{
 		"symbols": results,
 		"count":   len(results),
+	}
+	// #1027: surface the unresolved-project failure so the caller
+	// sees their scope hint was ignored.
+	if symbolsProjectResolveWarning != "" {
+		attachWarning(data, symbolsProjectResolveWarning)
 	}
 	// #908: batch-level warning for fields that didn't match any known
 	// entry key. Single warning rather than per-entry to keep the
