@@ -38,8 +38,13 @@ func TestSanitizeFTS5Query_DottedIdentifier(t *testing.T) {
 		{`"os.Stat"`, `"os.Stat"`},
 		{`"login flow"`, `"login flow"`},
 
-		// Plain identifier: no special chars, no wrapping.
-		{"flushBuffers", "flushBuffers"},
+		// #887: CamelCase identifiers phrase-wrap so multi-token OR
+		// queries actually return rows. Semantically identical to the
+		// unwrapped form for single-word queries (one-token phrase),
+		// but works around an FTS5 quirk where `handleSearch OR
+		// handleQuery` returns 0 vs `"handleSearch" OR "handleQuery"`
+		// returning both.
+		{"flushBuffers", `"flushBuffers"`},
 		{"auth*", "auth*"},
 
 		// #424: bare uppercase boolean operators in a multi-token query
@@ -57,11 +62,12 @@ func TestSanitizeFTS5Query_DottedIdentifier(t *testing.T) {
 
 		// #452: deliberate FTS5 expressions — short query with at least
 		// one CamelCase / punctuation / wildcard non-operator token —
-		// pass through with operator semantics preserved. The user
-		// asked for `Watch OR poll`; we honour it.
-		{"Watch OR poll", "Watch OR poll"},
-		{"Foo AND Bar", "Foo AND Bar"},
-		{"Foo AND NOT Bar", "Foo AND NOT Bar"},
+		// pass through with operator semantics preserved. CamelCase
+		// non-operator tokens phrase-wrap per #887 so FTS5's OR
+		// actually finds them; pure-lowercase tokens stay bare.
+		{"Watch OR poll", `"Watch" OR poll`},
+		{"Foo AND Bar", `"Foo" AND "Bar"`},
+		{"Foo AND NOT Bar", `"Foo" AND NOT "Bar"`},
 		{"auth* OR oauth*", "auth* OR oauth*"},
 		// Code-shape tokens with punctuation pass through too.
 		{"os.Stat OR fmt.Errorf", `"os.Stat" OR "fmt.Errorf"`},

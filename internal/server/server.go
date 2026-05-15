@@ -4542,6 +4542,18 @@ func needsQuoting(s string) bool {
 	if strings.ContainsAny(s, "()[]{},/@!?'") {
 		return true
 	}
+	// #887: phrase-quote mixed-case identifiers (CamelCase like
+	// `handleSearch`). Without the quotes, FTS5 returns ZERO rows when
+	// two CamelCase tokens are OR'd together — `handleSearch OR
+	// handleQuery` matches nothing while either alone matches its
+	// symbol, and `"handleSearch" OR "handleQuery"` returns both. The
+	// quoted form is semantically identical for a single-word token
+	// (the phrase has one token), but works around the bare-OR quirk
+	// uniformly. Pure-uppercase tokens (`OR`, `AND`, `NOT` — the
+	// FTS5 operators) are already skipped before this check fires.
+	if hasMixedCase(s) {
+		return true
+	}
 	// `.`, `-`, `:` only matter when they sit between alphanumerics —
 	// `os.Stat`, `my-component`, `localhost:8080`. A bare `.` or `:`
 	// at an edge is usually intentional (wildcard or column prefix).
@@ -4565,6 +4577,26 @@ func needsQuoting(s string) bool {
 func containsBareFTS5Operator(tokens []string) bool {
 	for _, t := range tokens {
 		if t == "NOT" || t == "AND" || t == "OR" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMixedCase reports whether s contains BOTH an upper-case and a
+// lower-case ASCII letter — the shape of a CamelCase identifier like
+// `handleSearch`. Used by needsQuoting to phrase-wrap such tokens
+// (#887) so multi-CamelCase OR queries actually return rows.
+func hasMixedCase(s string) bool {
+	var upper, lower bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			upper = true
+		} else if c >= 'a' && c <= 'z' {
+			lower = true
+		}
+		if upper && lower {
 			return true
 		}
 	}
