@@ -5963,7 +5963,22 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 	// Run git diff
 	diffOutput, diffErr := runGitDiff(root, scope)
 	if diffErr != nil {
-		return errResult(fmt.Sprintf("git diff failed: %v", diffErr)), nil
+		// Rich envelope so the agent learns the valid scopes instead of
+		// staring at a bare "git diff failed". Most common cause is a
+		// base-branch typo (`base:mian`) or a non-existent branch — the
+		// next_steps lead them at the supported shapes.
+		return s.errResultRich(
+			fmt.Sprintf("git diff failed: %v", diffErr),
+			[]map[string]string{
+				{"tool": "changes", "args": `{"scope":"unstaged"}`,
+					"why": "default: working-tree changes not yet staged"},
+				{"tool": "changes", "args": `{"scope":"staged"}`,
+					"why": "changes added via git add (pre-commit blast radius)"},
+				{"tool": "changes", "args": `{"scope":"all"}`,
+					"why": "every dirty path including untracked files"},
+				{"tool": "changes", "args": `{"scope":"base:master"}`,
+					"why": "committed-only diff vs master's merge-base — preview a PR's blast radius. Use the actual base branch name (master/main/develop/…)"},
+			}), nil
 	}
 
 	// Parse changed files from diff
