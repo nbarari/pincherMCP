@@ -3677,10 +3677,18 @@ func (s *Store) ListADRs(projectID string) (map[string]string, error) {
 	return out, rows.Err()
 }
 
-// DeleteADR removes an ADR entry.
-func (s *Store) DeleteADR(projectID, key string) error {
-	_, err := s.db.Exec(`DELETE FROM adrs WHERE project_id=? AND key=?`, projectID, key)
-	return err
+// DeleteADR removes an ADR entry. Returns the number of rows actually
+// deleted so the caller can distinguish "key existed and is gone" from
+// "key never existed" — without this, handleADR used to confidently
+// report deleted=true on a no-op DELETE, masking typos and wrong-
+// project-scope mistakes (#1019).
+func (s *Store) DeleteADR(projectID, key string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM adrs WHERE project_id=? AND key=?`, projectID, key)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

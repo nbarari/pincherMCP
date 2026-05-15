@@ -1542,13 +1542,33 @@ func TestADR_Delete(t *testing.T) {
 	s.UpsertProject(testProject("p1"))
 	s.SetADR("p1", "KEY", "value")
 
-	if err := s.DeleteADR("p1", "KEY"); err != nil {
+	rows, err := s.DeleteADR("p1", "KEY")
+	if err != nil {
 		t.Fatalf("DeleteADR: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("DeleteADR rows = %d, want 1", rows)
 	}
 
 	_, ok, _ := s.GetADR("p1", "KEY")
 	if ok {
 		t.Error("ADR should be deleted")
+	}
+}
+
+// #1019: deleting a key that never existed must return rows=0, not 1
+// — the handler relies on the count to distinguish "deleted" from
+// "no-op" and emit the right envelope shape.
+func TestADR_Delete_NonexistentKey_ReturnsZeroRows(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+
+	rows, err := s.DeleteADR("p1", "NEVER_EXISTED")
+	if err != nil {
+		t.Fatalf("DeleteADR: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("DeleteADR rows for nonexistent key = %d, want 0", rows)
 	}
 }
 

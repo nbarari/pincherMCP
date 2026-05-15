@@ -7242,10 +7242,25 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		if key == "" {
 			return s.errResultRich("key is required for action=delete", adrUsageSteps), nil
 		}
-		if err := s.store.DeleteADR(projectID, key); err != nil {
+		// #1019: DeleteADR used to return only an error and the handler
+		// confidently reported deleted=true regardless of whether any row
+		// matched. A typo'd key or wrong-project-scope call looked
+		// successful. Now: distinguish "key existed and is gone" from
+		// "key never existed" using RowsAffected, and rich-envelope the
+		// no-op so the caller sees the actual scope.
+		rows, err := s.store.DeleteADR(projectID, key)
+		if err != nil {
 			return errResult(err.Error()), nil
 		}
-		data = map[string]any{"key": key, "deleted": true}
+		if rows == 0 {
+			return s.errResultRich(
+				fmt.Sprintf("ADR key %q not found — nothing deleted", key),
+				[]map[string]string{
+					{"tool": "adr", "args": `{"action":"list"}`,
+						"why": "shows every key stored for this project — check for a typo or wrong-project scope"},
+				}), nil
+		}
+		data = map[string]any{"key": key, "deleted": true, "rows": rows}
 
 	default:
 		return s.errResultRich(
