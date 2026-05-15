@@ -3360,10 +3360,22 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// row. When `project` is omitted, fall back to the unscoped lookup
 	// so no caller breaks — that path remains the documented behaviour
 	// for callers that hold an ID but don't track which project owns it.
+	// #1026: when project was explicitly passed but didn't resolve, the
+	// fallback to unscoped lookup is silent — the caller passed a scope
+	// hint and got data outside their requested scope. Capture the
+	// failure so it surfaces in _meta.warnings further down. Same
+	// silent-fallback family as #1023 (health) / #1024 (stats) / #1025
+	// (neighborhood).
 	var resolvedProjectID string
+	var symbolProjectResolveWarning string
 	if projectArg != "" {
 		if pid, err := s.resolveProjectID(projectArg); err == nil {
 			resolvedProjectID = pid
+		} else {
+			symbolProjectResolveWarning = fmt.Sprintf(
+				"project %q did not resolve — falling back to unscoped symbol lookup. Call `list` to see indexed projects.",
+				projectArg,
+			)
 		}
 	}
 
@@ -3497,6 +3509,12 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// lied about the field's existence. #914 hoisted the check pattern
 	// out of this handler so trace / changes match the same shape.
 	data := projectAndCheckFields(allFields, fieldSet)
+	// #1026: surface the project-resolve failure when project was
+	// explicitly passed but didn't match. attachWarning merges into
+	// existing _meta — safe to call before attachStalenessWarning.
+	if symbolProjectResolveWarning != "" {
+		attachWarning(data, symbolProjectResolveWarning)
+	}
 	// #317: warn when the file on disk has changed since indexing —
 	// byte offsets we just used point at content that no longer
 	// matches the indexed symbol. Only emitted when source was
