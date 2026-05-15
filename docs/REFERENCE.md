@@ -739,41 +739,7 @@ Current coverage by package:
 
 ## Roadmap
 
-Each release tier names a theme and the issues that close it. Issue numbers link the roadmap to actionable work — track progress at <https://github.com/kwad77/pincher/issues>.
-
-### v0.2 — Index quality at scale ✅
-
-- Pinned-corpus snapshot tests (`testdata/corpus/{go-project,k8s-ops,node-monorepo,docs-site}`); CI gate catches extraction drift on every PR. ([#33](https://github.com/kwad77/pincher/issues/33))
-- Bash extractor — `mvdan.cc/sh/v3/syntax` at confidence 1.0. ([#38](https://github.com/kwad77/pincher/pull/38))
-- HCL/Terraform extractor — `hashicorp/hcl/v2/hclsyntax` at confidence 1.0. ([#67](https://github.com/kwad77/pincher/pull/67))
-- Per-corpus FTS5 split — three new vtabs route queries per language/kind. ([#32](https://github.com/kwad77/pincher/issues/32))
-- Markdown extractor — `yuin/goldmark`, one Section per heading.
-- Jinja2 extractor — `nikolalohinski/gonja`, macro/block/set + IMPORTS edges. ([#70](https://github.com/kwad77/pincher/issues/70))
-
-### v0.3 — Trust + observability ✅
-
-- Security audit — every documented security claim has a regression test. ([#41](https://github.com/kwad77/pincher/issues/41))
-- `pincher doctor` subcommand + `extraction_failures` table + slow-query log. ([#42](https://github.com/kwad77/pincher/issues/42))
-- Dashboard CSP tightening — externalized inline JS/CSS. ([#65](https://github.com/kwad77/pincher/pull/65))
-- `pincher rebuild-fts` escape hatch. ([#72](https://github.com/kwad77/pincher/pull/72))
-- Per-symbol confidence scoring — replaces per-language constant with composable signals. ([#34](https://github.com/kwad77/pincher/issues/34))
-
-### v0.4 — Performance under load 🚧
-
-- Pinned-corpus benchmarks — `make bench` per-corpus; CI smoke-job gates against accidental order-of-magnitude regressions. ([#50](https://github.com/kwad77/pincher/issues/50)) ✅
-- Reader pool — split read connections from the single-writer using SQLite WAL's concurrent-read capability. ([#51](https://github.com/kwad77/pincher/issues/51)) ✅
-- HTTP discovery via sessions table — `pincher web` resolves the dashboard URL without scanning ports.
-- Self-update — `pincher update` for in-repo and (planned) release-asset paths.
-- `pincher init` for one-step CLAUDE.md policy injection.
-- Incremental edge resolution — `resolveCalls` / `resolveImports` only re-process files touched in the current `Index()` run. Filed when bench data justifies it.
-
-### v0.5 — Polish + extension surface
-
-- Struct field extraction — index fields/properties as symbols.
-- Cross-project `query` — explicit opt-in via `cross_project=true`.
-- Webhook-triggered re-index — `POST /v1/reindex` for git post-receive hooks.
-- VS Code extension — auto-configures MCP, hover-to-inspect command.
-- `.pincher.yml` per-project config — blocklist additions, confidence threshold defaults, primary-language hint.
+The README's [Roadmap section](../README.md#roadmap) is the single source of truth for release themes and status, and [`CHANGELOG.md`](../CHANGELOG.md) has the per-release ship notes. Per-milestone burndown lives at <https://github.com/kwad77/pincher/milestones>. Pincher has shipped 50+ minor releases since v0.2; maintaining a parallel chronology here drifts faster than the code (the previous in-place table was stuck at v0.4 🚧 / v0.5 listed without status for several months).
 
 ### v1.0 — Stable API
 
@@ -783,6 +749,8 @@ Each release tier names a theme and the issues that close it. Issue numbers link
 - `SECURITY.md` — documented threat model.
 - Pre-built binaries on every release tag (Linux/macOS/Windows × amd64/arm64).
 - Docker image — `ghcr.io/kwad77/pincher:latest`.
+
+Tracked at [#638](https://github.com/kwad77/pincher/issues/638).
 
 ### Out-of-scope until real demand
 
