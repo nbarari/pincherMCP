@@ -7965,7 +7965,16 @@ var pincherToolNames = []string{
 // "find the X" phrasings (no absence word → no match).
 var auditShapePattern = regexp.MustCompile(
 	`\b(find|list|count|show|surface) (?:(every|all|any) )?\w+( \w+){0,3}?` +
-		` (without|missing|lacking|lacks|has no|have no|doesn't have|does not have|with no|with zero|where there's no)\b`,
+		` (without|missing|lacking|lacks|has no|have no|with no|with zero|where there's no|` +
+		// #1012: "doesn't <verb>" / "don't <verb>" / "does not <verb>" /
+		// "do not <verb>" is the same absence-signal as "doesn't have",
+		// just for verbs other than "have". Pre-fix, only the literal
+		// "doesn't have" / "does not have" matched, so "find every test
+		// that doesn't run in parallel" / "find every handler that doesn't
+		// return an error" fell through to shapeTest / shapeFix instead
+		// of the audit query path. The trailing \w+ anchors a real verb,
+		// not a bare "doesn't" / "don't".
+		`doesn't \w+|does not \w+|don't \w+|do not \w+)\b`,
 )
 
 // auditThresholdPattern (#912) matches metric-audit phrasings like
