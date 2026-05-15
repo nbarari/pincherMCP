@@ -3294,13 +3294,33 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"source":                source,
 	}
 
+	// #908: route through projectFieldsChecked so unknown fields are
+	// warned instead of being included as null. Pre-fix
+	// `data[f] = allFields[f]` returned `nil` for an unknown key — the
+	// response carried `{nonexistent_field: null}` which lied about
+	// the field's existence. The context handler already does this;
+	// symbol now matches.
 	var data map[string]any
 	if fieldSet == nil {
 		data = allFields
 	} else {
-		data = make(map[string]any, len(fieldSet))
-		for f := range fieldSet {
-			data[f] = allFields[f]
+		projected, unknown := projectFieldsChecked(allFields, fieldSet)
+		if len(unknown) > 0 {
+			realKeys := projectableKeys(projected)
+			validKeys := projectableKeys(allFields)
+			if len(realKeys) == 0 {
+				data = allFields
+				attachWarning(data, fmt.Sprintf(
+					"fields=%v matched no keys; valid keys: %v — returning full response",
+					unknown, validKeys))
+			} else {
+				attachWarning(projected, fmt.Sprintf(
+					"fields %v matched no keys and were dropped; valid keys: %v",
+					unknown, validKeys))
+				data = projected
+			}
+		} else {
+			data = projected
 		}
 	}
 	// #317: warn when the file on disk has changed since indexing —
@@ -3413,6 +3433,26 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 	// #400: per-entry field projection. Caller-driven cut applied
 	// to each row in the `symbols` array. nil = all fields.
 	fieldSet := parseFieldsArg(str(args, "fields"))
+	// #908: validate the requested fields against the known entry shape
+	// up-front. Pre-fix unknown fields were silently dropped by
+	// projectFields, so a typo'd field name (`fields=id,naem`) gave no
+	// signal that the caller's projection was malformed.
+	var symbolsUnknownFields []string
+	if fieldSet != nil {
+		knownFields := map[string]bool{
+			"id": true, "name": true, "qualified_name": true, "kind": true,
+			"language": true, "file_path": true, "start_line": true, "end_line": true,
+			"start_byte": true, "end_byte": true, "signature": true, "return_type": true,
+			"docstring": true, "complexity": true, "is_exported": true,
+			"extraction_confidence": true, "source": true, "error": true, "_meta": true,
+		}
+		for f := range fieldSet {
+			if !knownFields[f] {
+				symbolsUnknownFields = append(symbolsUnknownFields, f)
+			}
+		}
+		sort.Strings(symbolsUnknownFields)
+	}
 	includeSource := fieldSet == nil || fieldSet["source"]
 	root := s.sessionRoot
 	var resolvedProjectID string
@@ -3517,6 +3557,21 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 	data := map[string]any{
 		"symbols": results,
 		"count":   len(results),
+	}
+	// #908: batch-level warning for fields that didn't match any known
+	// entry key. Single warning rather than per-entry to keep the
+	// response shape clean — the projection failure mode is the same
+	// across all rows since they share a schema.
+	if len(symbolsUnknownFields) > 0 {
+		knownKeys := []string{
+			"complexity", "docstring", "end_byte", "end_line", "error",
+			"extraction_confidence", "file_path", "id", "is_exported",
+			"kind", "language", "name", "qualified_name", "return_type",
+			"signature", "source", "start_byte", "start_line",
+		}
+		attachWarning(data, fmt.Sprintf(
+			"fields %v matched no keys and were dropped; valid keys: %v",
+			symbolsUnknownFields, knownKeys))
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(resolvedProjectID, root, filePaths, responseJSON)), nil
 }
