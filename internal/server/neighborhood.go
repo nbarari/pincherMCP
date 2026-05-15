@@ -166,7 +166,10 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 
 	// Apply offset / limit window. Out-of-range offsets clamp to a
 	// zero-length slice rather than erroring — caller can still see
-	// `count` and adjust.
+	// `count` and adjust. #1035: capture the original offset BEFORE the
+	// silent clamp so the overshoot diagnosis below can name what the
+	// caller actually passed.
+	origOffset := offset
 	end := offset + limit
 	if offset > totalNeighbors {
 		offset = totalNeighbors
@@ -272,6 +275,26 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 				"why": fmt.Sprintf("file has %d neighbors total; you've seen %d-%d. Page to see the rest.",
 					totalNeighbors, offset+1, end),
 			},
+		}
+		data["_meta"] = meta
+	}
+	// #1035: pagination-overshoot diagnosis. Pre-fix neighborhood
+	// silently clamped offset to totalNeighbors and returned an empty
+	// page with no signal the offset overshot. Agents reading
+	// `count: 224, page.returned: 0` couldn't distinguish "file has
+	// neighbors but I paged past them" from a degenerate seed. Same
+	// shape as #1033 (search) / #1034 (list).
+	if totalNeighbors > 0 && origOffset >= totalNeighbors {
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["diagnosis"] = fmt.Sprintf(
+			"offset=%d is past the end of the neighbor list (total=%d) — pagination overshoot. Pass offset=0 (or omit) to start at the top of the file.",
+			origOffset, totalNeighbors)
+		meta["next_steps"] = []map[string]string{
+			{"tool": "neighborhood", "args": fmt.Sprintf(`{"id":%q}`, seed.ID),
+				"why": fmt.Sprintf("retry without offset — the file has %d neighbor(s) at offset=0", totalNeighbors)},
 		}
 		data["_meta"] = meta
 	}
