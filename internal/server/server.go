@@ -9961,9 +9961,19 @@ func boolArgDefault(args map[string]any, key string, def bool) bool {
 // never satisfied. Same silent-confidently-wrong class as the trace
 // `depth` clamp (#703); same remediation shape (clamp + warn). Returns
 // the clamped value and a warning string ("" when in range).
+//
+// #1029: lower-bound clamp added. Pre-fix only `v > 1.0` was clamped;
+// negative values silently passed through. The downstream `> 0` gates
+// in search/query/trace mean a negative value behaves like the 0.0
+// default, but the caller never learns they passed an invalid value
+// — same "documented range violated, no signal" shape as the upper-
+// bound case the original clamp closed.
 func clampMinConfidence(v float64) (float64, string) {
 	if v > 1.0 {
 		return 1.0, fmt.Sprintf("min_confidence=%g clamped to 1.0 (valid range 0.0-1.0; out-of-range silently filtered every result)", v)
+	}
+	if v < 0.0 {
+		return 0.0, fmt.Sprintf("min_confidence=%g clamped to 0.0 (valid range 0.0-1.0; negative values behave like 0.0 default but the documented contract requires non-negative)", v)
 	}
 	return v, ""
 }
