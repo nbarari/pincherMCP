@@ -97,7 +97,7 @@ pincher stats
 
 ## What to read next
 
-- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-16-mcp-tools)** — full tool catalogue
+- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-22-mcp-tools)** — full tool catalogue
 - **[REFERENCE.md → `pincher init`](../REFERENCE.md#pincher-init)** — every supported target and how the marker-block contract works
 - **[Tutorial: Claude Code](claude-code.md)** — same flow with `~/.claude/CLAUDE.md`
 - **[Tutorial: Cursor](cursor.md)** — same flow with `.cursor/rules/*.mdc`

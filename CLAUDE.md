@@ -161,7 +161,7 @@ All three populated in a single `ast.Extract()` call per file during indexing.
 
 ### Package responsibilities
 
-- **`internal/db/db.go`** — SQLite store. Schema lives here as a `schema` const. Migrations in `schemaMigrations` slice — append to add. Current schema: **v19** (v15 = `schema_version_at_index`; v16 = `calls_by_language`; v17 = query-failure metrics; v18 = `projects.binary_version` for drift detection #304; v19 = `pending_edges` for persisted per-file deferred edge candidates #457). `symSelectFrom` is the canonical SELECT column list — update it and all scan functions together when adding columns.
+- **`internal/db/db.go`** — SQLite store. Schema lives here as a `schema` const. Migrations in `schemaMigrations` slice — append to add. Current schema: **v26**. `symSelectFrom` is the canonical SELECT column list — update it and all scan functions together when adding columns. See `docs/REFERENCE.md` for the per-version migration history; this line was 7 versions stale before #998/#999 caught it.
 
 - **`internal/db/corpus.go`** — `ClassifyCorpus(language, kind)` returns `code` / `config` / `docs`. **PARITY INVARIANT:** Go function and v9 SQL trigger WHERE clauses encode the same routing. `TestClassifyCorpus_MatchesSQLTriggerRouting` is the gate.
 

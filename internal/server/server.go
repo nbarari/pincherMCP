@@ -1,4 +1,4 @@
-// Package server implements the pincherMCP MCP server with all 16 tools.
+// Package server implements the pincherMCP MCP server with all 22 tools.
 //
 // Every tool response includes a "_meta" envelope:
 //
@@ -314,7 +314,7 @@ type projectIDCacheEntry struct {
 
 const projectIDCacheTTL = 60 * time.Second
 
-// New creates and registers all 14 MCP tools.
+// New creates and registers all 22 MCP tools.
 func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 	now := time.Now()
 	s := &Server{
