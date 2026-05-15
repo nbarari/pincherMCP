@@ -6101,12 +6101,29 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 		// min_confidence gates which symbols enter the candidate pool;
 		// LOWERING it (e.g. 0.95 → 0.7) lets lower-confidence symbols
 		// also be considered, surfacing more potential dead code.
+		//
+		// #896: don't suggest a floor that's the same as or higher than
+		// the caller's current value — that's either a no-op suggestion
+		// (caller already at 0.7) or an inversion (caller at 0.0, we
+		// recommend 0.7 which NARROWS the pool). Pick the next-lower
+		// step; when already at the widest floor, drop the
+		// min_confidence hint entirely.
+		suggested := suggestDeadCodeFloor(minConfidence)
+		var diagnosis string
+		nextSteps := []map[string]string{}
+		if suggested >= 0 {
+			diagnosis = fmt.Sprintf("no dead code at min_confidence ≥ %.2f — lower min_confidence (e.g. %.2f) or broaden kinds to surface more candidates", minConfidence, suggested)
+			nextSteps = append(nextSteps, map[string]string{
+				"tool": "dead_code",
+				"args": fmt.Sprintf(`{"min_confidence":%g}`, suggested),
+				"why":  "lower the confidence floor so regex-extracted (sub-1.0) symbols enter the candidate pool",
+			})
+		} else {
+			diagnosis = fmt.Sprintf("no dead code at min_confidence ≥ %.2f — already at the widest floor; broaden kinds (e.g. Function,Method,Class) to surface more candidates, or this language genuinely has no unreferenced internal symbols", minConfidence)
+		}
 		data["_meta"] = map[string]any{
-			"diagnosis": fmt.Sprintf("no dead code at min_confidence ≥ %.2f — lower min_confidence (e.g. 0.7) or broaden kinds to surface more candidates", minConfidence),
-			"next_steps": []map[string]string{
-				{"tool": "dead_code", "args": `{"min_confidence":0.7}`,
-					"why": "lower the confidence floor so regex-extracted (sub-1.0) symbols enter the candidate pool"},
-			},
+			"diagnosis":  diagnosis,
+			"next_steps": nextSteps,
 		}
 	}
 
@@ -8879,6 +8896,29 @@ func clampMinConfidence(v float64) (float64, string) {
 		return 1.0, fmt.Sprintf("min_confidence=%g clamped to 1.0 (valid range 0.0-1.0; out-of-range silently filtered every result)", v)
 	}
 	return v, ""
+}
+
+// suggestDeadCodeFloor (#896) picks the next-lower min_confidence floor
+// for the dead_code empty-result advisory. Returns a negative sentinel
+// when the caller is already at or below the widest floor (≤0.0), so
+// the caller drops the min_confidence hint entirely instead of
+// recommending a HIGHER value (which would narrow the candidate pool —
+// the opposite of "find more dead code").
+//
+// Steps mirror the meaningful confidence tiers in the corpus:
+//   - >0.95 (default 0.95 strict tier) → 0.7  (admit Regex-stable extractors)
+//   - >0.7  (the regex-stable floor)   → 0.0  (admit approximate-regex tier)
+//   - ≤0.0  (already widest)           → -1   (no further floor exists)
+func suggestDeadCodeFloor(current float64) float64 {
+	const eps = 1e-9
+	switch {
+	case current > 0.7+eps:
+		return 0.7
+	case current > 0.0+eps:
+		return 0.0
+	default:
+		return -1
+	}
 }
 
 func floatArg(args map[string]any, key string, def float64) float64 {
