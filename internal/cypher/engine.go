@@ -1896,10 +1896,20 @@ func (p *parser) parseReturn() ([]returnVar, error) {
 			p.next()
 			p.skip("(")
 			rv.fn = fn
-			rv.variable = p.next().value
-			if p.peek().value == "." {
+			// #946: COUNT(*) — the tokenizer reads `*` as an empty HOPS
+			// token (see #794 above for the same shape). Pre-fix the
+			// argument became rv.variable="", so aggColName rendered the
+			// column as "COUNT()" — asterisk silently stripped. Preserve
+			// "*" literally so the default column header round-trips.
+			if t2 := p.peek(); t2.kind == "HOPS" && t2.value == "" {
 				p.next()
-				rv.property = p.next().value
+				rv.variable = "*"
+			} else {
+				rv.variable = p.next().value
+				if p.peek().value == "." {
+					p.next()
+					rv.property = p.next().value
+				}
 			}
 			if err := p.expect(")"); err != nil {
 				return nil, err
