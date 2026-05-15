@@ -2474,23 +2474,52 @@ func (s *Server) resolveProjectID(projectArg string) (string, error) {
 	// so a stale empty `D:\…\pincher` row routinely out-resolved the
 	// live `D:\ClaudeCode\pincher-repo` and downstream tools returned
 	// silently empty results. Caught dogfooding this session.
+	//
+	// #1046: name match is case-insensitive. On case-insensitive
+	// filesystems (Windows NTFS, macOS APFS) the canonical path
+	// fallback above already accepts mixed casing on the *path*; the
+	// *name* fallback needs the same treatment because project names
+	// derive from directory names (e.g. `pincher-repo` vs the agent
+	// passing `Pincher-repo`). Prefer an exact-case match first so a
+	// deliberate two-project-same-casefold collision still resolves
+	// the one the caller typed; fall back to case-fold equality only
+	// when no exact-case match is found.
 	all, err := s.store.ListProjects()
 	if err != nil {
 		return "", err
 	}
-	var liveMatch, deadMatch *db.Project
+	var exactLive, exactDead, foldLive, foldDead *db.Project
 	for i := range all {
 		proj := &all[i]
-		if proj.Name != projectArg {
-			continue
+		switch {
+		case proj.Name == projectArg:
+			if _, statErr := os.Stat(proj.Path); statErr == nil {
+				if exactLive == nil {
+					exactLive = proj
+				}
+			} else if exactDead == nil {
+				exactDead = proj
+			}
+		case strings.EqualFold(proj.Name, projectArg):
+			if _, statErr := os.Stat(proj.Path); statErr == nil {
+				if foldLive == nil {
+					foldLive = proj
+				}
+			} else if foldDead == nil {
+				foldDead = proj
+			}
 		}
-		if _, statErr := os.Stat(proj.Path); statErr == nil {
-			liveMatch = proj
-			break
-		}
-		if deadMatch == nil {
-			deadMatch = proj
-		}
+	}
+	var liveMatch, deadMatch *db.Project
+	switch {
+	case exactLive != nil:
+		liveMatch = exactLive
+	case foldLive != nil:
+		liveMatch = foldLive
+	case exactDead != nil:
+		deadMatch = exactDead
+	case foldDead != nil:
+		deadMatch = foldDead
 	}
 	if liveMatch != nil {
 		s.storeProjectIDCache(projectArg, liveMatch.ID)
