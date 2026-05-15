@@ -109,6 +109,11 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// collapse to `*3..3`. parseHops now swaps to the intended range;
 	// surface the swap so a transposed-bounds typo teaches.
 	warnings = append(warnings, collectHopRangeWarnings(q)...)
+	// #881: ORDER BY on an unrecognized column is silently dropped (the
+	// SQL ORDER BY clause never gets emitted), so results come back in
+	// scan order while the caller thinks they're sorted. Warn so the
+	// silent-drop becomes teachable.
+	warnings = append(warnings, collectUnknownOrderByWarnings(q)...)
 	res, err := e.run(ctx, q)
 	if err != nil {
 		return res, err
@@ -328,6 +333,39 @@ func collectCrossColumnWarnings(q *queryAST) []string {
 var knownEdgeKinds = map[string]bool{
 	"CALLS": true, "HTTP_CALLS": true, "ASYNC_CALLS": true,
 	"READS": true, "WRITES": true, "IMPORTS": true, "REFERENCES": true,
+}
+
+// collectUnknownOrderByWarnings (#881) warns when ORDER BY names a
+// column outside the property whitelist. orderByCol / joinOrderByCol
+// silently return "" for an unknown column — the SQL ORDER BY clause is
+// never emitted and results come back unsorted, but the caller has no
+// signal that their sort was discarded. Same silent-confidently-wrong
+// class as the WHERE-side unknown-property warning (#473) — except the
+// consequence here is "unsorted results" rather than "always-false
+// predicate", so the wording differs.
+//
+// Aggregate ORDER BY targets (`ORDER BY COUNT(n)`) and edge-bound
+// columns are out of scope — they have their own resolution paths and
+// the whitelist doesn't apply.
+func collectUnknownOrderByWarnings(q *queryAST) []string {
+	if q == nil || q.orderBy == "" {
+		return nil
+	}
+	ob := q.orderBy
+	if strings.Contains(ob, "(") {
+		return nil // aggregate target
+	}
+	// Split `var.prop` (or bare `prop`).
+	prop := ob
+	if i := strings.Index(ob, "."); i >= 0 {
+		prop = ob[i+1:]
+	}
+	if prop == "" || cypherPropToCol(prop) != "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"ORDER BY %q targets a column not in the property whitelist — the sort was silently dropped and results are returned in scan order. Valid properties: %s.",
+		ob, strings.Join(knownPropertyList, ", "))}
 }
 
 // collectHopRangeWarnings (#869) warns when a variable-length pattern
