@@ -5872,7 +5872,20 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		name = seed.Name
 	} else {
 		var err error
-		starts, err = s.store.GetSymbolsByName(projectID, name, 5)
+		// #1032: fetch more candidates than we surface so sortTraceCandidates
+		// can actually pick the best seed. Pre-fix the LIMIT was 5 with no
+		// SQL ORDER BY — for common names like `main` the project has 10+
+		// rows (one Module per file with `package main` PLUS the actual
+		// Function). SQL returned 5 arbitrary rows, and when those happened
+		// to all be Modules (LIMIT 5 truncated before the Function row),
+		// sortTraceCandidates had nothing better to pick. The trace then
+		// resolved to a Module — which has no CALLS edges — and the result
+		// looked like "this symbol is a leaf." Fetching the full match set
+		// (capped at 50, well above any realistic dup count for a single
+		// name) lets the Go-side sort prefer Function/Method over Module
+		// AND preserves the alternatives list cap of 5 below.
+		const traceCandidateFetchCap = 50
+		starts, err = s.store.GetSymbolsByName(projectID, name, traceCandidateFetchCap)
 		if err != nil {
 			return errResult(fmt.Sprintf("trace lookup: %v", err)), nil
 		}
@@ -5896,6 +5909,12 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		//      them returns 0 hops and looks like a real empty result.
 		//   3. Stable order from GetSymbolsByName for everything else.
 		sortTraceCandidates(starts)
+		// #1032: cap surfaced alternatives at 5 (the pre-fix fetch limit)
+		// — the rest were only needed for the Go-side sort. The seed picked
+		// is starts[0] post-sort, which is now correctly Function-over-Module.
+		if len(starts) > 5 {
+			starts = starts[:5]
+		}
 		seedID = starts[0].ID
 	}
 	hops, err := s.indexer.TraceByID(ctx, projectID, seedID, direction, depth, addRisk, edgeKinds...)
