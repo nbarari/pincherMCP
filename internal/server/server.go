@@ -7953,11 +7953,19 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 	projectArg := str(args, "project")
 
 	// Resolve project — optional; health without a project still returns schema version + db path.
+	// #1055: skip resolution when projectArg=="*" — health is per-project,
+	// so "*" is meaningless. Extends the #1048 cross-project-sentinel
+	// fix from symbol/symbols/context/neighborhood to the aggregate
+	// tools. Pre-fix `health project="*"` warned "did not resolve —
+	// falling back" as if `*` were a typo, but the caller passed it
+	// deliberately (likely thinking health supports cross-project the
+	// way search/query do). Treat "*" as "fall back to session
+	// project" silently — same shape as the unscoped retrieval tools.
 	projectID := ""
 	var projectResolveWarning string
 	if pid, err := s.resolveProjectID(projectArg); err == nil {
 		projectID = pid
-	} else if projectArg != "" {
+	} else if projectArg != "" && projectArg != "*" {
 		// #1023: caller passed a project name but it didn't resolve.
 		// Pre-fix the handler silently degraded to "no project" state,
 		// returning the minimal {schema_version, db_path} envelope with
@@ -8215,10 +8223,15 @@ func (s *Server) handleStats(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// ("Project to include in index size breakdown. Defaults to session
 	// project."). Pre-fix the handler ignored the arg entirely; passing
 	// `project=foo` silently returned the session project's stats.
+	// #1055: skip resolution + warning when projectArg=="*" — stats is
+	// per-project (index size breakdown for one project), so "*" is
+	// meaningless. Same fix as #1048 extended to aggregate tools:
+	// treat the cross-project sentinel as "fall back to session
+	// project" silently rather than warning as if it were a typo.
 	var proj *db.Project
 	var statsProjectWarning string
 	projectArg := str(args, "project")
-	if projectArg != "" {
+	if projectArg != "" && projectArg != "*" {
 		if pid, err := s.resolveProjectID(projectArg); err == nil {
 			if p, _ := s.store.GetProject(pid); p != nil {
 				proj = p
