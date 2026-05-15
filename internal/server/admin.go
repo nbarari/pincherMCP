@@ -147,6 +147,19 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 		top = 10
 	}
+	// #1016: upper-bound clamp. top governs three list caps (projects,
+	// extraction_failures, slow_queries) AND the per-project
+	// ListExtractionFailures call. Pre-fix top=99999 on a multi-project
+	// install produced a 506 KB response that blew the MCP per-call
+	// token cap — agent saw a truncation error with no recovery path.
+	// Same shape as search (#532) / neighborhood (#1013): 500 ceiling
+	// with a clamp warning so the caller knows they hit it.
+	const maxTop = 500
+	if top > maxTop {
+		clampWarnings = append(clampWarnings,
+			fmt.Sprintf("doctor: top=%d clamped to %d (max). Use offset-style follow-up calls if you need to enumerate more.", rawTop, maxTop))
+		top = maxTop
+	}
 
 	data := map[string]any{
 		"generated_at":   time.Now().UTC().Format(time.RFC3339),
