@@ -2028,6 +2028,13 @@ func operatorHint(op string) (string, bool) {
 		return "arithmetic operators (+, -, *, /) are not yet supported in pinchQL (tracked in #928). " +
 			"For line-count audits use `RETURN n.start_line, n.end_line` and compute the diff client-side; " +
 			"for fan-in ratios, run two queries and divide outside the engine.", true
+	case "BETWEEN":
+		// SQL/Cypher dialects spell range-membership BETWEEN x AND y;
+		// pinchQL doesn't have a BETWEEN keyword and the parser falls
+		// through to "unsupported operator: BETWEEN" with no hint. The
+		// canonical workaround is two ANDed comparisons. Surface that
+		// shape so the failure teaches the supported spelling.
+		return "BETWEEN is not supported; use two ANDed comparisons: 'n.start_line >= 100 AND n.start_line <= 200'", true
 	}
 	return "", false
 }
