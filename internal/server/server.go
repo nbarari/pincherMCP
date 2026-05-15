@@ -4488,12 +4488,57 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 
 	// Build field allow-set for projection (nil = all fields).
-	var fieldSet map[string]bool
-	if fieldsArg != "" {
-		fieldSet = make(map[string]bool)
-		for _, f := range strings.Split(fieldsArg, ",") {
-			fieldSet[strings.TrimSpace(f)] = true
+	// #1030: switched from inline parse to parseFieldsArg so empty
+	// entries (`fields=",,"`) and pure-whitespace entries are stripped.
+	// Pre-fix the inline parse kept the empty string as a key and the
+	// per-row projection produced `{"": null}` — a confidently-wrong
+	// row with no signal. parseFieldsArg returns nil when every entry
+	// is empty, which falls back to "all fields" with a warning below.
+	fieldSet := parseFieldsArg(fieldsArg)
+	// #1030: track requested-but-unknown fields so the caller learns
+	// about typo'd field names instead of getting silent `null` values.
+	// Same shape as symbol's projectAndCheckFields pattern. The list of
+	// projectable keys is a constant per the per-row builder below.
+	var searchFieldsWarning string
+	if fieldSet != nil {
+		validKeys := []string{
+			"id", "name", "qualified_name", "kind", "language",
+			"file_path", "start_line", "end_line", "start_byte", "end_byte",
+			"signature", "score", "extraction_confidence", "snippet",
 		}
+		validSet := make(map[string]bool, len(validKeys))
+		for _, k := range validKeys {
+			validSet[k] = true
+		}
+		var unknown []string
+		for f := range fieldSet {
+			if !validSet[f] {
+				unknown = append(unknown, f)
+			}
+		}
+		if len(unknown) > 0 {
+			// Strip unknown keys so we don't emit `{<typo>: null}` rows.
+			for _, u := range unknown {
+				delete(fieldSet, u)
+			}
+			if len(fieldSet) == 0 {
+				// Every requested field was bogus — fall back to "all
+				// fields" so the call stays useful, but warn loudly.
+				fieldSet = nil
+				searchFieldsWarning = fmt.Sprintf(
+					"fields=%v matched no keys; valid keys: %v — returning full response",
+					unknown, validKeys)
+			} else {
+				searchFieldsWarning = fmt.Sprintf(
+					"fields %v matched no keys and were dropped; valid keys: %v",
+					unknown, validKeys)
+			}
+		}
+	} else if strings.TrimSpace(fieldsArg) != "" {
+		// fieldsArg was non-empty but parseFieldsArg returned nil — every
+		// entry was empty/whitespace (e.g. `fields=",,"`). Warn so the
+		// caller learns their projection was malformed.
+		searchFieldsWarning = "fields argument contained only empty entries — returning full response. Pass comma-separated names like 'id,signature'."
 	}
 
 	// snippetLines is the max lines of source included per result.
@@ -4674,6 +4719,12 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if len(searchClampWarnings) > 0 {
 		existing, _ := meta["warnings"].([]string)
 		meta["warnings"] = append(existing, searchClampWarnings...)
+	}
+	// #1030: surface fields projection warnings (empty entries / unknown
+	// field names). Same merge-don't-clobber pattern as clamp warnings.
+	if searchFieldsWarning != "" {
+		existing, _ := meta["warnings"].([]string)
+		meta["warnings"] = append(existing, searchFieldsWarning)
 	}
 	data := map[string]any{
 		"results":  rows,
