@@ -3406,8 +3406,20 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 		// #704: not-found path teaches the next move. The natural
 		// remediation is `search` by short name (handles typos, case,
 		// and stale IDs that didn't make symbol_moves).
+		//
+		// #1037: when the caller's project arg also failed to resolve,
+		// surface BOTH failures. Pre-fix only the symbol-not-found error
+		// was reported; an agent who'd typo'd the project name AND
+		// passed a bogus id only learned about the id mistake, then
+		// hit the same project-resolve failure on their next call.
+		// Stacking the warning into the error message keeps the rich
+		// envelope's next_steps intact while exposing the second cause.
+		errMsg := fmt.Sprintf("symbol %q not found", id)
+		if symbolProjectResolveWarning != "" {
+			errMsg = symbolProjectResolveWarning + " ALSO: " + errMsg
+		}
 		return s.errResultRich(
-			fmt.Sprintf("symbol %q not found", id),
+			errMsg,
 			[]map[string]string{
 				{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, shortNameFromID(id)),
 					"why": "id resolution failed (also tried symbol_moves redirect) — search by short name"},
