@@ -78,6 +78,18 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cypher parse: %w", err)
 	}
+	// #871: reject multiple MATCH clauses explicitly. Parsing accepts
+	// them and `q.patterns` grows past length 1, but the executor's
+	// `run()` only consumes `q.patterns[0]` — additional patterns'
+	// variables (`c` in `MATCH (a)-[:CALLS]->(b) MATCH (a)-[:READS]->(c)`)
+	// are never bound, so RETURN columns referencing them silently
+	// project NULL. Same silent-confidently-wrong shape as #433's
+	// chained-edge rejection; same remediation shape (single MATCH).
+	if len(q.patterns) > 1 {
+		return nil, fmt.Errorf(
+			"pinchQL: multiple MATCH clauses are not supported — only the first MATCH executes, additional patterns' variables silently project NULL. " +
+				"Combine the patterns into a single MATCH where possible, or run separate queries and join the results client-side")
+	}
 	// #473: surface property names the engine doesn't know about as
 	// non-fatal warnings. Unknown properties evaluate to undefined,
 	// which makes comparisons falsy and returns 0 rows — without a
