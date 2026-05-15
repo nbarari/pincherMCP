@@ -7120,6 +7120,42 @@ func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*m
 			},
 		}
 		data["_meta"] = meta
+	} else if edgeCount == 0 && symCount >= 100 {
+		// #1042: ghost-extraction signature. Symbols exist but the
+		// resolver phase produced no edges. Pre-fix schema silently
+		// returned the bare counts and let the caller draw their own
+		// conclusion — agents seeing `node_kinds:{Function: 327, ...}`
+		// + `edges: 0` could mistake it for a config/docs-only project
+		// or simply not notice the resolver failure. Same family as
+		// #1040 (architecture ghost-extraction diagnosis) and #815
+		// (doctor advisory).
+		//
+		// Threshold of 100 symbols matches doctor's ghostProjectAdvisory
+		// approach: below that, a small project legitimately having no
+		// edges (single utility, scratch project) shouldn't trigger.
+		// At 100+ callable symbols with no edges, the resolver phase
+		// almost certainly failed.
+		hasCallableKind := false
+		for _, k := range []string{"Function", "Method", "Class", "Interface"} {
+			if c, ok := kindCounts[k]; ok && c > 0 {
+				hasCallableKind = true
+				break
+			}
+		}
+		if hasCallableKind {
+			meta := map[string]any{
+				"diagnosis": fmt.Sprintf(
+					"project has %d symbols (including callable kinds like Function/Method) but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; `trace`/`query` over this project will silently return zero rows.",
+					symCount),
+				"next_steps": []map[string]string{
+					{"tool": "index", "args": `{"path":"/absolute/path/to/project","force":true}`,
+						"why": "force a fresh re-index — clears stale per-file hash state that can leave resolveCalls/resolveImports skipping every file"},
+					{"tool": "doctor", "args": "{}",
+						"why": "extraction_failures may explain why the resolver phase failed (parser cap, language extractor crash)"},
+				},
+			}
+			data["_meta"] = meta
+		}
 	}
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
