@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -39,6 +40,55 @@ type doctorProjectSummary struct {
 	IndexedAt            string `json:"indexed_at"`
 	SchemaVersionAtIndex *int   `json:"schema_version_at_index,omitempty"`
 	BinaryVersion        string `json:"binary_version,omitempty"`
+}
+
+// ghostProjectAdvisory returns a human-readable health advisory when a
+// project has substantial symbols but zero edges — the "ghost-edges"
+// signature of #815 / #836 (zelosMCP user report). Extraction half-
+// succeeded: symbols got persisted but the resolver phase never ran
+// (or its writes got lost). At scale, the broken project still answers
+// `search` happily, then `trace`/`query` over the symbol returns zero
+// rows that look like a real empty result. Pre-#1009, doctor reported
+// the totals as bare numbers — a 368k-symbol project with 0 edges
+// looked identical to a healthy 368k/N project in the listing.
+//
+// Threshold = 1000 symbols. Below that, a true pure-config /
+// pure-docs repo can legitimately land at 0 edges. At 1000+ symbols
+// the project almost certainly contains code files, and code without
+// edges means the resolver lost its work.
+func ghostProjectAdvisory(projects []doctorProjectSummary) string {
+	const symThreshold = 1000
+	var ghosts []doctorProjectSummary
+	for _, p := range projects {
+		if p.Symbols >= symThreshold && p.Edges == 0 {
+			ghosts = append(ghosts, p)
+		}
+	}
+	if len(ghosts) == 0 {
+		return ""
+	}
+	// Limit to the worst 3 by symbol count so the advisory stays
+	// scannable. projects is pre-sorted by symbol count desc, but
+	// ghosts inherits that ordering since we walked in order.
+	if len(ghosts) > 3 {
+		ghosts = ghosts[:3]
+	}
+	var names []string
+	for _, g := range ghosts {
+		names = append(names, fmt.Sprintf("%q (%d symbols, %d files)", g.Name, g.Symbols, g.Files))
+	}
+	msg := fmt.Sprintf("project%s with substantial symbols but ZERO edges (ghost-extraction signature, #815): %s. ",
+		pluralS(len(ghosts)), strings.Join(names, "; "))
+	msg += "Symbols were extracted but the resolver phase produced no graph — `trace` / `query` over these projects will silently return zero rows. " +
+		"Remediation: re-index from a fresh CWD (`pincher index <path>`) and check `doctor`'s extraction_failures list for the underlying cause."
+	return msg
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // largeDBAdvisory returns a human-readable health advisory when the
@@ -148,6 +198,25 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	advisories := []string{}
 	if a := largeDBAdvisory(dbSizeBytes, projects); a != "" {
 		advisories = append(advisories, a)
+	}
+	// #1009: ghost-project advisory. Walks the full project list (not
+	// the `top`-truncated one) so a ghost project ranked below `top` by
+	// symbol count is still surfaced. Re-fetch the full list cheaply —
+	// the previous ListProjects round-trip is shadowed by truncation.
+	{
+		all := []doctorProjectSummary{}
+		for _, p := range plist {
+			all = append(all, doctorProjectSummary{
+				Name:    p.Name,
+				Files:   p.FileCount,
+				Symbols: p.SymCount,
+				Edges:   p.EdgeCount,
+			})
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].Symbols > all[j].Symbols })
+		if a := ghostProjectAdvisory(all); a != "" {
+			advisories = append(advisories, a)
+		}
 	}
 	data["advisories"] = advisories
 
