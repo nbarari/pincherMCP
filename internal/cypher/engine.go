@@ -124,6 +124,22 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 		return res, err
 	}
 	if res != nil {
+		// #900: enforce max_rows as a hard upper bound. Pre-fix the
+		// pinchQL LIMIT clause was applied in buildResult but
+		// max_rows wasn't — so a query like `RETURN n.name LIMIT
+		// 99999999` against `max_rows=5` returned 10 rows (2× the
+		// scanLimitFor headroom). Trim final result + emit a warning
+		// so the override is observable. Aggregating queries skip
+		// the trim because their row count is the cardinality, not
+		// arbitrary.
+		cap := e.maxRows()
+		if !hasAggregation(q) && len(res.Rows) > cap {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"max_rows=%d exceeded by pinchQL LIMIT — result trimmed from %d rows. Pass a tighter LIMIT in the query, or raise max_rows.",
+				cap, len(res.Rows)))
+			res.Rows = res.Rows[:cap]
+			res.Total = cap
+		}
 		res.Warnings = append(res.Warnings, warnings...)
 		// #501: when the result set is empty AND the query filters on
 		// an enum-shaped property (kind / language) with a value not
