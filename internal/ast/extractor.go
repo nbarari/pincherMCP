@@ -977,6 +977,10 @@ func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool
 	// (`w.defaultDo` as a value) still emit their bare `.Sel` so #565
 	// function-value bindings keep working.
 	var walkRead func(n ast.Node)
+	// #1062: forward-declared so walkRead can hand FuncLit bodies off
+	// to the statement walker (defined below) without a forward-ref
+	// build error.
+	var walk func(n ast.Node)
 	walkRead = func(n ast.Node) {
 		if n == nil {
 			return
@@ -988,10 +992,30 @@ func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool
 			if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
 				walkRead(sel.X)
 			}
+			// #1062: immediately-invoked / go / defer FuncLit — Fun is
+			// the literal itself, not a name. extractGoCalls doesn't
+			// emit a CALLS edge for it (no callable name), so we have
+			// to walk the body here or the closure's reads vanish.
+			if fl, ok := e.Fun.(*ast.FuncLit); ok && fl.Body != nil {
+				walk(fl.Body)
+			}
 			// Bare-Ident call subject (`Foo()`) is skipped — extractGoCalls
 			// owns it. Only the args are reads.
 			for _, arg := range e.Args {
 				walkRead(arg)
+			}
+		case *ast.FuncLit:
+			// #1062: function-literal body — `go func(){...}()`,
+			// `defer func(){...}()`, callback args, and closures
+			// assigned to locals all parse as FuncLit. Pre-fix the
+			// walker stopped here, so READS/WRITES inside the body
+			// were invisible (sessionFlushFast at server.go:450 was
+			// flagged dead-code by `dead_code`). Hand the body off to
+			// the statement walker so AssignStmt/IncDecStmt/etc. fire
+			// correctly inside the closure — using ast.Inspect alone
+			// would dump every LHS as a bare read.
+			if e.Body != nil {
+				walk(e.Body)
 			}
 		case *ast.SelectorExpr:
 			if base, ok := e.X.(*ast.Ident); ok && importPkgs[base.Name] {
@@ -1039,8 +1063,8 @@ func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool
 	// Custom recursive walker that recognises AssignStmt and IncDecStmt
 	// at the *statement* level so we don't double-walk LHS expressions
 	// as reads. Unrecognised nodes fall through to walkRead which
-	// emits READS for every Ident underneath.
-	var walk func(n ast.Node)
+	// emits READS for every Ident underneath. Variable forward-declared
+	// above (#1062) so walkRead can refer to it.
 	walk = func(n ast.Node) {
 		if n == nil {
 			return

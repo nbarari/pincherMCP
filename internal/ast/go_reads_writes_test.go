@@ -240,6 +240,79 @@ func F() int {
 	}
 }
 
+// #1062: a READS inside `go func(){ ... }()` was invisible to the
+// extractor because the walker stopped at the FuncLit boundary. Caught
+// dogfooding: sessionFlushFast (server.go:64) was used inside
+// StartSessionFlusher's launched goroutine and showed as dead code.
+func TestExtractGo_ReadsWrites_InsideGoFuncLit(t *testing.T) {
+	src := []byte(`package p
+
+var Cadence int
+
+func StartTicker() {
+	go func() {
+		_ = Cadence
+	}()
+}
+`)
+	edges := extractGoEdges(t, src)
+	requireEdge(t, edges, "p.StartTicker", "Cadence", "READS")
+}
+
+// #1062: defer func(){ ... }() — same FuncLit-as-CallExpr-Fun shape,
+// pre-fix never produced a READS for State.
+func TestExtractGo_ReadsWrites_InsideDeferFuncLit(t *testing.T) {
+	src := []byte(`package p
+
+var State int
+
+func WithCleanup() {
+	defer func() {
+		_ = State
+	}()
+}
+`)
+	edges := extractGoEdges(t, src)
+	requireEdge(t, edges, "p.WithCleanup", "State", "READS")
+}
+
+// #1062: function literal passed as a callback arg — was partially
+// covered (default-case ast.Inspect inside walkRead reaches Idents),
+// but the WRITES branch in walk() never ran for assignments inside,
+// so `Counter = 1` inside the callback dropped to a READS instead.
+func TestExtractGo_ReadsWrites_InsideCallbackFuncLitWrite(t *testing.T) {
+	src := []byte(`package p
+
+var Counter int
+
+func register(cb func()) { cb() }
+
+func F() {
+	register(func() {
+		Counter = 1
+	})
+}
+`)
+	edges := extractGoEdges(t, src)
+	requireEdge(t, edges, "p.F", "Counter", "WRITES")
+}
+
+// #1062: assignment of a closure to a local, then call — the body
+// references Limit, which must surface as a READS on the outer function.
+func TestExtractGo_ReadsWrites_InsideAssignedClosureBody(t *testing.T) {
+	src := []byte(`package p
+
+var Limit int
+
+func F() {
+	fn := func() int { return Limit }
+	_ = fn
+}
+`)
+	edges := extractGoEdges(t, src)
+	requireEdge(t, edges, "p.F", "Limit", "READS")
+}
+
 func extractGoEdges(t *testing.T, src []byte) []ExtractedEdge {
 	t.Helper()
 	r := Extract(src, "Go", "p/file.go")
