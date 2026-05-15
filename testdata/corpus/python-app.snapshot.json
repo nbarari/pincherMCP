@@ -16,6 +16,26 @@
   "files_indexed": 5,
   "files_seen": 5,
   "schema_version": 26,
+  "search_relevance": [
+    {
+      "corpus": "code",
+      "query": "open_session",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "app.auth.open_session"
+    },
+    {
+      "corpus": "code",
+      "query": "Session",
+      "top_hit_kind": "Class",
+      "top_hit_qn": "app.auth.Session"
+    },
+    {
+      "corpus": "code",
+      "query": "user_name",
+      "top_hit_kind": "Method",
+      "top_hit_qn": "app.auth.Session.user_name"
+    }
+  ],
   "symbol_count_by_kind": {
     "Class": 1,
     "Function": 3,

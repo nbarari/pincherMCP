@@ -599,6 +599,14 @@ var searchRelevanceQueries = map[string][]searchRelevanceQuery{
 		{Query: "aws_security_group", Corpus: db.CorpusConfig}, // Resource in main.tf
 		{Query: "network", Corpus: db.CorpusConfig},        // Module call in main.tf
 	},
+	"python-app": {
+		// Code corpus — Python identifiers (#1057). Each query
+		// targets a representative symbol kind from the AST
+		// extractor: Function, Class, Method.
+		{Query: "open_session", Corpus: db.CorpusCode}, // Function in app/auth.py
+		{Query: "Session", Corpus: db.CorpusCode},      // Class in app/auth.py
+		{Query: "user_name", Corpus: db.CorpusCode},    // Method on Session
+	},
 }
 
 // SearchRelevanceHit is the per-query record persisted to the snapshot.
