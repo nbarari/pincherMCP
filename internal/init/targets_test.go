@@ -35,7 +35,7 @@ func withHome(t *testing.T, dir string) {
 }
 
 func TestInitTargets_RegistryShape(t *testing.T) {
-	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex"}
+	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex", "zed"}
 	if len(AllTargets) != len(want) {
 		t.Fatalf("registry has %d targets, want %d", len(AllTargets), len(want))
 	}

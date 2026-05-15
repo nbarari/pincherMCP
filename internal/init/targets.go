@@ -69,6 +69,7 @@ var AllTargets = []Target{
 	AiderTarget,
 	ContinueTarget,
 	CodexTarget,
+	ZedTarget,
 }
 
 // FindTarget looks up a target by its --target value.
@@ -277,6 +278,44 @@ var AiderTarget = Target{
 			return true
 		}
 		if _, err := os.Stat(filepath.Join(cwd, ".aider.conf.yml")); err == nil {
+			return true
+		}
+		return false
+	},
+	WriteFn: MergePolicyBlockBare,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// zed (./.rules, plain markdown — Zed's AI rules convention)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Zed AI rules live in `.rules` at the project root (or
+// ~/.config/zed/.rules globally). Same plain-markdown shape as
+// cursor-legacy and windsurf; the marker-block convention handles
+// safe coexistence with other tools that may also write to `.rules`.
+// See https://zed.dev/docs/ai/rules. #658 wave-1 init parity.
+
+var ZedTarget = Target{
+	Name:           "zed",
+	Describe:       "Zed: ./.rules plain markdown (or ~/.config/zed/.rules with --global)",
+	SupportsGlobal: true,
+	PathFn: func(cwd string, global bool) (string, error) {
+		if global {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("user home dir: %w", err)
+			}
+			return filepath.Join(home, ".config", "zed", ".rules"), nil
+		}
+		return filepath.Join(cwd, ".rules"), nil
+	},
+	DetectFn: func(cwd string) bool {
+		// Project-level marker — `.zed/` directory or `.rules` file at
+		// the project root. Either signals the user is on Zed.
+		if _, err := os.Stat(filepath.Join(cwd, ".zed")); err == nil {
+			return true
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".rules")); err == nil {
 			return true
 		}
 		return false
