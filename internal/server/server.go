@@ -7581,8 +7581,27 @@ func (s *Server) handleStats(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	atCalls, atUsed, atSaved, _, _ := s.store.GetAllTimeSavings()
 
 	// Optional session project — populated when a root has been detected.
+	// #1024: honor the `project` arg per the schema's documented contract
+	// ("Project to include in index size breakdown. Defaults to session
+	// project."). Pre-fix the handler ignored the arg entirely; passing
+	// `project=foo` silently returned the session project's stats.
 	var proj *db.Project
-	if s.sessionID != "" {
+	var statsProjectWarning string
+	projectArg := str(args, "project")
+	if projectArg != "" {
+		if pid, err := s.resolveProjectID(projectArg); err == nil {
+			if p, _ := s.store.GetProject(pid); p != nil {
+				proj = p
+			}
+		}
+		if proj == nil {
+			statsProjectWarning = fmt.Sprintf(
+				"project %q did not resolve — falling back to session project. Call `list` to see indexed projects.",
+				projectArg,
+			)
+		}
+	}
+	if proj == nil && s.sessionID != "" {
 		if p, _ := s.store.GetProject(s.sessionID); p != nil {
 			proj = p
 		}
@@ -7660,7 +7679,15 @@ func (s *Server) handleStats(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 
 	b.WriteString("└" + strings.Repeat("─", w) + "┘")
-	return s.textResultWithMeta(b.String(), start, tool, args, 0), nil
+	// #1024: prepend the project-resolve warning so the caller sees
+	// it before the box. The text-rendered shape has no _meta.warnings
+	// channel; inlining is the simplest signal that survives the
+	// textResultWithMeta wrap.
+	out := b.String()
+	if statsProjectWarning != "" {
+		out = "warning: " + statsProjectWarning + "\n\n" + out
+	}
+	return s.textResultWithMeta(out, start, tool, args, 0), nil
 }
 
 // humanDuration formats a duration with the smallest meaningful unit for
