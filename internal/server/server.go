@@ -5659,6 +5659,39 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 				"why": "read the top result's full source + imports — the typical follow-up after a query MATCH"},
 		}
 	}
+	// #1043: ghost-extraction diagnosis on empty results. When a query
+	// returns 0 rows AND the scoped project is a ghost (substantial
+	// symbol count but 0 edges), the empty result is almost certainly
+	// the resolver failure rather than a real "no match" — every edge-
+	// traversal query against this project will look the same. Pre-fix
+	// the empty result was indistinguishable from a true empty match
+	// and the agent had no way to tell. Same family as #1040 / #1042
+	// (architecture / schema). Only runs on single-project queries
+	// (allowAllProjects=false) — cross-project queries would need a
+	// per-project check that's not worth the latency. Cheap probe:
+	// one extra GraphStats call only when rows is empty.
+	if len(rows) == 0 && projectID != "" && !allowAllProjects {
+		if symCount, edgeCount, _, _, gerr := s.store.GraphStats(projectID); gerr == nil &&
+			edgeCount == 0 && symCount >= 100 {
+			meta["diagnosis"] = fmt.Sprintf(
+				"query returned 0 rows AND the scoped project has %d symbols but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; edge-traversal queries will silently return zero rows. Use `architecture` or `doctor` for the full picture.",
+				symCount)
+			ghostSteps := []map[string]string{
+				{"tool": "architecture", "args": "{}",
+					"why": "confirm the ghost-extraction shape (langs histogram + 0 edges)"},
+				{"tool": "doctor", "args": "{}",
+					"why": "extraction_failures list may explain why the resolver phase produced no edges"},
+			}
+			// Don't clobber any existing next_steps (id-suggestion above
+			// won't fire when rows is empty, so this is safe in practice
+			// — but merge defensively for any future addition).
+			if existing, ok := meta["next_steps"].([]map[string]string); ok && len(existing) > 0 {
+				meta["next_steps"] = append(existing, ghostSteps...)
+			} else {
+				meta["next_steps"] = ghostSteps
+			}
+		}
+	}
 	data := map[string]any{
 		"columns": result.Columns,
 		"rows":    rows,
