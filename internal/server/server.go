@@ -4320,6 +4320,23 @@ func verifyEmptySearchCause(
 	}
 	if language != "" {
 		if n, err := relax(query, kind, "", corpus); err == nil && n > 0 {
+			// #902: before recommending "drop the filter entirely",
+			// check if a case-normalised form of the user's language
+			// would have matched. If so, teach the case fix — that's
+			// what the user actually meant. Dropping the filter would
+			// over-broaden to other languages and pollute results.
+			if canon := canonicalLanguageCase(language); canon != "" && canon != language {
+				if cn, cerr := relax(query, kind, canon, corpus); cerr == nil && cn > 0 {
+					return fmt.Sprintf(
+							"%d match(es) exist for %q but language=%q is the wrong case — the canonical form is %q",
+							cn, query, language, canon,
+						), []map[string]string{{
+							"tool": "search",
+							"args": nextStepArgs(map[string]any{"query": query, "language": canon}),
+							"why":  fmt.Sprintf("verified: language=%q surfaces %d match(es)", canon, cn),
+						}}, true
+				}
+			}
 			return fmt.Sprintf(
 					"%d match(es) exist for %q but language=%q excludes them — drop the language filter",
 					n, query, language,
@@ -8924,6 +8941,30 @@ func clampMinConfidence(v float64) (float64, string) {
 		return 1.0, fmt.Sprintf("min_confidence=%g clamped to 1.0 (valid range 0.0-1.0; out-of-range silently filtered every result)", v)
 	}
 	return v, ""
+}
+
+// canonicalLanguageCase (#902) returns the canonical-case spelling of
+// a known language for the case-insensitive match. Returns "" when the
+// input doesn't match any known language at all (case-insensitive) —
+// in which case the existing unknown-enum-value advisory handles it.
+// Sourced from the same language taxonomy the ast registry self-
+// registers; the list is short enough to keep inline. Update when new
+// extractors land.
+func canonicalLanguageCase(in string) string {
+	known := []string{
+		"Go", "Python", "JavaScript", "TypeScript", "Rust", "Java",
+		"Ruby", "PHP", "C", "C++", "C#", "Kotlin", "Swift", "Scala",
+		"Lua", "Zig", "Elixir", "Haskell", "Dart", "R",
+		"YAML", "JSON", "HCL", "TOML", "Bash", "Markdown", "HTML",
+		"Makefile", "Jinja2", "XML",
+	}
+	lower := strings.ToLower(in)
+	for _, k := range known {
+		if strings.ToLower(k) == lower {
+			return k
+		}
+	}
+	return ""
 }
 
 // suggestDeadCodeFloor (#896) picks the next-lower min_confidence floor
