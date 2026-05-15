@@ -3830,7 +3830,20 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 
 	sym, err := s.store.GetSymbol(id)
 	if err != nil || sym == nil {
-		return errResult(fmt.Sprintf("symbol %q not found", id)), nil
+		// #1008: context shared handleSymbol's bare not-found envelope.
+		// handleSymbol upgraded in #704; context did not. The recovery
+		// path is identical: search by short name + list as fallback
+		// when the project isn't indexed. Without next_steps, agents
+		// hit "symbol not found" on stale-but-recoverable IDs and stop.
+		return s.errResultRich(
+			fmt.Sprintf("symbol %q not found", id),
+			[]map[string]string{
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, shortNameFromID(id)),
+					"why": "id resolution failed — search by short name to recover the current ID"},
+				{"tool": "list", "args": "{}",
+					"why": "if no project matches, the right project may not be indexed"},
+			},
+		), nil
 	}
 
 	root, _ := s.resolveProjectRoot(sym.ProjectID)
