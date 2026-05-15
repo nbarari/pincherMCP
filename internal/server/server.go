@@ -3885,6 +3885,29 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// adjusted instead of silently getting a different page size than
 	// it asked for. Surfaced in _meta.warnings below.
 	var searchClampWarnings []string
+	// #953: enum-value validation for kind/language. Pre-fix a typo'd
+	// kind ("FunctionTypoKind") returned 0 rows and the diagnosis
+	// recommended "drop the kind filter" — implying the value was
+	// valid-but-selective. Same #473-family silent-quality-loss as the
+	// pinchQL typo'd-property warning. Surface a warning naming the
+	// unknown value and the canonical set so the typo is observable.
+	// canonicalKindCase / canonicalLanguageCase already handle the
+	// case-mismatch branch (#902/#910); we only warn for values that
+	// don't match any known kind/language even case-insensitively.
+	if kind != "" && canonicalKindCase(kind) == "" {
+		searchClampWarnings = append(searchClampWarnings,
+			fmt.Sprintf("kind=%q is not a known symbol kind — filter cannot match any rows. "+
+				"Valid kinds: Function, Method, Class, Interface, Type, Variable, Module, "+
+				"Constant, Field, Property, Enum, Trait, Section, Setting, Block, Resource, "+
+				"DataSource, Provider, Output, Local, Heading, Document.", kind))
+	}
+	if language != "" && canonicalLanguageCase(language) == "" {
+		searchClampWarnings = append(searchClampWarnings,
+			fmt.Sprintf("language=%q is not a known language — filter cannot match any rows. "+
+				"Valid languages: Go, Python, JavaScript, TypeScript, Rust, Java, Ruby, PHP, "+
+				"C, C++, C#, Kotlin, Swift, Scala, Lua, Zig, Elixir, Haskell, Dart, R, YAML, "+
+				"JSON, HCL, TOML, Bash, Markdown, HTML, Makefile, Jinja2, XML.", language))
+	}
 	// #935: "all" is deprecated and being removed (#106). Pre-fix
 	// the soft-redirect logged a slog.Warn line — invisible to the
 	// agent calling the tool. The agent passed corpus="all"
