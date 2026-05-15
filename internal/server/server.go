@@ -7912,13 +7912,21 @@ var pincherToolNames = []string{
 }
 
 // auditShapePattern matches the structural-audit phrasing #608
-// flagged: "(find|list|count) every <noun> (without|missing|lacking|
-// that lacks|that has no|that doesn't have|with no|with zero) ...".
-// Anchored with `\b` so partial matches don't trigger; case-insensitive
-// matching is the caller's job (input is already lowercased before
-// the regex runs).
+// flagged: "(find|list|count) [every|all|any] <noun> (without|missing|
+// lacking|that lacks|that has no|that doesn't have|with no|with zero)
+// ...". Anchored with `\b` so partial matches don't trigger; case-
+// insensitive matching is the caller's job (input is already lowercased
+// before the regex runs).
+//
+// The quantifier (every|all|any) is optional (#992): "find symbols that
+// have no test coverage" is structurally an audit query but lacked the
+// "every|all|any" prefix and pre-fix slipped through to shapeFind →
+// BM25 search of "have no", which matches nothing. The absence-phrase
+// alternation is the load-bearing audit signal; without it the regex
+// can't match, so dropping the quantifier doesn't catch generic
+// "find the X" phrasings (no absence word → no match).
 var auditShapePattern = regexp.MustCompile(
-	`\b(find|list|count|show|surface) (every|all|any) \w+( \w+){0,3}?` +
+	`\b(find|list|count|show|surface) (?:(every|all|any) )?\w+( \w+){0,3}?` +
 		` (without|missing|lacking|lacks|has no|have no|doesn't have|does not have|with no|with zero|where there's no)\b`,
 )
 

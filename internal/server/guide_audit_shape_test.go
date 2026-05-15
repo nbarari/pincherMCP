@@ -60,6 +60,30 @@ func TestClassifyTaskShape_AuditEveryWithoutPattern(t *testing.T) {
 	}
 }
 
+// #992: tasks that name an audited noun directly ("find symbols that
+// have no test coverage") were dropping to shapeFind because the regex
+// required the `every|all|any` quantifier. The absence phrase is the
+// load-bearing audit signal — the quantifier is optional.
+func TestClassifyTaskShape_AuditWithoutQuantifier(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"find symbols that have no test coverage",
+		"list functions without docstrings",
+		"find handlers missing error returns",
+		"surface migrations without rollback",
+		"find tests with no assertions",
+		"show methods that doesn't have a receiver",
+	}
+	for _, task := range cases {
+		t.Run(task, func(t *testing.T) {
+			got := classifyTaskShape(task)
+			if got != shapeAudit {
+				t.Errorf("classifyTaskShape(%q) = %v, want shapeAudit", task, got)
+			}
+		})
+	}
+}
+
 func TestClassifyTaskShape_AuditDoesNotOvercatch(t *testing.T) {
 	t.Parallel()
 	// Generic find / understand tasks should NOT fall into shapeAudit.
