@@ -7278,6 +7278,26 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 		}
 		data["_meta"] = meta
 	}
+	// #1034: pagination-overshoot diagnosis. When total > 0 but the
+	// caller's offset paged past the end, the response had a bare
+	// `returned: 0` with no signal the offset was the cause. Agents
+	// reading `count: 18, returned: 0` couldn't tell whether the
+	// query genuinely matched nothing or they'd just overshot the
+	// page window. Same shape as #1033 for search.
+	if total > 0 && offset >= total {
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["diagnosis"] = fmt.Sprintf(
+			"offset=%d is past the end of the result set (total=%d after filters) — pagination overshoot. Pass offset=0 (or omit) to start at the top.",
+			offset, total)
+		meta["next_steps"] = []map[string]string{
+			{"tool": "list", "args": "{}",
+				"why": fmt.Sprintf("retry without offset — %d project(s) match the current filters at offset=0", total)},
+		}
+		data["_meta"] = meta
+	}
 	// Empty-state guidance — first-contact agents (fresh install,
 	// no projects yet) need to know the next step is `index`. A bare
 	// `count: 0` is silent failure: the index is real and queryable,
