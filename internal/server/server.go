@@ -7551,6 +7551,14 @@ var auditAdjectivePattern = regexp.MustCompile(
 // distinctive enough to stay plain substring checks.
 var refactorExtractWord = regexp.MustCompile(`\bextract\b`)
 
+// reviewDiffWord (#937) word-bounds the "diff" review keyword so it
+// doesn't substring-match "difference" / "different" / "differentiate".
+// Same pattern as refactorExtractWord — bare `contains("diff")`
+// caught "what's the difference between symbol and context" and
+// routed it to shapeReview, recommending `changes` for a meta
+// question about pincher's own tool surface.
+var reviewDiffWord = regexp.MustCompile(`\bdiff\b`)
+
 // classifyTaskShape inspects a task description and returns the most
 // likely intent. Keyword-based heuristic — no parsing or NLP. Order
 // matters: the first matching shape wins because some keywords
@@ -7628,7 +7636,13 @@ func classifyTaskShape(task string) guideShape {
 		return shapeAudit
 	case contains("test", "spec ", "coverage"):
 		return shapeTest
-	case contains("review", "diff", "before commit", "blast radius", "pre-commit", "impact"):
+	// #937: "diff" word-bounded so it doesn't substring-match
+	// "difference" / "different" / "differentiate" — meta questions
+	// about pincher's own tool surface ("what's the difference between
+	// symbol and context") used to misroute to shapeReview and
+	// recommend the `changes` tool.
+	case contains("review", "before commit", "blast radius", "pre-commit", "impact") ||
+		reviewDiffWord.MatchString(t):
 		return shapeReview
 	// #784: shapeRefactor runs before shapeFix. "refactor"/"rename"/
 	// "restructure"/"extract" are explicit leading-verb intent signals;
