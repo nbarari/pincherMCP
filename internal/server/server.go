@@ -4129,6 +4129,15 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		allFields["language"] = r.Symbol.Language
 		allFields["file_path"] = r.Symbol.FilePath
 		allFields["start_line"] = r.Symbol.StartLine
+		// #947: end_line / start_byte / end_byte were silently dropped
+		// from search results. Agents reading a result couldn't compute
+		// the symbol's line range or byte span without a follow-up
+		// `symbol` call, defeating the "search returns enough to answer
+		// in one shot" contract. neighborhood / symbol / symbols all
+		// surface these; search now matches.
+		allFields["end_line"] = r.Symbol.EndLine
+		allFields["start_byte"] = r.Symbol.StartByte
+		allFields["end_byte"] = r.Symbol.EndByte
 		allFields["signature"] = r.Symbol.Signature
 		allFields["score"] = r.Score
 		allFields["extraction_confidence"] = r.Symbol.ExtractionConfidence
