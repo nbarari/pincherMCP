@@ -37,6 +37,34 @@ func TestErrResultRich_IdleIndexer_NoInProgressFlag(t *testing.T) {
 	}
 }
 
+// #993: when files_done == files_total the per-file walk has finished
+// but cross-file resolvers are still running. The warning must say
+// "finalizing", not the misleading "mid-pass (55/55 files)".
+func TestErrResultRich_FilesAllDone_SaysFinalizingNotMidPass(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+	srv.sessionID = "p993-final"
+	srv.indexer.MarkActiveForTest("p993-final", 55, 55)
+	t.Cleanup(func() { srv.indexer.UnmarkActiveForTest("p993-final") })
+
+	res := srv.errResultRich("symbol not found", []map[string]string{{
+		"tool": "search", "args": `{"query":"X"}`, "why": "look by name",
+	}})
+	body := decode(t, res)
+	meta, _ := body["_meta"].(map[string]any)
+	warnings, _ := meta["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatal("expected a warning when indexer is active")
+	}
+	warn, _ := warnings[0].(string)
+	if strings.Contains(warn, "mid-pass") {
+		t.Errorf("warning at files_done==files_total must NOT say 'mid-pass'; got %q", warn)
+	}
+	if !strings.Contains(warn, "finalizing") {
+		t.Errorf("warning at files_done==files_total should say 'finalizing'; got %q", warn)
+	}
+}
+
 func TestErrResultRich_ActiveIndexer_EmitsInProgressFlag(t *testing.T) {
 	t.Parallel()
 	srv, _, _ := newTestServer(t)

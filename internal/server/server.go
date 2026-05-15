@@ -9092,6 +9092,13 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// retry once the pass completes. Cheap probe: GetProgress reads
 	// in-memory atomic counters, no DB hit. Stamped only when
 	// genuinely active so quiet calls don't pay the field weight.
+	//
+	// #993: phase the warning so files_done==files_total doesn't read
+	// "mid-pass (55/55 files)" — the per-file walk has finished but the
+	// cross-file resolvers (resolveImports/resolveCalls/resolveReads)
+	// are still running. Pre-fix the text said "mid-pass" with both
+	// counters equal, conflicting with what the numbers show; agents
+	// see 100% file completion and an alarming "retry" suggestion.
 	if s.indexer != nil && s.sessionID != "" {
 		if done, total, active := s.indexer.GetProgress(s.sessionID); active {
 			meta["index_in_progress"] = map[string]any{
@@ -9099,9 +9106,15 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 				"files_total": total,
 			}
 			existing, _ := meta["warnings"].([]string)
-			meta["warnings"] = append(existing,
-				fmt.Sprintf("indexer is mid-pass (%d/%d files); results may be incomplete — retry after the pass completes",
-					done, total))
+			var warnText string
+			if total > 0 && done >= total {
+				warnText = fmt.Sprintf("indexer is finalizing (cross-file resolver running after %d/%d files extracted); results may still be incomplete — retry in a few seconds",
+					done, total)
+			} else {
+				warnText = fmt.Sprintf("indexer is mid-pass (%d/%d files); results may be incomplete — retry after the pass completes",
+					done, total)
+			}
+			meta["warnings"] = append(existing, warnText)
 		}
 	}
 
@@ -9447,10 +9460,18 @@ func (s *Server) errResultRich(msg string, nextSteps []map[string]string) *mcp.C
 				"files_done":  done,
 				"files_total": total,
 			}
-			meta["warnings"] = []string{
-				fmt.Sprintf("indexer is mid-pass (%d/%d files); result may be transient — retry after the pass completes",
-					done, total),
+			// #993: phase the warning so files_done==files_total doesn't
+			// read "mid-pass (55/55 files)" — the per-file walk has
+			// finished but the cross-file resolvers are still running.
+			var warnText string
+			if total > 0 && done >= total {
+				warnText = fmt.Sprintf("indexer is finalizing (cross-file resolver running after %d/%d files extracted); result may be transient — retry in a few seconds",
+					done, total)
+			} else {
+				warnText = fmt.Sprintf("indexer is mid-pass (%d/%d files); result may be transient — retry after the pass completes",
+					done, total)
 			}
+			meta["warnings"] = []string{warnText}
 			nextSteps = append([]map[string]string{{
 				"tool":  "index",
 				"args":  `{}`,
