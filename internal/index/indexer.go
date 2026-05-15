@@ -925,12 +925,22 @@ func (idx *Indexer) Watch(ctx context.Context) {
 			}
 			for _, p := range projects {
 				changed := idx.changedFiles(p)
-				if len(changed) == 0 {
+				// #972: a binary swap (supervisor auto-restart) changes
+				// idx.binaryVersion but no source file mtimes, so the
+				// changedFiles path alone never triggers the
+				// binaryDriftForce branch inside Index(). The new
+				// binary keeps serving old-binary extraction quality
+				// until the user happens to save a file. Force the
+				// reindex when the binary stamped on the project
+				// differs from the running binary.
+				binaryDrifted := p.BinaryVersion != "" && idx.binaryVersion != "" && p.BinaryVersion != idx.binaryVersion
+				if len(changed) == 0 && !binaryDrifted {
 					continue
 				}
 				slog.Debug("pincher.watcher.reindex",
 					"project", p.Name,
-					"changed_files", len(changed))
+					"changed_files", len(changed),
+					"binary_drifted", binaryDrifted)
 				// #427 (partial): clear file_hash on direct referencers
 				// of any changed file so they re-extract and their
 				// deferred CALLS / IMPORTS / READS feed resolveCalls

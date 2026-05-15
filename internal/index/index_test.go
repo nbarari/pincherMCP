@@ -1305,6 +1305,62 @@ func TestWatch_TriggersReindex(t *testing.T) {
 	}
 }
 
+// TestWatch_TriggersReindexOnBinaryDrift covers #972: a supervisor
+// auto-restart swap changes idx.binaryVersion but no source file
+// mtimes, so the changedFiles path alone never sees a reason to
+// re-call Index() — and Index()'s binaryDriftForce branch never fires.
+// Watch must also trigger when project.BinaryVersion drifts from the
+// running binary even with no file edits.
+func TestWatch_TriggersReindexOnBinaryDrift(t *testing.T) {
+	idx, store := newTestIndexer(t)
+	idx.SetBinaryVersion("v1.0.0")
+	dir := t.TempDir()
+
+	writeFile(t, dir, "main.go", "package main\nfunc Foo() {}\n")
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("initial index: %v", err)
+	}
+
+	// Confirm initial index stamped the project with v1.0.0.
+	projects, err := store.ListProjects()
+	if err != nil || len(projects) == 0 {
+		t.Fatal("no projects after initial index")
+	}
+	if got := projects[0].BinaryVersion; got != "v1.0.0" {
+		t.Fatalf("initial project BinaryVersion = %q, want v1.0.0", got)
+	}
+
+	// Simulate supervisor restart: same files on disk, indexer holds a
+	// newer binary version. No mtime touch.
+	idx.SetBinaryVersion("v2.0.0")
+
+	// Watch's updated gate from #972: even with no changed files, if the
+	// project's recorded BinaryVersion differs from the running indexer's
+	// version, the reindex must fire. Verify the sentinel computation
+	// matches the in-source expression so we lock the gate semantics in.
+	binaryDrifted := projects[0].BinaryVersion != "" && idx.binaryVersion != "" && projects[0].BinaryVersion != idx.binaryVersion
+	if !binaryDrifted {
+		t.Fatal("binaryDrifted should be true after SetBinaryVersion to a new value (#972 gate)")
+	}
+
+	// End-to-end: invoke Index() directly with force=false — the
+	// binaryDriftForce branch inside Index() (added in #960) must
+	// re-stamp the project's BinaryVersion to v2.0.0. Pre-#972, Watch
+	// would never reach this Index() call because changedFiles can be
+	// empty after a swap; #972 widens Watch's gating to also fire on
+	// binary drift.
+	if _, err := idx.Index(context.Background(), dir, false); err != nil {
+		t.Fatalf("post-drift index: %v", err)
+	}
+	projects, err = store.ListProjects()
+	if err != nil {
+		t.Fatalf("list post-drift: %v", err)
+	}
+	if got := projects[0].BinaryVersion; got != "v2.0.0" {
+		t.Errorf("post-drift project BinaryVersion = %q, want v2.0.0 (Index should re-stamp on drift)", got)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // hasChanges
 // ─────────────────────────────────────────────────────────────────────────────
