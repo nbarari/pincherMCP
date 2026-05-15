@@ -7324,8 +7324,20 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 
 	// Resolve project — optional; health without a project still returns schema version + db path.
 	projectID := ""
+	var projectResolveWarning string
 	if pid, err := s.resolveProjectID(projectArg); err == nil {
 		projectID = pid
+	} else if projectArg != "" {
+		// #1023: caller passed a project name but it didn't resolve.
+		// Pre-fix the handler silently degraded to "no project" state,
+		// returning the minimal {schema_version, db_path} envelope with
+		// no signal the typo'd / not-yet-indexed project was the cause.
+		// Surface it via _meta.warnings so the caller sees what
+		// actually happened.
+		projectResolveWarning = fmt.Sprintf(
+			"project %q did not resolve — falling back to global view (schema/db_path only). Call `list` to see indexed projects or `index path=...` to index it.",
+			projectArg,
+		)
 	}
 
 	report, err := s.store.HealthCheck(projectID)
@@ -7364,6 +7376,13 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 	data := map[string]any{
 		"schema_version": report.SchemaVersion,
 		"db_path":        report.DBPath,
+	}
+
+	// #1023: emit the unresolved-project warning early so it lands in
+	// _meta.warnings regardless of which later block populates _meta
+	// (next_steps, binary_stale, auto-restart drift).
+	if projectResolveWarning != "" {
+		attachWarning(data, projectResolveWarning)
 	}
 
 	// #278: stale-binary detection. If a newer pincher.exe landed on
@@ -7444,8 +7463,16 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 			"why":  "binary_version drift — re-index to refresh resolution-dependent edges so trace results stay accurate",
 		}}, steps...)
 	}
+	// #1023: merge next_steps into existing _meta (same shape of bug
+	// as #1020/#1021) so any warning the projectResolveWarning block
+	// above attached survives the next_step augmentation.
 	if len(steps) > 0 {
-		data["_meta"] = map[string]any{"next_steps": steps}
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["next_steps"] = steps
+		data["_meta"] = meta
 	}
 
 	// #352: when PINCHER_AUTO_RESTART_ON_DRIFT=1 is set AND the on-disk
