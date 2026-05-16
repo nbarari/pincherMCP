@@ -3143,6 +3143,14 @@ func (s *Server) unknownArgs(tool string, args map[string]any) []string {
 		if k == "verbose" {
 			continue
 		}
+		// #1227: `meta` is the second universal meta-arg ('full' default
+		// or 'lite' — drops dogfood-only envelope fields like
+		// capabilities, baseline_method, complexity_tier, tokens_*).
+		// Setting PINCHER_META=lite on the MCP child's env achieves the
+		// same effect globally without per-call discipline.
+		if k == "meta" {
+			continue
+		}
 		if !allowed[k] {
 			// Build a sorted hint of accepted keys so the warning is
 			// actionable (agent can self-correct on the next call).
@@ -10881,6 +10889,16 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 		existing, _ := meta["warnings"].([]string)
 		meta["warnings"] = append(existing, w...)
 	}
+	// #1227: prune dogfood-only fields when the caller requested
+	// the lite envelope (env or per-call arg). Applied last so the
+	// pruning catches everything just-added (capabilities, tokens_*,
+	// complexity_tier, baseline_method). Note: stats-accumulation
+	// uses tokensUsed locally BEFORE this prune, so session-level
+	// metrics stay honest even when individual responses don't carry
+	// the field.
+	if isLiteMeta(args) {
+		applyLiteMeta(meta)
+	}
 	// #619: prose `savings:` line dropped. The structured fields
 	// (tokens_saved + tokens_saved_pct) carry the same information in
 	// a form clients can render however they like — dashboard renders
@@ -11187,6 +11205,42 @@ func marshalMetaJSON(data any) []byte {
 	}
 	b, _ := json.Marshal(data)
 	return b
+}
+
+// #1227: lite envelope mode. Triggered by EITHER:
+//   - PINCHER_META=lite env on the MCP child (sticky for the session,
+//     ideal for thin-client deployments like Cursor/Continue/Claude
+//     Desktop), OR
+//   - per-call meta=lite arg (per-call escape hatch from the default,
+//     useful when a dogfood probe wants the full envelope in a mostly-
+//     thin-client session)
+//
+// When lite, applyLiteMeta drops the dogfood-only fields from the
+// already-built _meta map. Keeps the actionable / debug primitives:
+// latency_ms, request_id, warnings, diagnosis, next_steps, index_in_
+// progress. Per-call cost reduction: ~150-200 tokens off every
+// response.
+func isLiteMeta(args map[string]any) bool {
+	if v, _ := args["meta"].(string); v == "lite" {
+		return true
+	}
+	if os.Getenv("PINCHER_META") == "lite" {
+		return true
+	}
+	return false
+}
+
+func applyLiteMeta(meta map[string]any) {
+	for _, k := range []string{
+		"capabilities",
+		"baseline_method",
+		"complexity_tier",
+		"tokens_used",
+		"tokens_saved",
+		"tokens_saved_pct",
+	} {
+		delete(meta, k)
+	}
 }
 
 // shortNameFromID extracts the bare name from a symbol ID for use in
