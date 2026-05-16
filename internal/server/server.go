@@ -7482,6 +7482,28 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 			"next_steps": nextSteps,
 		}
 	}
+	// #1067: ratio-class ghost-extraction warning. The #1040 diagnosis
+	// only fires when BOTH hotspots and entry-points are empty AND
+	// edgeCount == 0 — a strict gate that misses projects with a tiny
+	// resolver-output residue (e.g. fools-gold-pirate at 11181 syms /
+	// 9 edges produces 6 hotspots from one Python file, so the strict
+	// gate skips it). Same shape as the #1010 extension to doctor's
+	// ghost-advisory: pick up projects where the ratio is two orders
+	// of magnitude below the lowest observed healthy value. Attached
+	// as a warning (not a hard diagnosis) so the normal next_steps
+	// (top hotspot / first entry point) still surface — agents can
+	// continue working with what the graph does contain, but with a
+	// loud signal that most of the corpus has no inbound edges.
+	if p != nil {
+		const ratioThreshold = 0.001
+		const symThreshold = 1000
+		if p.SymCount >= symThreshold && p.EdgeCount > 0 &&
+			float64(p.EdgeCount)/float64(p.SymCount) < ratioThreshold {
+			attachWarning(data, fmt.Sprintf(
+				"project has %d symbols and %d edges — ratio %.6f, well below the healthy floor of ~0.01 (ghost-extraction signature, #815). Hotspots / entry-points reflect the small subset that did resolve; the bulk of the corpus has no inbound edges. Force a re-index, then check `doctor`'s extraction_failures if the ratio doesn't improve.",
+				p.SymCount, p.EdgeCount, float64(p.EdgeCount)/float64(p.SymCount)))
+		}
+	}
 	// Architecture is a metadata-only response — file/symbol/edge counts,
 	// language histogram, hotspot symbol names. There is no file-read
 	// alternative an agent would have used instead, so the savings
