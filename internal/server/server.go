@@ -4437,6 +4437,27 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 				"To search config/docs, call search once per corpus (code/config/docs).")
 		corpus = ""
 	}
+	// #1065: validate corpus upfront with a rich envelope. Pre-fix an
+	// unknown corpus value (e.g. corpus="cdoe" or "code,docs") fell
+	// through to corpusVtab in the DB layer, which returned a bare
+	// `unknown corpus "x" (valid: "", "code", "config", "docs")`
+	// wrapped in handleSearch's catch-all "search error: ...". No
+	// next_steps, no _meta envelope — same silent-confidently-wrong
+	// shape #1063/#1064 closed for project-not-found.
+	if corpus != "" && corpus != db.CorpusCode && corpus != db.CorpusConfig && corpus != db.CorpusDocs {
+		return s.errResultRich(
+			fmt.Sprintf("corpus=%q is not a known corpus — valid: \"code\", \"config\", \"docs\" (or omit to search code with fallthrough)", corpus),
+			[]map[string]string{
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, query),
+					"why": "omit corpus to search code first, then fall through to config/docs"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"corpus":"code"}`, query),
+					"why": "explicit code corpus — source files (Go, Python, Rust, etc.)"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"corpus":"config"}`, query),
+					"why": "config corpus — YAML, TOML, HCL, JSON settings"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"corpus":"docs"}`, query),
+					"why": "docs corpus — Markdown headings + fetched documents"},
+			}), nil
+	}
 	rawLimit := limit
 	// #532: cap limit at 500. Pre-cap a caller asking for limit=10000 would
 	// pin a goroutine on FTS5 + the projection loop. Server-side cap also
