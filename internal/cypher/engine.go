@@ -1734,6 +1734,21 @@ func (p *parser) parseQuery() (*queryAST, error) {
 					"pinchQL: %q is a Cypher write keyword — pinchQL is read-only and supports MATCH/WHERE/RETURN/ORDER BY/LIMIT only. To modify the graph, re-extract (run the `index` tool with force=true)",
 					bad)
 			}
+			// #1118: comma-separated patterns in a single MATCH
+			// (`MATCH (a:Function), (b:Function) WHERE ...`) are
+			// Cypher's syntax for joining disconnected patterns. pinchQL
+			// supports only one pattern per MATCH and one MATCH per
+			// query (#871). Pre-fix this hit the generic "unexpected
+			// token ','" error pointing at WHERE/RETURN, which reads
+			// as a syntax bug to fix — the real story is the
+			// multi-pattern shape isn't supported. Name the coverage
+			// gap and point at the workaround.
+			if bad == "," {
+				return nil, fmt.Errorf(
+					"pinchQL: comma-separated patterns in MATCH (e.g. `MATCH (a), (b) WHERE ...`) are not supported. " +
+						"For two independent matches, run two separate query calls and combine the results client-side. " +
+						"For a join, use the edge form: `MATCH (a)-[:CALLS]->(b) WHERE ...`")
+			}
 			if kw := nearestClauseKeyword(bad); kw != "" {
 				return nil, fmt.Errorf(
 					"pinchQL: unexpected token %q — did you mean %q? expected a clause keyword (WHERE, RETURN, ORDER BY, LIMIT) at this position",
