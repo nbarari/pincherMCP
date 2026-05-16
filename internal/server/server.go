@@ -7076,9 +7076,24 @@ func firstCodeSymbolName(syms []map[string]any) string {
 // dominant language does have resolution — i.e. whenever an empty graph
 // result is genuinely meaningful. Best-effort: any DB error → "".
 func (s *Server) edgeCoverageGap(projectID string) string {
+	lang, ok := s.edgeGraphEmptyForLanguage(projectID)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("This project is predominantly %s. Cross-file edge resolution currently covers Go and Python only (#858) — trace and dead_code return empty results here because the edge graph itself is empty, not because there are no callers / no dead code. Use search and neighborhood for %s navigation.", lang, lang)
+}
+
+// edgeGraphEmptyForLanguage is the language-aware probe behind
+// edgeCoverageGap (#1145). Returns (dominantLang, true) when the
+// project has symbols but zero edges AND the dominant language is one
+// of the ones pincher cannot resolve edges for. Returns ("", false)
+// otherwise. Used by tools that want to format their own honesty
+// message rather than reusing edgeCoverageGap's trace/dead_code-
+// specific wording.
+func (s *Server) edgeGraphEmptyForLanguage(projectID string) (string, bool) {
 	symCount, edgeCount, _, _, err := s.store.GraphStats(projectID)
 	if err != nil || symCount == 0 || edgeCount > 0 {
-		return ""
+		return "", false
 	}
 	var lang string
 	var cnt int
@@ -7086,15 +7101,15 @@ func (s *Server) edgeCoverageGap(projectID string) string {
 		`SELECT language, COUNT(*) c FROM symbols WHERE project_id=? GROUP BY language ORDER BY c DESC LIMIT 1`,
 		projectID)
 	if err := row.Scan(&lang, &cnt); err != nil || lang == "" {
-		return ""
+		return "", false
 	}
 	switch lang {
 	case "Go", "Python":
 		// These have cross-file edge resolution — a zero-edge graph
 		// here is a real finding, not a coverage gap.
-		return ""
+		return "", false
 	}
-	return fmt.Sprintf("This project is predominantly %s. Cross-file edge resolution currently covers Go and Python only (#858) — trace and dead_code return empty results here because the edge graph itself is empty, not because there are no callers / no dead code. Use search and neighborhood for %s navigation.", lang, lang)
+	return lang, true
 }
 
 func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

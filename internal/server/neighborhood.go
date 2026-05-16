@@ -351,6 +351,23 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 		existing, _ := meta["warnings"].([]string)
 		meta["warnings"] = append(existing, clampWarnings...)
 	}
+	// #1145 (extends #858 honesty surface): when the project's edge
+	// graph is empty because its dominant language has no cross-file
+	// resolution, neighborhood returns same-file siblings only —
+	// which can read like "this symbol is a leaf in the graph." Flag
+	// the actual cause so the agent knows the file-scope view is the
+	// complete picture, not a degenerate slice of a larger graph.
+	if lang, gap := s.edgeGraphEmptyForLanguage(projectID); gap {
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+			data["_meta"] = meta
+		}
+		existing, _ := meta["warnings"].([]string)
+		meta["warnings"] = append(existing, fmt.Sprintf(
+			"This project is predominantly %s and its cross-file edge graph is empty (Go/Python only have edge resolution; tracked in #858). The %d same-file neighbors above are the complete structural view available — there is no graph-traversal layer to expand into.",
+			lang, totalNeighbors))
+	}
 	return s.jsonResultWithMeta(data, start, tool, args, tokensSaved), nil
 }
 
