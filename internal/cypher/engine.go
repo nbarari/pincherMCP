@@ -480,7 +480,7 @@ func collectCrossColumnWarnings(q *queryAST) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
 		out = append(out, fmt.Sprintf(
-			"column-vs-column comparison %q is not supported in pinchQL — predicate ignored (returns false). Use literal values on the RHS, or post-filter the result set in your client.",
+			"column-vs-column comparison %q is not supported in pinchQL — predicate dropped (treated as always-true). The remaining WHERE clauses still apply. Use literal values on the RHS, or post-filter the result set in your client.",
 			n))
 	}
 	return out
@@ -4433,14 +4433,24 @@ func matchesConditionsWithCache(row map[string]any, conds []condition, reCache m
 // evalCondition returns true iff the row satisfies the un-negated form
 // of c. Caller XORs with c.negated for #354 NOT semantics.
 func evalCondition(row map[string]any, c condition, reCache map[string]*regexp.Regexp) bool {
-	// #593: column-vs-column comparisons are unsupported. Return false
-	// so the predicate filters everything out — consistent with the
-	// #473 "unknown property → 0 rows + warning" handling. Without
-	// this the comparison silently evaluates to true (RHS treated as
-	// a literal that doesn't match any column value), inflating the
-	// result set and confusing the agent.
+	// #593 + #1217 v0.66 DOGFOOD: column-vs-column comparisons are
+	// unsupported. The warning emitted by collectCrossColumnWarnings
+	// names them as "predicate ignored" — and "ignored" must mean
+	// stripped (no-op), not "evaluates to false". Returning false
+	// here turned a WHERE x AND y conjunction into WHERE x AND false
+	// → 0 rows, silently dropping ALL legitimate matches of the
+	// sibling predicates. Same silent-confidently-wrong family as
+	// v0.59's pinchQL warning drain.
+	//
+	// Pre-#1217 the comment claimed return-false was "consistent
+	// with #473 unknown-property → 0 rows," but those cases are
+	// different: unknown-property is a user error (return 0 so they
+	// notice). Column-vs-column is a well-formed but unsupported
+	// predicate (ignore and proceed). Returning true here is what
+	// "ignored" actually means; the warning surface tells the
+	// caller the predicate didn't run.
 	if c.rhsProperty != "" {
-		return false
+		return true
 	}
 	key := c.variable + "." + c.property
 	actual := fmt.Sprint(row[key])
