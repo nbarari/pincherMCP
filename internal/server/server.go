@@ -9035,7 +9035,7 @@ var pincherToolNames = []string{
 // can't match, so dropping the quantifier doesn't catch generic
 // "find the X" phrasings (no absence word → no match).
 var auditShapePattern = regexp.MustCompile(
-	`\b(find|list|count|show|surface) (?:(every|all|any) )?\w+( \w+){0,3}?` +
+	`\b(find|list|count|show|surface) (?:(every|all|any) )?\w+( \w+){0,8}?` +
 		` (without|missing|lacking|lacks|has no|have no|with no|with zero|where there's no|` +
 		// #1012: "doesn't <verb>" / "don't <verb>" / "does not <verb>" /
 		// "do not <verb>" is the same absence-signal as "doesn't have",
@@ -9045,6 +9045,16 @@ var auditShapePattern = regexp.MustCompile(
 		// return an error" fell through to shapeTest / shapeFix instead
 		// of the audit query path. The trailing \w+ anchors a real verb,
 		// not a bare "doesn't" / "don't".
+		// #1114: bumped the intervening-word limit from {0,3} to {0,8}.
+		// The lazy-quantifier {0,3}? bottomed out at 4 trailing words
+		// (3 + the initial \w+), too tight for natural phrasings like
+		// "find handlers in this codebase that don't have a test" (5
+		// words between noun and absence verb). 8 covers the natural-
+		// prose tail ("surface methods declared in the auth module that
+		// are missing a test" — 7 intervening words) without over-
+		// catching unrelated phrases: the absence-word alternation is
+		// the load-bearing audit signal, so without it the regex can't
+		// match regardless of intervening-word slack.
 		`doesn't \w+|does not \w+|don't \w+|do not \w+)\b`,
 )
 
