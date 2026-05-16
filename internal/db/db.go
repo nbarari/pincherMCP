@@ -399,6 +399,34 @@ func (s *Store) Vacuum() (VacuumResult, error) {
 	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return res, err
 	}
+	// #1219 step 3: PRAGMA optimize — re-analyzes table stats so the
+	// query planner picks good indexes on subsequent queries. Cheap,
+	// idempotent; recommended after any bulk delete/insert. We just
+	// rewrote the entire file via VACUUM, so the planner's prior stats
+	// are stale by definition.
+	if _, err := s.db.Exec("PRAGMA optimize"); err != nil {
+		// Optimize is advisory — fail soft and let the vacuum win
+		// stand. Surface via a separate field so the CLI can mention
+		// it in the receipt if a user asks why their queries are
+		// still slow post-vacuum.
+		res.OptimizeError = err.Error()
+	}
+	// #1219 step 4: FTS5 inverted-index compaction. Each per-corpus
+	// vtab maintains its own segment list; long-running indexers
+	// accumulate fragments that slow BM25 ranking and bloat the index
+	// pages on disk. The 'optimize' command merges segments down. Run
+	// once per FTS5 vtab — there are three (code/config/docs split,
+	// #106 v12 migration). Failures here are also advisory.
+	for _, vtab := range []string{"symbols_code_fts", "symbols_config_fts", "symbols_docs_fts"} {
+		stmt := fmt.Sprintf("INSERT INTO %s(%s) VALUES('optimize')", vtab, vtab)
+		if _, err := s.db.Exec(stmt); err != nil {
+			if res.FTSOptimizeError == "" {
+				res.FTSOptimizeError = fmt.Sprintf("%s: %v", vtab, err)
+			} else {
+				res.FTSOptimizeError += fmt.Sprintf("; %s: %v", vtab, err)
+			}
+		}
+	}
 	return res, nil
 }
 
@@ -407,8 +435,16 @@ func (s *Store) Vacuum() (VacuumResult, error) {
 // #1149 signal: an open reader pinned the freelist pages VACUUM would
 // have reclaimed; advise the user to close the running MCP child (or
 // retry post-/mcp-reconnect) and re-vacuum.
+//
+// OptimizeError + FTSOptimizeError are advisory: the post-VACUUM
+// PRAGMA optimize and per-vtab FTS5 'optimize' calls (#1219 steps
+// 3-4) are best-effort. If they fail, the load-bearing VACUUM has
+// already happened — the caller should know about the failure but
+// not treat it as a vacuum failure.
 type VacuumResult struct {
-	WalReaderBusy bool
+	WalReaderBusy    bool
+	OptimizeError    string
+	FTSOptimizeError string
 }
 
 // RebuildFTS drops every per-corpus FTS5 vtab (`symbols_code_fts` /

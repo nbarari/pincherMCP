@@ -78,6 +78,17 @@ func runVacuumCLI(args []string) {
 		if walAdvisory != "" {
 			payload["advisory"] = walAdvisory
 		}
+		// #1219 steps 3-4: post-VACUUM PRAGMA optimize + per-vtab
+		// FTS5 'optimize' are advisory. Surface failures so users
+		// know why subsequent query plans might still be stale
+		// without treating the run as a failure (the load-bearing
+		// VACUUM landed).
+		if vacRes.OptimizeError != "" {
+			payload["optimize_error"] = vacRes.OptimizeError
+		}
+		if vacRes.FTSOptimizeError != "" {
+			payload["fts_optimize_error"] = vacRes.FTSOptimizeError
+		}
 		_ = enc.Encode(payload)
 		return
 	}
@@ -85,6 +96,12 @@ func runVacuumCLI(args []string) {
 		store.Path, humanBytes(before), humanBytes(after), humanBytes(reclaimed))
 	if walAdvisory != "" {
 		fmt.Fprintf(os.Stdout, "\nNote: %s\n", walAdvisory)
+	}
+	if vacRes.OptimizeError != "" {
+		fmt.Fprintf(os.Stdout, "\nWarning: PRAGMA optimize failed (advisory, not vacuum failure): %s\n", vacRes.OptimizeError)
+	}
+	if vacRes.FTSOptimizeError != "" {
+		fmt.Fprintf(os.Stdout, "\nWarning: FTS5 'optimize' failed (advisory, not vacuum failure): %s\n", vacRes.FTSOptimizeError)
 	}
 }
 
