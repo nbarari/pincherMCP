@@ -450,6 +450,10 @@
     "description": "**Use after `search`** to read one symbol's source by stable ID. O(1) byte-offset seeking — never re-parses the file. ID format: `{file_path}::{qualified_name}#{kind}`. **IDs survive file renames/moves** — when the caller's ID no longer resolves directly, the handler auto-redirects via the `symbol_moves` table populated at index time, so a cached ID from a prior session keeps working after `git mv`. **Prefer `context`** when you also need the symbol's dependencies, or **`symbols`** for batching multiple lookups (one round trip instead of N). Pass `fields` (comma-separated) to project specific keys and skip the source disk read when not needed.",
     "input_schema": {
       "properties": {
+        "cross_project": {
+          "description": "#1232 opt-in: when the requested ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning the other project's row. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly.",
+          "type": "boolean"
+        },
         "fields": {
           "description": "Comma-separated allow-list of response keys (e.g. 'id,signature'). Omit for all fields. Skipping 'source' avoids the byte-offset disk read.",
           "type": "string"

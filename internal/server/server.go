@@ -3189,7 +3189,8 @@ func (s *Server) registerTools() {
 			"type":"object","required":["id"],"properties":{
 				"id":{"type":"string","description":"Stable symbol ID. Format: '{file_path}::{qualified_name}#{kind}'"},
 				"project":{"type":"string","description":"Project name or ID. Defaults to session project."},
-				"fields":{"type":"string","description":"Comma-separated allow-list of response keys (e.g. 'id,signature'). Omit for all fields. Skipping 'source' avoids the byte-offset disk read."}
+				"fields":{"type":"string","description":"Comma-separated allow-list of response keys (e.g. 'id,signature'). Omit for all fields. Skipping 'source' avoids the byte-offset disk read."},
+				"cross_project":{"type":"boolean","description":"#1232 opt-in: when the requested ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning the other project's row. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly."}
 			}
 		}`),
 	}, s.handleSymbol)
@@ -3666,6 +3667,15 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	projectArg := str(args, "project")
 	fieldsArg := str(args, "fields")
+	// #1232: opt-in to the legacy silent-cross-project-fallback
+	// behaviour. Pre-#1232, when projectArg was omitted AND the ID
+	// happened to resolve in some indexed project other than the
+	// session project, the handler returned that other project's
+	// data with a warning string. Agents that don't parse warnings
+	// got data from a stale mirror with no programmatic signal.
+	// Default is now to error with both fix actions in next_steps.
+	// Pass cross_project=true to opt back into the legacy shape.
+	crossProjectAllowed := boolArg(args, "cross_project")
 
 	// Resolve the requested project up front so the symbol lookup can be
 	// scoped (#2). Without scoping, two indexed projects with a colliding
@@ -3757,24 +3767,44 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if resolvedProjectID != "" {
 		projectID = resolvedProjectID
 	}
-	// #1049: cross-project leak warning. When projectArg is omitted, the
-	// fallback above uses GetSymbol (unscoped) for backward compat — but
-	// indexed-mirror projects (sniffer mirrors, MCP_Combine staging,
-	// .pincher-supported snapshots) routinely carry identical symbol IDs
-	// to their primary repo (`internal/server/server.go::server.New#Function`
-	// is in pincher-repo AND every mirror). Pre-fix the unscoped lookup
-	// resolved deterministically to whichever row sorted first in the DB
-	// — typically the mirror, not the live working tree the session was
-	// opened from. The agent got source bytes from a stale fork with no
-	// signal the lookup crossed project boundaries. Now warn whenever
-	// the resolved symbol came from a project other than the session,
-	// so the agent can re-issue with `project=<session>` to pin scope.
-	// "*" and explicit-project paths are not subject to this — they
-	// asked for cross-project / specific-project lookup deliberately.
+	// #1232: silent-cross-project default flipped to strict-error.
+	// Pre-fix, an omitted projectArg + an ID that didn't exist in
+	// the session project but DID exist in some other indexed
+	// project (sniffer mirror, MCP_Combine staging, .pincher-supported
+	// snapshot) silently returned the other project's row with only
+	// a #1049 warning string. Agents that don't parse warnings got
+	// data from a stale mirror with no programmatic signal — same
+	// silent-confidently-wrong family as #935 / #1217.
+	//
+	// Now: rich-error pointing at both fix actions. Caller chooses.
+	// cross_project=true opts back into the legacy silent-with-warning
+	// shape for back-compat with tooling that depended on the fallback.
+	// "*" and explicit-project paths bypass the check — they asked
+	// for cross-project / specific-project lookup deliberately.
+	if projectArg == "" && s.sessionID != "" && sym.ProjectID != s.sessionID && !crossProjectAllowed {
+		return s.errResultRich(
+			fmt.Sprintf(
+				"symbol %q is not in the session project %q — it exists only in project %q. Pre-#1232 this returned the other project's row silently (with a warning string); now it errors so callers that don't parse warnings can't ship cross-project data unintentionally. Re-issue with project=%q to use that project's data, or pass cross_project=true to opt back into the legacy silent-fallback behaviour.",
+				id, s.sessionID, sym.ProjectID, sym.ProjectID,
+			),
+			[]map[string]string{
+				{"tool": "symbol", "args": fmt.Sprintf(`{"id":%q,"project":%q}`, id, sym.ProjectID),
+					"why": "use the project where this symbol actually lives"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"project":%q}`, shortNameFromID(id), s.sessionID),
+					"why": "look for the equivalent symbol in the session project (which is where you probably meant to be)"},
+				{"tool": "symbol", "args": fmt.Sprintf(`{"id":%q,"cross_project":true}`, id),
+					"why": "opt into legacy silent-fallback behaviour — same data as before, no shape change"},
+			},
+		), nil
+	}
+	// #1049 (legacy path, now only reached when cross_project=true):
+	// keep the warning string so the opt-in caller still gets the
+	// programmatic signal that the lookup crossed project boundaries.
 	var symbolCrossProjectWarning string
 	if projectArg == "" && s.sessionID != "" && sym.ProjectID != s.sessionID {
+		// crossProjectAllowed must be true at this point.
 		symbolCrossProjectWarning = fmt.Sprintf(
-			"symbol %q resolved from project %q rather than the session project %q — an indexed mirror or stale snapshot carries an ID identical to your working tree. Re-issue with project=%q to pin the lookup, or project=%q if you intended that source.",
+			"symbol %q resolved from project %q rather than the session project %q (cross_project=true). An indexed mirror or stale snapshot carries an ID identical to your working tree. Re-issue with project=%q to pin the lookup, or project=%q if you intended that source.",
 			id, sym.ProjectID, s.sessionID, s.sessionID, sym.ProjectID,
 		)
 	}

@@ -19,8 +19,13 @@ import (
 // Self-discovered probing pincher-repo: `symbol id=cmd/pinch/main.go::
 // main.main#Function` (no project) returned source from the sniffer
 // mirror, not pincher-repo.
+//
+// #1232 update (2026-05-16): the default behaviour flipped to strict-
+// error — silent-cross-project is now an explicit choice (cross_project=
+// true). This test now pins the OPT-IN warning shape; the strict-error
+// path is covered by TestHandleSymbol_CrossProject_StrictErrorByDefault.
 
-func TestHandleSymbol_NoProject_CrossProjectResolution_Warns(t *testing.T) {
+func TestHandleSymbol_CrossProject_OptInStillWarns(t *testing.T) {
 	t.Parallel()
 	srv, store, _ := newTestServer(t)
 	sessionPID := "p-session"
@@ -42,7 +47,8 @@ func TestHandleSymbol_NoProject_CrossProjectResolution_Warns(t *testing.T) {
 	})
 
 	result, err := srv.handleSymbol(context.Background(), makeReq(map[string]any{
-		"id": "shared.go::pkg.Common#Function",
+		"id":            "shared.go::pkg.Common#Function",
+		"cross_project": true, // #1232 opt-in to legacy silent-fallback shape
 	}))
 	if err != nil {
 		t.Fatalf("handleSymbol: %v", err)
@@ -50,7 +56,7 @@ func TestHandleSymbol_NoProject_CrossProjectResolution_Warns(t *testing.T) {
 	body := decode(t, result)
 	meta, _ := body["_meta"].(map[string]any)
 	if meta == nil {
-		t.Fatal("_meta missing — expected cross-project warning")
+		t.Fatal("_meta missing — expected cross-project warning on opt-in path")
 	}
 	warnings, _ := meta["warnings"].([]any)
 	saw := false
