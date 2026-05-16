@@ -39,12 +39,19 @@ func TestProfileDir_GoMajority(t *testing.T) {
 	}
 }
 
-// #631 acceptance: stub-majority repo (Scala) prints honest warning.
+// #631 acceptance: stub-majority repo prints honest warning.
+// v0.63 (#1186/#1187) promoted Lua/Elixir/Zig/Scala/Dart/R from
+// stub-tier to regex-tier. Haskell is the only remaining stub-tier
+// language (indentation-sensitive layout deferred — see #1161). Test
+// now uses .hs so the assertion still exercises the stub-majority
+// headline path; if Haskell promotes too, swap to whatever the last
+// stub-tier language is at that point — or, when none remain, retire
+// this test and pin the property "no stub-tier languages" elsewhere.
 func TestProfileDir_StubMajority(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "Main.scala"), "object Main\n")
-	mustWrite(t, filepath.Join(dir, "Lib.scala"), "object Lib\n")
-	mustWrite(t, filepath.Join(dir, "Util.scala"), "object Util\n")
+	mustWrite(t, filepath.Join(dir, "Main.hs"), "module Main where\n")
+	mustWrite(t, filepath.Join(dir, "Lib.hs"), "module Lib where\n")
+	mustWrite(t, filepath.Join(dir, "Util.hs"), "module Util where\n")
 
 	p, err := ProfileDir(dir)
 	if err != nil {
@@ -60,19 +67,23 @@ func TestProfileDir_StubMajority(t *testing.T) {
 }
 
 // #631 acceptance: mixed repo prints per-language breakdown.
+// v0.63 (#1186/#1187) promoted Scala out of stub-tier; this test now
+// uses Haskell (.hs) for the stub-tier slot so the "stub" assertion
+// stays meaningful. See TestProfileDir_StubMajority for the broader
+// stub-tier-language story.
 func TestProfileDir_Mixed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "a.go"), "package a\n")
 	mustWrite(t, filepath.Join(dir, "b.py"), "x=1\n")
 	mustWrite(t, filepath.Join(dir, "c.rb"), "x=1\n")
-	mustWrite(t, filepath.Join(dir, "d.scala"), "object D\n")
+	mustWrite(t, filepath.Join(dir, "d.hs"), "module D where\n")
 
 	p, err := ProfileDir(dir)
 	if err != nil {
 		t.Fatalf("ProfileDir: %v", err)
 	}
 	out := FormatProfile(p)
-	for _, want := range []string{"Go", "Python", "Ruby", "Scala", "AST", "stub"} {
+	for _, want := range []string{"Go", "Python", "Ruby", "Haskell", "AST", "stub"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("formatted profile missing %q; got:\n%s", want, out)
 		}

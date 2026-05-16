@@ -607,6 +607,15 @@ var searchRelevanceQueries = map[string][]searchRelevanceQuery{
 		{Query: "Session", Corpus: db.CorpusCode},      // Class in app/auth.py
 		{Query: "user_name", Corpus: db.CorpusCode},    // Method on Session
 	},
+	"python-web": {
+		// Code corpus — FastAPI/Django-shaped Python (#1184). Each
+		// query targets a shape the existing python-app corpus
+		// doesn't cover: a decorated route handler (Function), an
+		// inherited class (Class), an async function (Function).
+		{Query: "read_user", Corpus: db.CorpusCode},        // async @route handler in app/routes.py
+		{Query: "BaseModel", Corpus: db.CorpusCode},        // base Class in app/models.py
+		{Query: "get_async_session", Corpus: db.CorpusCode}, // async DI provider in app/deps.py
+	},
 }
 
 // SearchRelevanceHit is the per-query record persisted to the snapshot.

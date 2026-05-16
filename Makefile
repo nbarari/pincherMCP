@@ -15,7 +15,7 @@
 
 GO ?= go
 PINCHER_BIN ?= ./pincher
-CORPORA := go-project k8s-ops node-monorepo docs-site terraform-stack python-app
+CORPORA := go-project k8s-ops node-monorepo docs-site terraform-stack python-app python-web
 SNAPSHOT_DIR := testdata/corpus
 SNAPSHOT_DATA := $(SNAPSHOT_DIR)/.snapshot-data
 

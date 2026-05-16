@@ -1,0 +1,5 @@
+[project]
+name = "python-web"
+version = "0.0.1"
+description = "Pinned corpus exercising FastAPI/Django-shaped Python patterns."
+requires-python = ">=3.10"

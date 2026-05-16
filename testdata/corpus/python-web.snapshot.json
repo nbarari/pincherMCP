@@ -1,0 +1,47 @@
+{
+  "avg_confidence_by_kind": {
+    "Class": 1,
+    "Function": 1,
+    "Method": 1,
+    "Module": 1,
+    "Section": 0.9167,
+    "Setting": 0.995
+  },
+  "edge_count_by_kind": {
+    "CALLS": 6,
+    "IMPORTS": 5
+  },
+  "extraction_failures_by_reason": {},
+  "files_blocked": 0,
+  "files_indexed": 6,
+  "files_seen": 6,
+  "schema_version": 26,
+  "search_relevance": [
+    {
+      "corpus": "code",
+      "query": "read_user",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "app.routes.read_user"
+    },
+    {
+      "corpus": "code",
+      "query": "BaseModel",
+      "top_hit_kind": "Class",
+      "top_hit_qn": "app.models.BaseModel"
+    },
+    {
+      "corpus": "code",
+      "query": "get_async_session",
+      "top_hit_kind": "Function",
+      "top_hit_qn": "app.deps.get_async_session"
+    }
+  ],
+  "symbol_count_by_kind": {
+    "Class": 3,
+    "Function": 7,
+    "Method": 5,
+    "Module": 4,
+    "Section": 3,
+    "Setting": 5
+  }
+}
