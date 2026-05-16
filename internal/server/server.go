@@ -3237,7 +3237,8 @@ func (s *Server) registerTools() {
 				"limit":{"type":"integer","description":"Max results returned in this page (default 20, max 500)."},
 				"offset":{"type":"integer","description":"Skip this many BM25-ranked results before the page. Default 0, max 5000. Used for paginated 'Load more' UX (#532). Response includes total + has_more so callers can decide whether to page deeper."},
 				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."},
-				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default is query-aware (#247 #5): exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0.0; phrase / wildcard / multi-word queries default to 0.71. corpus='docs' also defaults to 0.0 regardless of query shape — Markdown section symbols are the intentional target on docs searches, not noise to filter out. Rationale for 0.71 on phrase/wildcard code queries: filters bottom-floor doc-section symbols that can BM25-match wide queries when they cross the corpus boundary; an exact-identifier query can't legitimately match doc-section noise so the floor isn't needed. Set explicitly to override either default. Inclusive: a symbol scored at or above the threshold IS returned."}
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default is query-aware (#247 #5): exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0.0; phrase / wildcard / multi-word queries default to 0.71. corpus='docs' also defaults to 0.0 regardless of query shape — Markdown section symbols are the intentional target on docs searches, not noise to filter out. Rationale for 0.71 on phrase/wildcard code queries: filters bottom-floor doc-section symbols that can BM25-match wide queries when they cross the corpus boundary; an exact-identifier query can't legitimately match doc-section noise so the floor isn't needed. Set explicitly to override either default. Inclusive: a symbol scored at or above the threshold IS returned."},
+				"compact":{"type":"boolean","description":"#1226: thin-client envelope. Drops per-hit extraction_confidence + language + snippet plus the top-level confidence_distribution. Default false preserves the current shape for dashboard / dogfood / quality-aware consumers. Compact also skips the per-hit snippet disk read entirely — the real perf win on bulk searches. The thin-client minimum shape is {id, name, qualified_name, kind, file_path, start_line, end_line, signature, score} per hit — enough to drive a follow-up symbol/context/trace call. Mirrors #1225's trace compact naming."}
 			}
 		}`),
 	}, s.handleSearch)
@@ -4753,6 +4754,18 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	projectArg := str(args, "project")
 	kind := str(args, "kind")
 	language := str(args, "language")
+	// #1226 (thin-client PR 2): compact=true drops per-hit
+	// extraction_confidence + language + snippet plus the top-level
+	// confidence_distribution. Default false preserves the current
+	// shape for dashboard / dogfood / quality-aware consumers that
+	// inspect score/confidence to refine queries. The thin-client
+	// minimum shape becomes {id, name, qualified_name, kind,
+	// file_path, start_line, end_line, signature, score} per hit —
+	// enough to drive a follow-up symbol/context/trace call. Mirrors
+	// #1225's trace compact naming. Also skips the per-hit snippet
+	// disk read entirely when compact, which is the real perf win
+	// on bulk searches.
+	compact := boolArg(args, "compact")
 	corpus := str(args, "corpus")
 	limit := intArg(args, "limit", 20)
 	// #712: collect clamp warnings so the caller learns its input was
@@ -5155,7 +5168,13 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		allFields["name"] = r.Symbol.Name
 		allFields["qualified_name"] = r.Symbol.QualifiedName
 		allFields["kind"] = r.Symbol.Kind
-		allFields["language"] = r.Symbol.Language
+		if !compact {
+			// #1226: language is dropped on compact — the per-hit
+			// kind already disambiguates Function/Method/Class etc.,
+			// and the language is a per-project constant for most
+			// real searches.
+			allFields["language"] = r.Symbol.Language
+		}
 		allFields["file_path"] = r.Symbol.FilePath
 		if crossProjectSearch {
 			allFields["project_id"] = r.Symbol.ProjectID
@@ -5172,13 +5191,21 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		allFields["end_byte"] = r.Symbol.EndByte
 		allFields["signature"] = r.Symbol.Signature
 		allFields["score"] = r.Score
-		allFields["extraction_confidence"] = r.Symbol.ExtractionConfidence
+		if !compact {
+			// #1226: extraction_confidence is dropped on compact —
+			// quality-aware consumers use the default non-compact
+			// shape to refine min_confidence thresholds.
+			allFields["extraction_confidence"] = r.Symbol.ExtractionConfidence
+		}
 
 		// Add a short snippet so Claude can often skip a follow-up symbol/context call.
 		// Suppress for variables/types where the signature IS the content.
 		// Skip the disk read entirely when the caller's fields= projection excludes
 		// snippet — otherwise we'd read kilobytes per result and discard them.
-		includeSnippet := fieldSet == nil || fieldSet["snippet"]
+		// #1226: compact=true skips the snippet wholesale — the per-hit
+		// disk read is the dominant search latency on bulk queries, so
+		// dropping it is the real perf win, not just byte savings.
+		includeSnippet := !compact && (fieldSet == nil || fieldSet["snippet"])
 		snippet := ""
 		if includeSnippet && r.Symbol.Kind != "Variable" && r.Symbol.Kind != "Type" {
 			var src string
@@ -5202,7 +5229,12 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 				snippet = strings.Join(lines, "\n")
 			}
 		}
-		allFields["snippet"] = snippet
+		// #1226: only include snippet in allFields when compact didn't
+		// suppress it — otherwise we'd emit "snippet": "" rows on
+		// compact mode, defeating the byte savings.
+		if !compact {
+			allFields["snippet"] = snippet
+		}
 
 		if fieldSet == nil {
 			row := make(map[string]any, len(allFields))
@@ -5228,13 +5260,16 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	tokensSaved := s.savedVsFileSizesSession(projectID, root, filePaths, responseJSON)
 
 	// Histogram of result confidences for the response envelope.
-	confs := make([]float64, 0, len(results))
-	for _, r := range results {
-		confs = append(confs, r.Symbol.ExtractionConfidence)
-	}
-
-	meta := map[string]any{
-		"confidence_distribution": confidenceDistribution(confs),
+	// #1226: compact mode drops the histogram from the meta envelope.
+	// Quality-aware consumers use it to refine min_confidence; thin-
+	// client consumers don't render it.
+	meta := map[string]any{}
+	if !compact {
+		confs := make([]float64, 0, len(results))
+		for _, r := range results {
+			confs = append(confs, r.Symbol.ExtractionConfidence)
+		}
+		meta["confidence_distribution"] = confidenceDistribution(confs)
 	}
 	if fellthroughTo != "" {
 		meta["fellthrough_to"] = fellthroughTo

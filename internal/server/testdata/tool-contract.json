@@ -383,6 +383,10 @@
     "description": "**Use before `Grep`/`Read`** when looking for code by name or content. Always start here when you don't know the exact symbol ID. Returns signature + a 5-line snippet for each result — often enough to answer without a follow-up call. Uses FTS5 BM25 ranking. Examples: 'processOrder' for a function, 'auth*' for prefix, '\"token validation\"' for a phrase. Filter by `kind=Function` / `language=Go` / `corpus=config|docs` to narrow. Use `context` on the result ID only if you need full source + dependencies.",
     "input_schema": {
       "properties": {
+        "compact": {
+          "description": "#1226: thin-client envelope. Drops per-hit extraction_confidence + language + snippet plus the top-level confidence_distribution. Default false preserves the current shape for dashboard / dogfood / quality-aware consumers. Compact also skips the per-hit snippet disk read entirely — the real perf win on bulk searches. The thin-client minimum shape is {id, name, qualified_name, kind, file_path, start_line, end_line, signature, score} per hit — enough to drive a follow-up symbol/context/trace call. Mirrors #1225's trace compact naming.",
+          "type": "boolean"
+        },
         "corpus": {
           "description": "FTS5 corpus to search. Default (omitted or '') is 'code' — source-code identifiers (Function/Method/Class/etc). 'config' restricts to YAML/JSON/HCL/TOML Settings/Resources/Outputs; 'docs' to Markdown sections + fetched Documents. Use a specific corpus to avoid BM25 dilution from unrelated symbol kinds. (The legacy 'all' value was removed in v0.5; older callers passing 'all' are soft-redirected to 'code' with a deprecation log line.)",
           "enum": [
