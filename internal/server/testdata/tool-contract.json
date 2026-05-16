@@ -321,6 +321,10 @@
           "description": "Deprecated alias for pinchql; honored with a per-call deprecation warning, slated for removal in v1.0 (#638). Pass either, not both.",
           "type": "string"
         },
+        "include_fixtures": {
+          "description": "Include rows whose projected file_path lives under testdata/__fixtures__/test-fixtures/ (pinned test corpora, #33). Default false — audit-shape queries ('find functions without docs') would otherwise surface pincher's own fixture symbols. Mirrors dead_code/architecture's existing fixture filter. Only applies when the query projects a file_path column; queries that don't (e.g. RETURN n.name only) are pass-through regardless. #1212.",
+          "type": "boolean"
+        },
         "max_rows": {
           "description": "Max rows (default 200, max 10000)",
           "type": "integer"

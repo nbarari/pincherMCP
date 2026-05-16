@@ -3143,7 +3143,8 @@ func (s *Server) registerTools() {
 				"cypher":{"type":"string","description":"Deprecated alias for pinchql; honored with a per-call deprecation warning, slated for removal in v1.0 (#638). Pass either, not both."},
 				"project":{"type":"string","description":"Project name or ID. Defaults to session project. Pass '*' to query across every indexed project (cross-repo graph lookups)."},
 				"max_rows":{"type":"integer","description":"Max rows (default 200, max 10000)"},
-				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Filters rows whose query selects an extraction_confidence column; rows from queries that don't return confidence are unaffected."}
+				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Filters rows whose query selects an extraction_confidence column; rows from queries that don't return confidence are unaffected."},
+				"include_fixtures":{"type":"boolean","description":"Include rows whose projected file_path lives under testdata/__fixtures__/test-fixtures/ (pinned test corpora, #33). Default false — audit-shape queries ('find functions without docs') would otherwise surface pincher's own fixture symbols. Mirrors dead_code/architecture's existing fixture filter. Only applies when the query projects a file_path column; queries that don't (e.g. RETURN n.name only) are pass-through regardless. #1212."}
 			}
 		}`),
 	}, s.handleQuery)
@@ -5993,6 +5994,40 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			minConfidence))
 	}
 
+	// #1212: post-filter rows whose projected file_path lives under a
+	// pinned-corpus fixtures directory (testdata/, __fixtures__/, etc.).
+	// dead_code and architecture already apply this filter via
+	// isTestFixturePath; pinchQL bypassed it because it's a raw SQL path,
+	// so audit-shape queries ("functions without docstrings") returned
+	// pincher's own pinned test corpora (#33) as if they were real source.
+	// Default-on with opt-out parallels architecture's include_tests
+	// pattern — agents that legitimately want to query fixtures pass
+	// include_fixtures=true. Queries that don't project a file_path
+	// column are pass-through (we can't filter what we can't see).
+	includeFixtures := boolArgDefault(args, "include_fixtures", false)
+	fixtureFilteredCount := 0
+	var fixtureSamplePath string
+	if !includeFixtures && len(rows) > 0 {
+		filtered := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			fp, hasFP := rowFilePath(row)
+			if hasFP && isTestFixturePath(fp) {
+				if fixtureSamplePath == "" {
+					fixtureSamplePath = fp
+				}
+				fixtureFilteredCount++
+				continue
+			}
+			filtered = append(filtered, row)
+		}
+		rows = filtered
+	}
+	if fixtureFilteredCount > 0 {
+		queryWarnings = append(queryWarnings, fmt.Sprintf(
+			"filtered %d row(s) under testdata/__fixtures__/test-fixtures/ paths (e.g. %q) — pinned test corpora (#33), not real source. Pass include_fixtures=true to include them.",
+			fixtureFilteredCount, fixtureSamplePath))
+	}
+
 	// #338: ensure rows is never nil so JSON marshals as [] not null.
 	// The cypher Executor's Result.Rows defaults to nil when no MATCH
 	// rows; both the filtered and unfiltered branches above can leave it
@@ -6119,6 +6154,24 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 // a named constant so the "what number?" question is answered in one
 // place rather than three.
 const emptyResultBaselineTokens = 200
+
+// rowFilePath returns the file_path projection for a single pinchQL
+// result row plus a boolean for "the column was actually present".
+// Used by the #1212 fixture filter to decide per-row whether to drop
+// the row. Mirrors harvestRowFilePaths's column-naming logic — accepts
+// the bare `file_path` column or any `<alias>.file_path` form (Cypher
+// projects `RETURN n.file_path` as the column name `n.file_path`).
+func rowFilePath(row map[string]any) (string, bool) {
+	for k, v := range row {
+		if k == "file_path" || strings.HasSuffix(k, ".file_path") {
+			if s, ok := v.(string); ok && s != "" {
+				return s, true
+			}
+			return "", true
+		}
+	}
+	return "", false
+}
 
 // harvestRowFilePaths walks pinchQL result rows and collects distinct
 // values from any column whose key looks like a file-path projection
