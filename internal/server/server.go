@@ -3258,7 +3258,7 @@ func (s *Server) registerTools() {
 	// 15. fetch
 	s.addTool(&mcp.Tool{
 		Name:        "fetch",
-		Description: "**Use to pull external reference material into the project knowledge base** — API docs, library READMEs, specs, RFCs. Fetches a URL, extracts its text, stores it as a searchable `Document` symbol. After fetching, use `search kind:Document` to find it, or `symbol` with the returned ID to retrieve the full text. The Document kind lives in the `docs` corpus, so `corpus=docs` searches surface it alongside Markdown sections.",
+		Description: "**Use to pull external reference material into the project knowledge base** — API docs, library READMEs, specs, RFCs. Fetches a URL, extracts its text, stores it as a searchable `Document` symbol. After fetching, use `search` with `kind=\"Document\"` (the `kind` argument; FTS5 \"kind:Document\" operator-style syntax is not supported) to find it, or `symbol` with the returned ID to retrieve the full text. The Document kind lives in the `docs` corpus, so `corpus=\"docs\"` searches surface it alongside Markdown sections.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["url"],"properties":{
 				"url":{"type":"string","description":"HTTP or HTTPS URL to fetch"},
