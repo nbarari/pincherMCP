@@ -137,6 +137,15 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// with no signal; the agent reads it as "no rows match" when the
 	// real cause is the aggregator/column-type mismatch.
 	warnings = append(warnings, collectAggregateTypeMismatchWarnings(q)...)
+	// #1122: ORDER BY references an aggregate (COUNT/SUM/AVG/MIN/MAX)
+	// but the projection has no aggregate of its own — there is no
+	// grouping context, the ORDER BY aggregate collapses to one value
+	// across all rows, the sort silently no-ops, results come back in
+	// scan order. Same silent-confidently-wrong shape as #1120 (which
+	// fixed the asterisk-as-HOPS projection-key mismatch); this catches
+	// the structurally adjacent case where the projection itself is
+	// missing the aggregate that ORDER BY needs.
+	warnings = append(warnings, collectOrderByAggregateWithoutGroupingWarnings(q)...)
 	res, err := e.run(ctx, q)
 	if err != nil {
 		return res, err
@@ -719,6 +728,46 @@ func collectUnknownOrderByWarnings(q *queryAST) []string {
 	return []string{fmt.Sprintf(
 		"ORDER BY %q targets a column not in the property whitelist — the sort was silently dropped and results are returned in scan order. Valid properties: %s.",
 		ob, strings.Join(knownPropertyList, ", "))}
+}
+
+// collectOrderByAggregateWithoutGroupingWarnings (#1122) warns when
+// ORDER BY references an aggregate (COUNT/SUM/AVG/MIN/MAX) but the
+// projection has no aggregate of its own. Without a projection
+// aggregate there is no grouping context: the ORDER BY aggregate
+// collapses to one value across the entire match set, the sort
+// silently no-ops, and rows come back in scan order. Pre-fix shape:
+//
+//	MATCH (n:Function) RETURN n.language ORDER BY COUNT(*) DESC
+//
+// Caller intent is "sort languages by frequency"; actual behavior is
+// "return every Function row's language in scan order, ignored sort."
+// Same silent-confidently-wrong family as #1120 (the asterisk-as-HOPS
+// fix that aligned the COUNT(*) projection key with the ORDER BY key);
+// this catches the structurally adjacent case where the projection
+// itself never had the aggregate.
+//
+// collectUnknownOrderByWarnings explicitly excludes aggregate ORDER BY
+// targets ("aggregate target — they have their own resolution paths")
+// so this gap had no detector before #1122.
+func collectOrderByAggregateWithoutGroupingWarnings(q *queryAST) []string {
+	if q == nil || q.orderBy == "" {
+		return nil
+	}
+	ob := strings.TrimSpace(q.orderBy)
+	parenIdx := strings.Index(ob, "(")
+	if parenIdx <= 0 {
+		return nil
+	}
+	fn := strings.ToUpper(strings.TrimSpace(ob[:parenIdx]))
+	if !isAggFn(fn) {
+		return nil
+	}
+	if hasAggregation(q) {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"ORDER BY %s in a query with no aggregate in RETURN: there is no grouping context, so the aggregate evaluates to one value across all rows, the sort silently no-ops, and results come back in scan order. Add the same aggregate to RETURN to enable grouped sorting (e.g. RETURN n.language, %s ORDER BY %s DESC).",
+		ob, ob, ob)}
 }
 
 // collectHopRangeWarnings (#869) warns when a variable-length pattern
