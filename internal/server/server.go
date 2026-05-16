@@ -6098,15 +6098,25 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// callers (inbound)"), so map those two synonyms with a warning; for
 	// anything else, warn and fall back to `both`. Same failure-as-
 	// pedagogy shape as the unknown-edge-kind warnings below.
+	//
+	// #1128: directional synonyms (`incoming`/`outgoing`, `in`/`out`,
+	// `up`/`down`, `caller`/`callee` singular) were silently falling
+	// back to `both`. That's the opposite of standard pedagogy — the
+	// user wrote a directional word, the engine flipped to the
+	// non-directional default, and the result mixed inbound + outbound
+	// rows under a warning that didn't say "your direction guess was
+	// inverted." Map the obvious AI-agent reaches to their canonical
+	// directions so the result matches intent + warning teaches the
+	// canonical name.
 	var traceDirWarning string
 	switch direction {
 	case "inbound", "outbound", "both":
 		// canonical — no warning
-	case "callers":
-		traceDirWarning = `direction="callers" is not a valid value — interpreted as "inbound". Use direction="inbound" (the canonical term) to silence this warning.`
+	case "callers", "caller", "incoming", "in", "up", "reverse":
+		traceDirWarning = fmt.Sprintf(`direction=%q is not a valid value — interpreted as "inbound". Use direction="inbound" (the canonical term) to silence this warning.`, direction)
 		direction = "inbound"
-	case "callees":
-		traceDirWarning = `direction="callees" is not a valid value — interpreted as "outbound". Use direction="outbound" (the canonical term) to silence this warning.`
+	case "callees", "callee", "outgoing", "out", "down", "forward":
+		traceDirWarning = fmt.Sprintf(`direction=%q is not a valid value — interpreted as "outbound". Use direction="outbound" (the canonical term) to silence this warning.`, direction)
 		direction = "outbound"
 	default:
 		traceDirWarning = fmt.Sprintf(`direction=%q is not a valid value — falling back to "both". Valid values: inbound, outbound, both.`, direction)
