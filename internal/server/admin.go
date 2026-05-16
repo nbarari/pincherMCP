@@ -476,30 +476,24 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	failures := []failureRow{}
 	cutoff := time.Now().Add(-time.Duration(lookbackHours) * time.Hour)
-	failuresTruncated := 0
-collect:
+	// #1205: pre-fix doctor looped `ListExtractionFailures(p.ID, top)` per
+	// project — N round-trips on a 130-project install, each scanning the
+	// per-project segment of the `(project_id, last_seen_at DESC)` index.
+	// On an 11GB DB with WAL contention the loop alone burned ~60s.
+	// Replace with one cross-project SELECT capped at `top`; an honest
+	// truncation count comes from a cheap second COUNT against the same
+	// cutoff. Project-name join happens in-memory from `plist` (already
+	// fetched above).
+	projectName := make(map[string]string, len(plist))
 	for _, p := range plist {
-		// #575: keep pulling per-project for visibility across
-		// projects (a single noisy project shouldn't crowd out
-		// signals from healthier ones), but enforce `top` as a GLOBAL
-		// cap. Pre-fix the per-project loop made the response grow
-		// linearly with project count → 125 projects × 10 failures
-		// blew the MCP token cap. Track how many we dropped so the
-		// caller knows the count is capped.
-		fails, err := s.store.ListExtractionFailures(p.ID, top)
-		if err != nil {
-			continue
-		}
-		for _, f := range fails {
-			if f.LastSeenAt.Before(cutoff) {
-				continue
-			}
-			if len(failures) >= top {
-				failuresTruncated++
-				continue
-			}
+		projectName[p.ID] = p.Name
+	}
+	cutoffUnix := cutoff.Unix()
+	recentFails, err := s.store.ListRecentExtractionFailuresAcrossProjects(cutoffUnix, top)
+	if err == nil {
+		for _, f := range recentFails {
 			failures = append(failures, failureRow{
-				Project:    p.Name,
+				Project:    projectName[f.ProjectID],
 				File:       f.FilePath,
 				Language:   f.Language,
 				Reason:     f.Reason,
@@ -507,12 +501,11 @@ collect:
 				LastSeenAt: f.LastSeenAt.Format(time.RFC3339),
 			})
 		}
-		// Continue iterating to count the trailing rows we're
-		// dropping (so the truncated count is honest), but bail once
-		// we've quantified the overflow at >5× cap to avoid pointless
-		// DB churn on enormous installs.
-		if failuresTruncated > top*5 {
-			break collect
+	}
+	failuresTruncated := 0
+	if len(failures) >= top {
+		if total, cerr := s.store.CountRecentExtractionFailuresAcrossProjects(cutoffUnix); cerr == nil && total > len(failures) {
+			failuresTruncated = total - len(failures)
 		}
 	}
 	data["extraction_failures"] = failures

@@ -3631,6 +3631,64 @@ func (s *Store) ClearExtractionFailures(projectID string) error {
 	return err
 }
 
+// ListRecentExtractionFailuresAcrossProjects returns failures across every
+// project with last_seen_at >= cutoffUnix, ordered by last_seen_at DESC,
+// capped at limit. limit <= 0 returns all rows above the cutoff. The
+// returned ExtractionFailure rows carry ProjectID; callers join the
+// human-readable project name from an in-memory project list.
+//
+// Reads via the reader pool — pure SELECT. #1205 collapses doctor's
+// per-project N-roundtrip loop into one query, dropping multi-second
+// latency to milliseconds on multi-project installs.
+func (s *Store) ListRecentExtractionFailuresAcrossProjects(cutoffUnix int64, limit int) ([]ExtractionFailure, error) {
+	q := `SELECT id, project_id, file_path, language, reason, details, first_seen_at, last_seen_at
+	      FROM extraction_failures
+	      WHERE last_seen_at >= ?
+	      ORDER BY last_seen_at DESC`
+	args := []any{cutoffUnix}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.ro.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ExtractionFailure{}
+	for rows.Next() {
+		var f ExtractionFailure
+		var first, last int64
+		var details sql.NullString
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.FilePath, &f.Language, &f.Reason, &details, &first, &last); err != nil {
+			return nil, err
+		}
+		f.Details = details.String
+		f.FirstSeenAt = time.Unix(first, 0)
+		f.LastSeenAt = time.Unix(last, 0)
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CountRecentExtractionFailuresAcrossProjects returns the count of rows
+// above the cutoff across every project. Used by doctor to compute an
+// honest extraction_failures_truncated number when the row fetch is
+// capped — one cheap COUNT instead of a separate enumeration. #1205.
+//
+// Reads via the reader pool — pure SELECT.
+func (s *Store) CountRecentExtractionFailuresAcrossProjects(cutoffUnix int64) (int, error) {
+	var n int
+	err := s.ro.QueryRow(
+		`SELECT COUNT(*) FROM extraction_failures WHERE last_seen_at >= ?`,
+		cutoffUnix,
+	).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ExtractionFailureCountsByReason returns a map of reason → count for the
 // project's extraction_failures rows. Powers the corpus-snapshot QN-
 // collision gate: any non-zero count for `qualified_name_collision` or

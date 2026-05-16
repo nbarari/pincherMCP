@@ -506,6 +506,8 @@ var readerRoutedStoreMethods = map[string]bool{
 	"LoadStructFields":        true,
 	"LoadInterfaceMethods":    true,
 	"ListExtractionFailures":         true,
+	"ListRecentExtractionFailuresAcrossProjects":  true, // #1205 doctor cross-project query
+	"CountRecentExtractionFailuresAcrossProjects": true, // #1205 doctor truncation-count
 	"ExtractionFailureCountsByReason": true,
 	"ListSlowQueries":         true,
 	// HealthCheck is pure SELECT — previously misclassified under writer
