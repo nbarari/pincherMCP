@@ -2532,6 +2532,21 @@ func operatorHint(op string) (string, bool) {
 		// canonical workaround is two ANDed comparisons. Surface that
 		// shape so the failure teaches the supported spelling.
 		return "BETWEEN is not supported; use two ANDed comparisons: 'n.start_line >= 100 AND n.start_line <= 200'", true
+	case "(":
+		// #1137: Cypher built-in functions (`size(n.name)`, `length(...)`,
+		// `toUpper(...)`, `COUNT(DISTINCT ...)`) all reach this branch
+		// because the tokenizer emits `(` as an operator after the
+		// identifier. Pre-fix the generic "unsupported operator: (" gave
+		// no signal that function calls in WHERE are the structural
+		// reason. The supported aggregators (COUNT/SUM/AVG/MIN/MAX) live
+		// in RETURN only — WHERE has no function-call surface in pinchQL.
+		// Surface that explicitly so the user redirects to a property
+		// reference + client-side post-processing.
+		return "function calls in WHERE are not supported in pinchQL. " +
+			"Aggregators (COUNT/SUM/AVG/MIN/MAX) live in RETURN only; " +
+			"for string-length / case-folding / DISTINCT-in-aggregate, " +
+			"project the underlying property (e.g. RETURN n.name) and " +
+			"post-process client-side.", true
 	}
 	return "", false
 }
