@@ -1,180 +1,131 @@
-# Handoff — v0.58 → v0.59
+# Handoff — 2026-05-16 evening
 
-**Status at handoff:** `master` at `0a5329d` (release: prep v0.58.0). v0.58.0 release-prep PR (#1059) merged. **The tag itself has not been pushed yet** — see [Tag the release](#tag-the-release) below for the explicit step. Everything else is committed.
+## Resume in 30 seconds
 
-This is the artifact that v0.59 (the hardening + pre-promotion release) picks up. It tells you what changed, what's working, what's known-broken, and where to look first.
+You are mid-loop. The autonomous loop directive from the user is in effect:
 
----
+> **"begin a loop and not stop until we get right next to .7 release."**
+> **"we need to uncover as much as possible between .65-.69 so that .70 is as stable as possible."**
+> **"after every .xx pushed to GitHub ... check through issues and make sure we aren't missing context."**
+> **"after each .xx in a loop - just verify [the env] - if action needs to happen ....then take the action - if human action is required at keyboard to remedy environment - send Claude notification."**
 
-## What v0.58 shipped (one-paragraph version)
+Don't pause without a sound reason. Continue probing + fixing v0.66 bugs. Cycle ends at v0.69 hardening; v0.70 is the stable promotion target.
 
-**Failure-as-pedagogy at the project boundary.** v0.58 is a behaviour release, not a schema release — no migration, no new tools, but every tool that takes a project arg or scopes to a single ID now tells you what's wrong instead of silently returning the wrong tree's data. Three diagnosis families closed: silent cross-project ID resolution (mirror projects on multi-project installs were returning source bytes from the wrong project), star-sentinel consistency (the `project="*"` arg now does the right thing on all 13 project-arg tools), and ghost-extraction empty-result diagnosis (projects with substantial symbols but zero edges now explain the empty result instead of advising "lower min_confidence"). Plus `doctor`'s ceiling lowered so it actually fits the MCP per-call token cap, `changes` stops returning silent zero-everything responses, and Python AST extraction picks up its first end-to-end pinned-snapshot corpus.
+## What shipped this session (substantial)
 
-## What v0.58 shipped (by family)
-
-### Cross-project leak class (the headline)
-
-A single dogfood probe found this: `mcp__pincher__symbol id=cmd/pinch/main.go::main.main#Function` on a workspace with mirror projects returned the **sniffer mirror's** source, not pincher-repo's. No warning. An agent using the result to edit code would be editing the wrong tree. Five fixes closed the family across every retrieval-shape tool:
-
-| PR | Tool | Behaviour |
+| Release | PRs | Notes |
 |---|---|---|
-| #1049 | `symbol` | Warns when unscoped lookup resolved outside session project |
-| #1050 | `context` + `symbols` (batch) | Same warning + batch-level aggregation across mixed IDs |
-| #1051 | `neighborhood` | Same warning + names the file_path's source-of-truth |
-| #1052 | `trace` (id-mode) | Warns when seed lands in different project than BFS traversal scopes to |
-| #1047 | `search` (project=*) | Emits `project_id` on every cross-project result row |
+| **v0.64.0** tagged | #1189-#1193 (5) | Dashboard data plumbing (schema v27 `session_tool_calls` + per-call event logger) + description-honesty audit start |
+| **v0.65.0** tagged | #1194-#1201 (7 + release prep) | Description-honesty audit sweep: search / architecture / query / fetch / stats / symbol / doctor |
+| **v0.66.0** in flight | #1210, #1211, #1214, #1215, #1216, #1218 (6) | DOGFOOD round 1 + 2 — 6 silent-wrong bugs fixed |
 
-Backward-compatible across the board — the unscoped lookup still returns the same row it did pre-fix; the warning is purely additive in `_meta.warnings`.
+**v0.66 fixes merged (most recent first):**
 
-### Star-sentinel consistency (3-way fix)
+- **#1218** (closes #1217) — pinchQL column-vs-column predicate dropped, not substituted with `false`. Silent-confidently-wrong: `WHERE x AND <unsupported>` was killing all rows.
+- **#1216** (closes #1213) — `isTestFile` recognizes bash `_test.sh` + `test_*.sh` conventions
+- **#1215** (closes #1206) — doctor advisory: WAL bloat detection (>512 MiB OR >10% of DB)
+- **#1214** (closes #1207) — Markdown sibling-heading dups no longer flood `qualified_name_collision`
+- **#1211** (closes #1203) — empty `__init__.py` no longer floods `byte_range_negative`
+- **#1210** (closes #1202) — `_meta.capabilities` `schema_vN` tag is now a runtime probe (was hardcoded, lying after migrations)
 
-`*` is the documented cross-project sentinel on `search`/`query`. Other tools mishandled it:
+## CRITICAL CONTEXT: the v0.65 DOGFOOD pivot
 
-| PR | Tool category | Behaviour |
-|---|---|---|
-| #1048 | per-ID retrieval (symbol/symbols/context/neighborhood) | Silent fallback to unscoped lookup |
-| #1055 | aggregate (health/stats) | Silent fallback to session/global view |
-| #1056 | per-project (architecture/schema/trace/dead_code/etc.) | Clear-rejection error naming the sentinel + pointing at search/query |
+The user pushed back mid-session:
 
-The clear-rejection text matters: pre-fix passing `*` to `architecture` returned `project "*" not found — use list to see available projects`, but `list` never contains `*`. The new error names `*` as the cross-project sentinel and names the two tools that accept it.
+> "that .65 dogfood loop seemed so much lighter than the .55 dogfood loop - did we test as thorough and probe as hard as we did in .55?"
 
-### Ghost-extraction diagnosis family
+**This was correct.** v0.65 was a description audit — text-vs-runtime parity — not real DOGFOOD. v0.55-era DOGFOOD found bugs by actually CALLING tools with edge-case inputs, indexing external corpora, cross-checking output against ground truth. v0.65 found 1 real silent-wrong (fetch's `kind:Document`) and 6 description undersells.
 
-Started in earlier PRs; closed in v0.58:
+After the pivot in v0.66, DOGFOOD round 1 (one `mcp__pincher__doctor` call) surfaced **8 real bugs in 60 seconds**. That's the .55-caliber yield. **Keep probing this way through .66-.69.** Don't drift back into low-yield description audits.
 
-| PR | Tool | Behaviour |
-|---|---|---|
-| #1040 | `architecture` | Diagnoses ghost when code-corpus languages exist with 0 edges |
-| #1042 | `schema` | Diagnoses ghost when ≥100 callable kinds + 0 edges |
-| #1043 | `query` | Diagnoses ghost on empty rows + 0 edges |
-| #1044 | `dead_code` | Diagnoses ghost on populated OR empty results + 0 edges |
+## Open bugs in v0.66 (still to fix)
 
-Plus `doctor`'s existing #1009 advisory. The remaining gap is the low-edges-per-symbol ratio extension (#1010) — currently the advisory fires on `edges == 0` strict, but warp_rc at 1.4M symbols / 247 edges (ratio 0.000135) flies under the radar. Filed for v0.59.
+Filed but unfixed — pick by ergonomic impact:
 
-### `doctor` token-cap fitting (#1054)
+- **#1204** C++ LogTemp dups — extractor emits per-call-site duplicates of macro identifiers (`LogTemp` x11 in one file). Needs extractor inspection (`internal/ast/extractor.go` C/C++ funcRE).
+- **#1205** doctor 68s latency — deep. Likely needs SQL/query-plan work + WAL-checkpoint tuning. May naturally improve after the user runs `pincher vacuum` (see ENV section below).
+- **#1208** TS dup QN — `skwad-app` and similar TS files emit duplicate QNs. Hypothesis: re-exports + overloads + type/value collisions. Needs file inspection.
+- **#1209** Rust nested-project collision — `warp_rc/warp-fork` nested project paths produce cross-project QN collisions because the collision detector isn't partitioned by `project_id`. Two fixes: scope detector by project_id, AND warn on nested-project registration.
+- **#1212** pinchQL `testdata/` paths leak into audit results — dead_code and architecture filter them via `isTestFixturePath`; pinchQL doesn't. Same family as #1213.
 
-The pre-#1016 `top=99999` blew the MCP token cap with a 506 KB response. #1016 clamped to 500 — but at top=500 the response still ran ~218 KB and STILL exceeded the cap on real installs (118 projects). #1054 drops the ceiling to 50; three sections × 50 rows × ~400-byte rows ≈ 60 KB, comfortable headroom. For deeper enumeration callers should use `list` (paginated) or pinchQL queries against the underlying tables.
+**Carry-forwards still in v0.66 from earlier cycles:**
+- **#1162** closure-tables-default-on (gated by #639 measurement)
+- **#1177** TS receiver-type resolver (multi-day TS AST work)
+- **#1182** Rust AST extractor (multi-day)
+- **#1183** Java AST extractor (multi-day)
+- **#635** Dashboard panel rendering on the v0.64 substrate
 
-### `changes` empty-state diagnosis (#1053)
+## Environment state
 
-`changes scope=staged` on a workspace with only-unstaged edits returned `{changed_files:[], ...}` with NO `_meta` — the agent couldn't distinguish "nothing changed" from "I asked the wrong scope." Now probes the other scopes (`staged`/`unstaged`/`all`) on empty and reports which DO have content, plus offers next_steps pointing at each. When every scope is clean, suggests `scope="base:<branch>"`.
+- **master**: clean, up to date with origin. Latest commit is #1218 merge.
+- **on-PATH pincher**: `/c/tools/pincher.exe` v0.65.0 (swapped this session via `bash scripts/swap-active-binary.sh`)
+- **MCP supervisor**: auto-restart-on-drift firing correctly; respawned onto v0.65.0 after the swap
+- **DB**: 11 GB at `C:\Users\kevin\AppData\Roaming\pincherMCP\pincher.db` (advisory recommends `pincher vacuum` + `list prune_dead=true`). User was notified via PushNotification 2026-05-16. **Action required is user-keyboard, not auto.**
+- **WAL**: 2.3 GB (same advisory). Will auto-truncate after vacuum.
+- **Test suite**: green on master. Two flaky `cmd/pinch` + `internal/supervisor/cmd/probe` tests fail LOCALLY because of `SQLITE_BUSY` against the running pincher MCP daemons holding the global DB. **They pass in CI** — CI workers have no local pincher daemons.
+- **pincher.exe processes**: 4 daemons running on the box (per `tasklist`). Leave them — supervisor manages them.
 
-### Python AST + YAML/Markdown pin-down (#1057, #1058)
+## Standing rules established this session (memory'd)
 
-- New `testdata/corpus/python-app/` pinned corpus exercises Class + Method + Function + Module + AsyncFunctionDef + cross-file IMPORTS + CALLS (5 files / 16 symbols / 6 edges).
-- New unit tests for: Markdown headings-in-code-blocks isolation, Markdown setext headings (`===` / `---`), YAML merge-key (`<<: *anchor`) static-extraction.
-- **#1058 was a hot-fix** for a CI gate that didn't fire on #1057: `TestSearchRelevance_QueriesRegistered` requires every new corpus to register a curated query set in `cmd/pinch/main.go`'s `searchRelevanceQueries` map. The PR landed without the registration and CI somehow let it through. Investigation deferred to v0.59 — see [Things to investigate](#things-to-investigate).
+1. **`feedback_post_release_issue_triage.md`** — After every `.xx` tag, walk open issues and categorize them. Multi-day work → next minor. Non-critical hardening → `.x9`. Critical correctness → skip queue.
+2. **`feedback_post_release_environment_check.md`** — After every `.xx` tag, verify env. Auto-action where possible (binary swap, branch cleanup); PushNotification when human keyboard action is needed (DB vacuum, manual `/mcp` reconnect).
 
----
+Both pair with the existing user-cannot-restart-MCP and auto-restart memories.
 
-## What's in flight for v0.59
+## Next concrete actions (in priority order)
 
-v0.59 is **hardening + stability** by policy — no new features. Six workstreams per the #664 umbrella:
+1. **Read this file + `MEMORY.md` index.** Memory is loaded automatically; this file is the session-state delta.
+2. **Verify env still healthy** (per the post-release env-check rule):
+   ```bash
+   git log --oneline -3                      # confirm master state
+   /c/tools/pincher.exe --version            # should be v0.65.0 or newer
+   ```
+   Then call `mcp__pincher__health` — should show `schema_v27` in capabilities + `binary_version` matching tag. If binary_version is older than the on-PATH binary, run `bash scripts/swap-active-binary.sh` to swap; auto-restart will pick it up on next MCP call.
+3. **Triage any un-milestoned issues:**
+   ```bash
+   gh issue list --state open --json number,title,milestone --jq '.[] | select(.milestone == null) | "\(.number) \(.title)"'
+   ```
+   Slot into v0.66 (active), v0.69 (hardening), or critical-correctness skip-queue.
+4. **Pick the next v0.66 fix.** Highest-leverage open bugs:
+   - **#1209** Rust nested-project collision — partition the dup detector by `project_id` is a clean, targeted change. Also surfaces the broader "nested-project registration warning" which is a UX feature.
+   - **#1208** TS dup QN — start with `cat skwad-app/lib/state-laws.ts | grep -B 2 -A 2 'law'` (or equivalent in whichever Codex/ClaudeCode project has it indexed) to see the actual source shape, then decide if it's re-export / overload / type-value.
+   - **#1212** pinchQL testdata filter — add an `include_fixtures=false` default to handleQuery, mirror the architecture / dead_code filter shape.
+5. **After ~2-3 v0.66 fixes, probe again** (DOGFOOD round 3) — different vein. Try:
+   - `mcp__pincher__changes scope=base:master` against pincher-repo to stress the changes handler
+   - `mcp__pincher__trace` on a hotspot in a non-Go corpus
+   - `mcp__pincher__neighborhood include_source=true` on a large file
+   - Force a binary swap mid-call and verify auto-restart resilience under load
+   - Index a fresh external project; observe what fails
+6. **When v0.66 has ~5-7 PRs**, tag `v0.66.0` via the release-prep flow (read `CLAUDE.md` "Release-prep checklist"; assemble CHANGELOG.d; promote roadmap row).
+7. **Continue cycle**: v0.67 → v0.68 → v0.69 hardening (close all v0.6x carryovers at v0.69) → stop just short of v0.70 stable promotion.
 
-1. **Bug-fix triage.** Sweep open bugs, close blockers for v0.60 promotion.
-2. **Perf regression validation.** Run bench corpora vs v0.51.1 baseline; flag >5% regressions.
-3. **Cross-platform smoke.** One-command install on Claude Code, Codex, Cursor, Zed (4 platforms minimum).
-4. **Capability-advertisement audit.** Every entry in `_meta.capabilities` verified by a runtime probe.
-5. **v0.60 stable-promotion sign-off doc.** Brief sign-off capturing what's verified + what risks remain.
-6. **Phase 2 backlog build.** File per-release issues for v0.61–v0.68 while Phase 1 lessons are fresh.
+## Patterns to keep using
 
-Plus 4 specific bugs currently open against v0.59:
+- **Table-from-the-start tests** (#1152): every PR ships positive + negative + control + cross-check.
+- **CHANGELOG.d/`<num>.<type>.md`** stub convention. `bash scripts/changelog-assemble.sh --apply` at release prep.
+- **Cut fix branches from fresh master** — never stack branches without explicit reason.
+- **Co-Authored-By: Claude Opus 4.7 (1M context)** footer on every commit.
+- **`gh pr merge --auto --squash`** + `git checkout master && git pull --ff-only` after every PR.
+- **Pincher first** (per global CLAUDE.md): `mcp__pincher__*` tools beat Read/Grep for code navigation; Read only when authoring new files or when Edit forces a Read precondition.
 
-| # | Title | Shape |
-|---|---|---|
-| [#1010](https://github.com/kwad77/pincher/issues/1010) | doctor ghost-advisory: extend to low-edges-per-symbol ratio | Follow-on to the ghost family v0.58 just closed (currently `edges==0` strict; misses warp_rc at 0.000135 ratio) |
-| [#986](https://github.com/kwad77/pincher/issues/986) | Watch-triggered reindex produces ~30% of expected symbol count after binary drift | Resolver-phase gating bug — suspect `force` flag isn't propagating to `resolveImports`/`Calls`/`Reads` on the watch path. The last visible gap in the auto-restart-on-drift workflow. |
-| [#996](https://github.com/kwad77/pincher/issues/996) | Large JSON test-fixture dirs explode symbol count (1.45M syms / 247 edges on warp_rc) | Indexer needs heuristic skip for `testdata/`/`ref_tests/data/`/`fixtures/` JSON, or per-file symbol cap |
-| [#640](https://github.com/kwad77/pincher/issues/640) | Hook conversion-rate field measurement (first 30 days) | Needs CLI export shim + community thread for ≥20 install reports |
+## Patterns to NOT repeat
 
-Also still open on **v0.58.0** milestone (will roll to v0.59 if not closed at tag time):
+- **Description audits aren't DOGFOOD.** They're useful but they're text work. Real DOGFOOD is calling tools with weird inputs and finding silent-wrong handler logic. The .55 cycle's haul was 8 bugs in 90 minutes from probing untouched tool surface — that's the bar.
+- **Don't ScheduleWakeup long delays** — `feedback_no_long_pauses.md`. Keep cranking.
+- **Don't ask for permission** on routine PRs / fixes / probes — user is AFK, give-and-take is via the loop.
+- **Don't bundle unrelated fixes** — one bug per PR, table-from-the-start tests, clean blast radius.
 
-- **[#858](https://github.com/kwad77/pincher/issues/858)** — non-Go corpora produce zero edges (closure tables / trace / dead_code Go-only in practice). **The biggest user-visible quality gap.** Python joined Go in v0.57; TypeScript / Rust / Ruby are next on the long-tail list.
-- **[#663](https://github.com/kwad77/pincher/issues/663)** — v0.58 testing-depth umbrella
-- **[#662](https://github.com/kwad77/pincher/issues/662)** — v0.57 field-data export CLI (predecessor to #640)
+## Token savings note
 
----
+The user said: *"pincher is saving a ton of tokens so things are starting to pay dividends with these efforts - good work."*
 
-## Things to investigate
-
-### Why `TestSearchRelevance_QueriesRegistered` didn't fail on #1057
-
-#1057 added `"python-app"` to `cmd/pinch/snapshot_test.go`'s `corpora` slice without the matching `searchRelevanceQueries` entry. There's an explicit gate test for this (`TestSearchRelevance_QueriesRegistered`) that **does** fail locally on master after #1057 merged. But the PR's CI checks were green. Either:
-
-- CI didn't run `./cmd/pinch` tests (workflow scope bug)
-- Auto-merge merged before checks finished (auto-merge race)
-- The auto-merge process bypasses required-status checks
-
-Worth one focused dig before relying on auto-merge for v0.59's stability sweep. The hot-fix #1058 lands master green again; the question is how #1057 got there in the first place. **Files to start:** `.github/workflows/test.yml`, `.github/workflows/required-status.yml` (or wherever the branch protection lives).
-
-### Should pincher's "savings" messaging reframe around index completeness?
-
-Discovered during handoff: the "savings" framing on `stats` and the README is per-call (tokens saved vs reading the whole file). The dogfood-loop framing makes that backwards. The right metric is **calls avoided across the session**, and the way you get there is by indexing every file regardless of size. A 200-byte YAML omitted from the index forces 2-3× more tool calls when downstream code wants to trace into it. Pincher already indexes every small file (no min-size threshold in `ShouldSkip`) — the gap is purely in how the value gets messaged.
-
-**Specifically:**
-- `internal/server/server.go` — `savedVsFileSizesSession` is the per-call computation. Consider adding a session-level "completeness score" metric (% of files in session DB indexed by their owning project).
-- `README.md` — the savings section reads in per-call frame. Consider replacing with "calls avoided across N-step workflows."
-- `docs/REFERENCE.md` Savings section.
-
-Not a v0.58 fix; logging as v0.59 framing work or post-promotion docs work.
-
----
-
-## Reset state — where master sits at handoff
-
-| Thing | State | Notes |
-|---|---|---|
-| `master` HEAD | `0a5329d` | release: prep v0.58.0 — failure-as-pedagogy at the project boundary (#1059) |
-| Pending tag | **`v0.58.0` not pushed** | See [Tag the release](#tag-the-release) below |
-| Open PRs | 0 | All merged |
-| Open issues on v0.58.0 milestone | 3 (#858 / #663 / #662) | Will roll to v0.59 at tag time per the milestone-close rule |
-| Schema version | v26 (unchanged) | No migration this release |
-| MCP tool count | 22 (unchanged) | |
-| Languages detected | ~25 (unchanged) | 10 AST-tier / 15 regex-tier / 7 stub-tier |
-| Supervisor / auto-restart | Enabled, working | Binary swaps pick up on next MCP call without `/mcp` |
-| Watch-triggered reindex | **Known-buggy** | #986 — ~30% of expected symbols after binary drift. Recovery: `mcp__pincher__index force=true` |
-
-### Tag the release
-
-```bash
-git checkout master
-git pull --ff-only
-git tag -a v0.58.0 -m "v0.58.0 — failure-as-pedagogy at the project boundary"
-git push origin v0.58.0
-```
-
-The release workflow handles Homebrew formula bump + Docker image push from there. **Don't** push the tag without confirming the CHANGELOG.md `[0.58.0]` section is in master (it is, via #1059).
+Keep using pincher first, Read/Grep as documented fallbacks only.
 
 ---
 
-## Standing-order context (what dogfood mode is doing)
+**Branch:** master (clean)
+**Last commit:** see `git log --oneline -1`
+**In-flight PR:** none — everything in this session is merged
+**Memory:** `~/.claude/projects/D--ClaudeCode-pincher-repo/memory/MEMORY.md` (loaded automatically)
 
-This session ran with the "continuous probe→fix→ship" standing order: agent probes pincher live, finds a silent-confidently-wrong shape, cuts a fresh branch from master, writes the fix + regression test + CHANGELOG.d stub, opens a PR with auto-merge, returns to master, repeats. Stops only on explicit user "stop". Standard wakeups every ~270s (within prompt cache TTL).
-
-**What that produced this session:** 16 PRs (#1044–#1059). Three diagnosis families fully closed (cross-project leak / star-sentinel / ghost-extraction). One Python corpus + edge-case tests. One release-prep PR.
-
-**If you resume:** the loop is paused at handoff. To restart, send "continue the autonomous probe→fix→ship dogfood loop" — the agent will pick up against v0.59's open bugs.
-
----
-
-## Memory updates this session
-
-Persistent agent memory was updated through the loop (the agent's auto-memory system writes to `~/.claude/projects/.../memory/`). Highlights worth knowing about:
-
-- The cross-project leak class is now documented as a recurring shape — future probes against indexed-mirror-heavy installs should expect mirror-vs-session disambiguation needs.
-- The star-sentinel inconsistency was caught by probing both behaviors deliberately (silent fallback + clear-rejection categories) — pattern to repeat against future tool families.
-- Doctor's per-section token budget is real: `top × 3 sections × per-row bytes`. The math says any future per-row payload growth needs a corresponding ceiling re-check.
-
----
-
-## Files of note (uncommitted, ignore)
-
-These are scratch files from the session, intentionally `.gitignore`'d or just untracked:
-
-- `.planning-ci-hardening.md` — pre-release CI scratch
-- `.planning-roadmap-to-v1.md` — phase planning scratch
-- `.planning-zelosmcp-meeting.md`, `.study-guide-zelosmcp.md` — design-decision scratch from a prior meeting
-- `srv.out` — supervisor log capture from a dogfood probe
-- `scripts/enable-supervised.ps1`, `scripts/unstick-pincher.ps1` — Windows local-dev helpers
-
-Nothing here blocks the tag. They're noted only so the v0.59 picker-upper knows what to ignore in `git status`.
+Pick up where the loop left off. Continue.
