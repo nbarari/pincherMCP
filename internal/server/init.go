@@ -101,11 +101,25 @@ func (s *Server) handleInit(_ context.Context, req *mcp.CallToolRequest) (*mcp.C
 
 	results := make([]map[string]any, 0, len(targets))
 	for _, t := range targets {
-		// Filter out AlwaysGlobal targets (just continue today). Both
-		// target=all and target=detect can include continue if the
-		// user has ~/.continue/; from MCP we always skip it. The CLI
-		// equivalent of target=all preserves the original semantic.
+		// Filter out AlwaysGlobal targets (continue, codex). Both
+		// target=all and target=detect can include them; from MCP we
+		// always skip them — their paths are outside project_path so
+		// an MCP-driven write would silently escape scope.
+		//
+		// #1075: surface the skip as a result entry instead of silently
+		// dropping. Pre-fix `target=codex` returned `results: []` with
+		// no signal — the user got nothing, not a refusal, not an
+		// explanation. Same silent-confidently-wrong family as
+		// #1063/#1064/#1065. Now: a "skipped_always_global" entry per
+		// dropped target with the CLI-fallback affordance.
 		if t.AlwaysGlobal {
+			results = append(results, map[string]any{
+				"target": t.Name,
+				"action": "skipped_always_global",
+				"reason": fmt.Sprintf(
+					"target=%q has an always-global path (outside project_path); MCP refuses to write outside project scope. Use `pincher init --target=%s` from the CLI to write the global config.",
+					t.Name, t.Name),
+			})
 			continue
 		}
 

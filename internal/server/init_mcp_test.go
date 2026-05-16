@@ -128,11 +128,19 @@ func TestHandleInit_TargetAllFiltersAlwaysGlobal(t *testing.T) {
 	body := decode(t, res)
 	results, _ := body["results"].([]any)
 
+	// #1075: AlwaysGlobal targets (continue, codex) now appear as
+	// `action: skipped_always_global` entries rather than being silently
+	// dropped. The original invariant — that no actual write/update
+	// action runs for them — is preserved.
 	for _, r := range results {
 		entry := r.(map[string]any)
 		name, _ := entry["target"].(string)
-		if name == "continue" {
-			t.Errorf("target=all included continue (must be filtered as AlwaysGlobal):\n%v", entry)
+		action, _ := entry["action"].(string)
+		if name == "continue" || name == "codex" {
+			if action != "skipped_always_global" {
+				t.Errorf("target=all: AlwaysGlobal target %q must be action=skipped_always_global, got %q:\n%v",
+					name, action, entry)
+			}
 		}
 	}
 	// At least the project-scoped targets should appear (claude, cursor, …).
