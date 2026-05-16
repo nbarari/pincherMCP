@@ -512,6 +512,10 @@
     "description": "**Use before changing behaviour** that other code depends on, to find callers (inbound) or what it calls (outbound). Risk labels: CRITICAL=direct callers, HIGH=2 hops, MEDIUM=3 hops. Pass `name` for the common case; when the name is ambiguous (multiple symbols share it) trace falls back to the first match and surfaces alternatives in `_meta.ambiguous_match`. To trace a specific alternative, pass `id=` with the exact symbol ID from search/symbols/query — that's the disambiguation escape hatch (#474). Default traversal follows CALLS-family edges; pass `kinds=READS,WRITES` to trace data-flow edges instead (or `kinds=CALLS,READS` to mix). Test files and testdata/ fixtures are filtered by default; pass `include_tests=true` to see test coverage of a symbol. When `depth` is omitted, the result is auto-trimmed to the smallest depth with ≥5 hops (so hotspots don't dump 100+ rows); `_meta.depth_used` reports the trim. Pass `depth=N` explicitly to skip the trim.",
     "input_schema": {
       "properties": {
+        "compact": {
+          "description": "#1225: thin-client envelope. Drops per-hop kind + via fields and the top-level risk_summary block. Default false. On hot traces these account for 30-50% of payload that thin-client consumers (Cursor / Continue / Claude Desktop) don't render. Risk-aware consumers (dashboards, dogfood) stick with the default.",
+          "type": "boolean"
+        },
         "depth": {
           "description": "BFS depth 1-5 (default 3)",
           "type": "integer"
@@ -533,8 +537,12 @@
           "description": "Exact symbol ID to trace (e.g. 'internal/db/db.go::db.Open#Function'). Use this when name resolution would be ambiguous, or when you already have the ID from search/symbols/query. Mutually exclusive with name (id wins). #474.",
           "type": "string"
         },
+        "include_fixtures": {
+          "description": "#1225: if true, surface hops in testdata/__fixtures__/ pinned-corpus paths. Default false. Pre-#1225 these were grouped under include_tests; split so callers can selectively unlock real tests without also unlocking pincher's snapshot inputs (mirrors #1212 pinchQL fixture filter).",
+          "type": "boolean"
+        },
         "include_tests": {
-          "description": "If true, surface hops in test files (*_test.go, *.spec.ts, etc.) and testdata/ fixtures. Default false — tests flood inbound traces on hotspots without orientation value, so they're filtered like architecture's hotspot list. Set true when you genuinely want to see a symbol's test coverage.",
+          "description": "If true, surface hops in test files (*_test.go, *.spec.ts, etc.). Default false. As of #1225 this no longer also governs fixture paths — use include_fixtures for those. Set true when you genuinely want a symbol's test coverage.",
           "type": "boolean"
         },
         "kinds": {

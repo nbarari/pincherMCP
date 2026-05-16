@@ -65,11 +65,14 @@ func TestHandleTrace_DefaultFiltersTestsAndFixtures(t *testing.T) {
 		t.Errorf("default trace should filter fixCaller (testdata fixture); got %v", gotNames)
 	}
 
-	// include_tests=true: all three surface.
+	// #1225 update: include_tests=true alone unlocks tests only.
+	// Fixtures need include_fixtures=true (split from the pre-#1225
+	// combined behavior). Both flags needed to surface all three.
 	result, err = srv.handleTrace(context.Background(), makeReq(map[string]any{
-		"name":          "Target",
-		"direction":     "inbound",
-		"include_tests": true,
+		"name":             "Target",
+		"direction":        "inbound",
+		"include_tests":    true,
+		"include_fixtures": true,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +80,7 @@ func TestHandleTrace_DefaultFiltersTestsAndFixtures(t *testing.T) {
 	gotNames = traceHopNames(t, result)
 	for _, want := range []string{"prodCaller", "TestCaller", "fixCaller"} {
 		if !gotNames[want] {
-			t.Errorf("include_tests=true should surface %s; got %v", want, gotNames)
+			t.Errorf("include_tests=true + include_fixtures=true should surface %s; got %v", want, gotNames)
 		}
 	}
 }

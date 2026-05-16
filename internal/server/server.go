@@ -3272,7 +3272,9 @@ func (s *Server) registerTools() {
 				"risk":{"type":"boolean","description":"Add CRITICAL/HIGH/MEDIUM/LOW risk labels (default true)"},
 				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Hops whose target symbol scores below the threshold are excluded from the result."},
 				"kinds":{"type":"string","description":"Comma-separated list of edge kinds to traverse (e.g. 'CALLS' or 'READS,WRITES'). Default: CALLS-family (CALLS,HTTP_CALLS,ASYNC_CALLS) — covers the typical 'who calls this' use case. Pass READS / WRITES (Go vars only, see #264/#265) to follow data-flow edges. Whitespace and case-insensitive."},
-				"include_tests":{"type":"boolean","description":"If true, surface hops in test files (*_test.go, *.spec.ts, etc.) and testdata/ fixtures. Default false — tests flood inbound traces on hotspots without orientation value, so they're filtered like architecture's hotspot list. Set true when you genuinely want to see a symbol's test coverage."},
+				"include_tests":{"type":"boolean","description":"If true, surface hops in test files (*_test.go, *.spec.ts, etc.). Default false. As of #1225 this no longer also governs fixture paths — use include_fixtures for those. Set true when you genuinely want a symbol's test coverage."},
+				"include_fixtures":{"type":"boolean","description":"#1225: if true, surface hops in testdata/__fixtures__/ pinned-corpus paths. Default false. Pre-#1225 these were grouped under include_tests; split so callers can selectively unlock real tests without also unlocking pincher's snapshot inputs (mirrors #1212 pinchQL fixture filter)."},
+				"compact":{"type":"boolean","description":"#1225: thin-client envelope. Drops per-hop kind + via fields and the top-level risk_summary block. Default false. On hot traces these account for 30-50% of payload that thin-client consumers (Cursor / Continue / Claude Desktop) don't render. Risk-aware consumers (dashboards, dogfood) stick with the default."},
 				"fields":{"type":"string","description":"Comma-separated top-level keys to include, e.g. 'hops,total' to drop risk_summary. Per-hop fields are NOT trimmed — pass shape via downstream symbol/symbols calls. _meta is preserved."}
 			}
 		}`),
@@ -6571,7 +6573,26 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// aren't real code, just inputs to pincher's own snapshot tests.
 	// `include_tests=true` opts back into the legacy mixed list when
 	// the caller actually wants to see test coverage of a symbol.
+	//
+	// #1225 (thin-client PR 1): split the fixture filter onto its own
+	// knob `include_fixtures` so callers can selectively unlock tests
+	// (a real source-of-truth signal on "who exercises this symbol?")
+	// without also unlocking pincher's own pinned-corpus fixtures
+	// (pure inputs to snapshot tests, never load-bearing for a real
+	// trace). Pre-fix `include_tests=true` unlocked BOTH; post-fix it
+	// unlocks tests only. include_fixtures defaults to false on its
+	// own (matching #1212's pinchQL default). Pass include_fixtures=
+	// true to opt back into the legacy combined behaviour.
 	includeTests := boolArg(args, "include_tests")
+	includeFixtures := boolArg(args, "include_fixtures")
+	// #1225 (thin-client PR 1): compact=true drops the per-hop kind
+	// + via fields and the top-level risk_summary from the response.
+	// On hot-path traces these account for 30-50% of payload that
+	// thin-client consumers (Cursor / Continue / Claude Desktop)
+	// never use — the agent reads name + file_path + line and acts.
+	// Default false preserves current shape for callers that DO
+	// consume those fields (dashboards, dogfood, risk-aware reviews).
+	compact := boolArg(args, "compact")
 
 	// kinds: comma-separated list of edge kinds to traverse (e.g.
 	// "CALLS" or "READS,WRITES"). Empty/missing = default (CALLS
@@ -6759,7 +6780,16 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		if minConfidence > 0 && h.Symbol.ExtractionConfidence < minConfidence {
 			continue
 		}
-		if !includeTests && (isTestFile(h.Symbol.FilePath) || isTestFixturePath(h.Symbol.FilePath)) {
+		// #1225: split the test-file and fixture-path checks onto
+		// their respective knobs. Default behavior unchanged when
+		// both flags remain at their defaults (false); the new shape
+		// only matters when include_tests=true is passed without
+		// include_fixtures=true.
+		if !includeTests && isTestFile(h.Symbol.FilePath) {
+			testFilteredCount++
+			continue
+		}
+		if !includeFixtures && isTestFixturePath(h.Symbol.FilePath) {
 			testFilteredCount++
 			continue
 		}
@@ -6809,16 +6839,28 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	byDepth := make(map[int][]map[string]any)
 	riskCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
 	for _, h := range hops {
+		// #1225: compact=true drops kind + via from each hop. The
+		// thin-client target shape is {id, name, file_path, start_line}
+		// per hop — agents reading the trace need to know what to
+		// open next, not the edge metadata.
 		entry := map[string]any{
 			"id":         h.Symbol.ID,
 			"name":       h.Symbol.Name,
-			"kind":       h.Symbol.Kind,
 			"file_path":  h.Symbol.FilePath,
 			"start_line": h.Symbol.StartLine,
-			"via":        h.Via,
+		}
+		if !compact {
+			entry["kind"] = h.Symbol.Kind
+			entry["via"] = h.Via
 		}
 		if addRisk {
-			entry["risk"] = h.Risk
+			// #1225: keep per-hop risk on non-compact; drop on compact
+			// (the risk summary at the top level is also dropped in
+			// compact mode — risk-aware consumers stick with the
+			// default non-compact shape).
+			if !compact {
+				entry["risk"] = h.Risk
+			}
 			riskCounts[h.Risk]++
 		}
 		byDepth[h.Depth] = append(byDepth[h.Depth], entry)
@@ -6970,7 +7012,10 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"total":     len(hops),
 		"_meta":     meta,
 	}
-	if addRisk {
+	if addRisk && !compact {
+		// #1225: drop the top-level risk_summary on compact=true.
+		// Risk-aware consumers stick with the default non-compact
+		// shape; thin-client consumers don't render it.
 		data["risk_summary"] = riskCounts
 	}
 	// #400: response-level field projection. Per-hop fields are NOT
