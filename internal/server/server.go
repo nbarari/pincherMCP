@@ -6481,7 +6481,16 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 
 	projectID, err := s.resolveProjectID(projectArg)
 	if err != nil {
-		return errResult(err.Error()), nil
+		// #1064: rich envelope on project-not-found, matching the
+		// mustProject canonical shape. Pre-fix changes was the second
+		// of two per-project tools (with search, fixed in #1063) that
+		// returned a bare errResult here — agents consuming
+		// _meta.next_steps lost the recovery affordance only on these
+		// two tools.
+		return s.errResultRich(err.Error(), []map[string]string{
+			{"tool": "list", "args": `{}`, "why": "see every indexed project with its exact id + on-disk path"},
+			{"tool": "index", "args": `{"path":"/abs/path/to/repo"}`, "why": "onboard a new project from a directory path"},
+		}), nil
 	}
 	root, err := s.resolveProjectRoot(projectID)
 	if err != nil {
