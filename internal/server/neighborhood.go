@@ -163,21 +163,38 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	if resolvedProjectID != "" {
 		projectID = resolvedProjectID
 	}
-	// #1051: cross-project leak warning, mirroring #1049 / #1050.
-	// When projectArg is omitted, GetSymbol above resolves to whichever
-	// indexed project happens to carry the seed id — mirror projects
-	// (sniffer mirrors, MCP_Combine staging, .pincher-supported
-	// snapshots) carry identical IDs to their primary repo. Pre-fix
-	// neighborhood happily returned 224 neighbors from the wrong tree
-	// (the seed's project, not the session's), with bytes pulled from
-	// the wrong on-disk file. Agents using the neighbor list to plan
-	// an in-file refactor were planning against the wrong file. Same
-	// guards as #1049: only fires when no project arg was passed and
-	// the resolution actually crossed projects. "*" / explicit-project
-	// callers asked for cross-project lookups deliberately.
+	// #1232 (neighborhood arm): silent-cross-project default flipped
+	// to strict-error. neighborhood is the most dangerous shape of
+	// the three (symbol / context / neighborhood) — it returns up to
+	// 500 in-file siblings, every one of them belonging to the
+	// cross-project tree if the seed resolved off-session. Agents
+	// using the neighbor list to plan an in-file refactor are planning
+	// against the wrong file. The opt-in escape hatch is cross_project=
+	// true; "*" and explicit-project bypass the strict guard.
+	crossProjectAllowed := boolArg(args, "cross_project")
+	if projectArg == "" && s.sessionID != "" && seed.ProjectID != s.sessionID && !crossProjectAllowed {
+		return s.errResultRich(
+			fmt.Sprintf(
+				"seed %q is not in the session project %q — it exists only in project %q. Pre-#1232 neighborhood returned every in-file sibling from that other project silently (with a warning string); now it errors so callers using the neighbor list to plan in-file refactors can't accidentally edit the wrong tree. Re-issue with project=%q to use that project's data, or pass cross_project=true to opt back into the legacy silent-fallback behaviour.",
+				id, s.sessionID, seed.ProjectID, seed.ProjectID,
+			),
+			[]map[string]string{
+				{"tool": "neighborhood", "args": fmt.Sprintf(`{"id":%q,"project":%q}`, id, seed.ProjectID),
+					"why": "use the project where this seed actually lives"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"project":%q}`, shortNameFromID(id), s.sessionID),
+					"why": "look for the equivalent symbol in the session project (which is where you probably meant to be)"},
+				{"tool": "neighborhood", "args": fmt.Sprintf(`{"id":%q,"cross_project":true}`, id),
+					"why": "opt into legacy silent-fallback behaviour — same data as before, no shape change"},
+			},
+		), nil
+	}
+	// #1051 (legacy path, now only reached when cross_project=true):
+	// preserve the warning string so the opt-in caller still gets the
+	// programmatic signal that the lookup crossed project boundaries.
 	if projectArg == "" && s.sessionID != "" && seed.ProjectID != s.sessionID {
+		// crossProjectAllowed must be true at this point.
 		clampWarnings = append(clampWarnings, fmt.Sprintf(
-			"seed %q resolved from project %q rather than the session project %q — an indexed mirror or stale snapshot carries an ID identical to your working tree. The neighbor list + every file_path below belongs to the off-tree project. Re-issue with project=%q to pin scope, or project=%q if you intended that source.",
+			"seed %q resolved from project %q rather than the session project %q (cross_project=true). The neighbor list + every file_path below belongs to the off-tree project. Re-issue with project=%q to pin scope, or project=%q if you intended that source.",
 			id, seed.ProjectID, s.sessionID, s.sessionID, seed.ProjectID,
 		))
 	}

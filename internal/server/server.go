@@ -3422,7 +3422,8 @@ func (s *Server) registerTools() {
 				"include_source":{"type":"boolean","description":"If true, also fetch each neighbor's source body via the byte-offset path. Default false (signatures only — much cheaper)."},
 				"include_self":{"type":"boolean","description":"If true, include the seed symbol itself in the neighbors list. Default false (caller already has it)."},
 				"limit":{"type":"integer","description":"Maximum neighbors to return (default 50, max 500). Files with more symbols paginate via _meta.next_steps."},
-				"offset":{"type":"integer","description":"Skip the first N neighbors (default 0). Use the value from _meta.next_steps to walk the file."}
+				"offset":{"type":"integer","description":"Skip the first N neighbors (default 0). Use the value from _meta.next_steps to walk the file."},
+				"cross_project":{"type":"boolean","description":"#1232 opt-in: when the seed ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning every in-file sibling from that other project — agents using the neighbor list to plan an in-file refactor would otherwise edit the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly."}
 			}
 		}`),
 	}, s.handleNeighborhood)

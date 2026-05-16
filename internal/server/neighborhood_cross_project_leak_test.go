@@ -16,8 +16,12 @@ import (
 // their primary repo. Pre-fix neighborhood returned 224 neighbors
 // from the wrong tree with no signal. An agent planning an in-file
 // refactor would plan against the wrong file.
+//
+// #1232 update (2026-05-16): default behaviour flipped to strict-error.
+// This test now pins the OPT-IN warning shape; strict-error coverage
+// lives in neighborhood_cross_project_strict_test.go.
 
-func TestHandleNeighborhood_NoProject_CrossProjectResolution_Warns(t *testing.T) {
+func TestHandleNeighborhood_CrossProject_OptInStillWarns(t *testing.T) {
 	t.Parallel()
 	srv, store, _ := newTestServer(t)
 	sessionPID := "p-nbh-session"
@@ -40,7 +44,8 @@ func TestHandleNeighborhood_NoProject_CrossProjectResolution_Warns(t *testing.T)
 	})
 
 	result, err := srv.handleNeighborhood(context.Background(), makeReq(map[string]any{
-		"id": "shared.go::pkg.Common#Function",
+		"id":            "shared.go::pkg.Common#Function",
+		"cross_project": true, // #1232 opt-in to legacy silent-fallback shape
 	}))
 	if err != nil {
 		t.Fatalf("handleNeighborhood: %v", err)
@@ -48,7 +53,7 @@ func TestHandleNeighborhood_NoProject_CrossProjectResolution_Warns(t *testing.T)
 	body := decode(t, result)
 	meta, _ := body["_meta"].(map[string]any)
 	if meta == nil {
-		t.Fatal("_meta missing — expected cross-project warning")
+		t.Fatal("_meta missing — expected cross-project warning on opt-in path")
 	}
 	warnings, _ := meta["warnings"].([]any)
 	saw := false

@@ -285,6 +285,10 @@
     "description": "**Returns same-file symbols, NOT graph adjacency.** Despite the name (#498), this tool answers \"what other symbols live in the same file as the seed?\" — useful for in-file refactor planning. For graph adjacency (callers / callees / readers / writers), use `trace direction=both` instead. Given a seed symbol ID, returns every symbol in the same file (signatures + line ranges) ordered by source position. One round-trip vs N `symbol` calls or one whole-file `Read`. Paginated: defaults to 50 neighbors per call (limit/offset), with the next page surfaced in `_meta.next_steps` when the file has more. Default response excludes `source`; pass `include_source=true` to also fetch each neighbor's body.",
     "input_schema": {
       "properties": {
+        "cross_project": {
+          "description": "#1232 opt-in: when the seed ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning every in-file sibling from that other project — agents using the neighbor list to plan an in-file refactor would otherwise edit the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly.",
+          "type": "boolean"
+        },
         "id": {
           "description": "Stable symbol ID of the seed. The neighborhood is every symbol that shares its file.",
           "type": "string"
