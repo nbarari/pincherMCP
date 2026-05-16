@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -79,6 +80,20 @@ func runWebCLI(args []string) {
 	defer store.Close()
 
 	if base, pid, ok := findLiveHTTPServer(store); ok {
+		// #706: warn loudly when the running HTTP server's version
+		// doesn't match the on-disk binary. Common dev-loop trap: dev
+		// rebuilds, runs `pincher web`, gets the URL of the previous
+		// dev session's stale server, and dogfoods against old code
+		// without realizing. Best-effort — a probe failure or empty
+		// version field leaves the banner suppressed (don't make `web`
+		// fragile on flaky networks).
+		if runningVer := fetchRunningServerVersion(base); runningVer != "" && runningVer != version {
+			fmt.Fprintf(os.Stderr,
+				"pincher web: WARNING — running HTTP server is %q but the on-disk binary is %q.\n"+
+					"  The dashboard will reflect the running (older) code, not the binary you just built.\n"+
+					"  To use the fresh binary: kill PID %d, then re-run `pincher web` to auto-start a new server.\n",
+				runningVer, version, pid)
+		}
 		emitWebResult(os.Stdout, base, dashboardURL(base), pid, "existing", *jsonOut)
 		return
 	}
@@ -132,6 +147,34 @@ func findLiveHTTPServer(store *db.Store) (string, int, bool) {
 		return "", 0, false
 	}
 	return row.HTTPURL, row.HTTPPID, true
+}
+
+// fetchRunningServerVersion (#706) GETs <url>/v1/health and parses the
+// `version` field from the JSON body. Returns the version string, or ""
+// when the probe fails, the response isn't JSON, or `version` is empty.
+// Best-effort — used only to surface a soft warning, never to fail the
+// `web` flow.
+func fetchRunningServerVersion(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	url := strings.TrimRight(rawURL, "/") + "/v1/health"
+	client := &http.Client{Timeout: 1 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
+		return ""
+	}
+	return body.Version
 }
 
 // probeHTTPHealthy issues a 1-second GET to <url>/v1/health and returns
