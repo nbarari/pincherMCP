@@ -3596,6 +3596,14 @@ func appendInlinePropFilters(sqlQ *string, args *[]any, prefix string, props map
 	for k, v := range props {
 		col := cypherPropToCol(k)
 		if col == "" {
+			// #1119: unknown prop in inline brace ((n {nme:"x"})). The
+			// collectUnknownPropertyWarnings warning text promises
+			// "treated as undefined (always false in comparisons)", but
+			// pre-fix the filter was silently dropped — the query
+			// returned all rows, contradicting the warning. Now emit
+			// `AND 1=0` so the predicate is structurally always-false
+			// and the result aligns with the contract: 0 rows.
+			*sqlQ += " AND 1=0"
 			continue
 		}
 		if isBoolCol(col) {
@@ -3615,7 +3623,11 @@ func matchesInlineProps(m map[string]any, variable string, props map[string]stri
 	for k, want := range props {
 		col := cypherPropToCol(k)
 		if col == "" {
-			continue // unknown key — don't filter on it
+			// #1119: unknown key — per contract, "undefined (always
+			// false in comparisons)". Reject the whole match rather
+			// than silently skipping the predicate. Mirrors the SQL
+			// filter's `AND 1=0` in appendInlinePropFilters.
+			return false
 		}
 		got := fmt.Sprint(m[variable+"."+k])
 		if isBoolCol(col) {
