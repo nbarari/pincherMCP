@@ -1892,6 +1892,12 @@ func extractTypeScript(source []byte, relPath string) *FileResult {
 		isTest: func(name string) bool {
 			return strings.HasPrefix(name, "test") || strings.HasPrefix(name, "describe")
 		},
+		// #1158 v0.61: opt in to the per-file CALLS pass. TS's `name(`
+		// call syntax matches the regexCallRE shape (C-family); same-
+		// file calls resolve, cross-file calls drop until the v0.61
+		// receiver-type resolver lands. Same shape as C #858 — gives
+		// TS users a real edge graph instead of zero edges.
+		extractCalls: true,
 	}
 	result := tsRE.extract(source, relPath, "TypeScript", opts)
 	// #1158 v0.61: the new methodRE matches `name(` at line start, which
