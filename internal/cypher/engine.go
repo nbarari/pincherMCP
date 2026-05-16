@@ -96,6 +96,15 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// warning the agent walks away thinking "no matches" when the
 	// real cause is a typo in the property name.
 	warnings := collectUnknownPropertyWarnings(q)
+	// #1116: WHERE / RETURN references to an unbound variable (a typo
+	// of the MATCH pattern's fromVar/toVar/edgeVar) get silently
+	// ignored — the comparison evaluates to NULL/false, and rows pass
+	// through the filter unchanged. The user thinks `WHERE m.name="x"`
+	// filtered; the query actually returned every row because `m`
+	// wasn't bound to anything. Same silent-confidently-wrong shape as
+	// #473 (unknown property) — surface the typo with the bound-
+	// variable list so the agent learns the correct name.
+	warnings = append(warnings, collectUnknownVariableWarnings(q)...)
 	// #593: column-vs-column comparisons (`a.col <op> b.col`) parse
 	// but evaluation returns false — surface a warning so the agent
 	// knows the predicate isn't being honored. Same UX class as #473.
@@ -283,6 +292,87 @@ func collectUnknownPropertyWarnings(q *queryAST) []string {
 		out = append(out, fmt.Sprintf(
 			"property %q not recognized on %s variable; treated as undefined (always false in comparisons). Valid %s properties: %s.",
 			n, kind, kind, strings.Join(propList, ", ")))
+	}
+	return out
+}
+
+// collectUnknownVariableWarnings (#1116) walks WHERE / RETURN and warns
+// when a variable reference isn't bound in any MATCH pattern. Pre-fix
+// such references silently coerced to NULL — `WHERE m.name="x"` (typo
+// of `n`) returned the full row set because the predicate evaluated to
+// always-false, not because nothing matched. Same silent-confidently-
+// wrong shape as #473 (unknown property), but at the variable scope.
+func collectUnknownVariableWarnings(q *queryAST) []string {
+	if q == nil {
+		return nil
+	}
+	bound := map[string]bool{}
+	for _, pat := range q.patterns {
+		if pat.fromVar != "" {
+			bound[pat.fromVar] = true
+		}
+		if pat.toVar != "" {
+			bound[pat.toVar] = true
+		}
+		if pat.edgeVar != "" {
+			bound[pat.edgeVar] = true
+		}
+	}
+	if len(bound) == 0 {
+		return nil
+	}
+	unknown := map[string]bool{}
+	check := func(variable, prop string) {
+		if variable == "" || prop == "" {
+			return
+		}
+		if !bound[variable] {
+			unknown[variable] = true
+		}
+	}
+	for _, c := range q.conditions {
+		check(c.variable, c.property)
+		if c.rhsVariable != "" {
+			check(c.rhsVariable, c.rhsProperty)
+		}
+	}
+	var walk func(w whereExpr)
+	walk = func(w whereExpr) {
+		switch e := w.(type) {
+		case condExpr:
+			check(e.c.variable, e.c.property)
+			if e.c.rhsVariable != "" {
+				check(e.c.rhsVariable, e.c.rhsProperty)
+			}
+		case binaryExpr:
+			walk(e.left)
+			walk(e.right)
+		case notExpr:
+			walk(e.inner)
+		}
+	}
+	walk(q.where)
+	for _, rv := range q.returnVars {
+		check(rv.variable, rv.property)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(unknown))
+	for n := range unknown {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	boundList := make([]string, 0, len(bound))
+	for b := range bound {
+		boundList = append(boundList, b)
+	}
+	sort.Strings(boundList)
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, fmt.Sprintf(
+			"variable %q not bound in any MATCH pattern — references are silently treated as null, so a WHERE predicate using it never matches. Bound variables in this query: %s. (typo? did you mean one of those?)",
+			n, strings.Join(boundList, ", ")))
 	}
 	return out
 }
