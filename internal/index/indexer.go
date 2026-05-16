@@ -265,8 +265,22 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// build) opts out of the force — we don't want one-shot CLI runs
 	// with --version=dev to nuke the project's hash cache on every call.
 	var binaryDriftForce bool
+	// #986: capture the prior binary_version BEFORE the start-of-pass
+	// UpsertProjectMeta. Pre-fix, the start stamp wrote idx.binaryVersion
+	// — so any interrupted drift-reindex left the row claiming the new
+	// version while the symbols table was partial. The next startup then
+	// saw `prev.BinaryVersion == idx.binaryVersion`, no drift detected,
+	// no re-reindex triggered. End state: 30% symbol coverage stuck on
+	// the new binary_version stamp.
+	//
+	// The end-of-pass UpsertProject (line 772) writes the new version
+	// only on successful completion. The start UpsertProjectMeta now
+	// writes the OLD value (or "" when the project is new), so a
+	// crashed/killed run leaves drift detection intact for the retry.
+	var priorBinaryVersion string
 	if prev, _ := idx.store.GetProject(projectID); prev != nil {
 		fileCountEstimate = prev.FileCount
+		priorBinaryVersion = prev.BinaryVersion
 		if prev.BinaryVersion != "" && idx.binaryVersion != "" && prev.BinaryVersion != idx.binaryVersion {
 			binaryDriftForce = true
 			slog.Info("pincher.index.binary_drift_force_reindex",
@@ -290,12 +304,18 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 	// the brief window before UpdateProjectCounts catches up — health
 	// previously reported 0 files / 0 symbols / 0 edges in that gap
 	// even though the underlying tables were intact.
+	//
+	// #986: write the PRIOR binary_version at start. The end-of-pass
+	// UpsertProject flips it to the running version only on successful
+	// completion. An interrupted pass therefore leaves drift detection
+	// intact for the next startup retry, rather than silently locking
+	// in a partial index under the new version stamp.
 	if err := idx.store.UpsertProjectMeta(db.Project{
 		ID:            projectID,
 		Path:          absPath,
 		Name:          projectName,
 		IndexedAt:     start,
-		BinaryVersion: idx.binaryVersion,
+		BinaryVersion: priorBinaryVersion,
 	}); err != nil {
 		return nil, fmt.Errorf("upsert project: %w", err)
 	}
