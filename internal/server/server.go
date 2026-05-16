@@ -3490,6 +3490,25 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// (see cmd/pinch/main.go) — do the same here so the MCP surface agrees.
 	totalSyms, totalEdges, _, _, _ := s.store.GraphStats(result.ProjectID)
 
+	data := buildIndexResponseData(result, totalSyms, totalEdges)
+	// When the index produces zero symbols, surface *why* in _meta so the
+	// agent doesn't guess "is it broken?" — the answer is usually obvious
+	// from the counts (no source files vs all blocked vs all unchanged).
+	// Trustworthy + explainable: the user gets a clear diagnostic instead
+	// of a silent zero. Skipped on healthy non-zero runs.
+	if meta := diagnoseEmptyIndex(result, force); meta != nil {
+		data["_meta"] = meta
+	}
+	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
+}
+
+// buildIndexResponseData constructs the JSON response shape for
+// handleIndex. Extracted into a free function so #1231 follow-up
+// behavior (surfacing ParityMismatchFiles + ParityMissingSymbols when
+// non-zero) is testable in isolation without an end-to-end indexer
+// run. Healthy runs (zero parity mismatches) omit both fields so the
+// response stays clean.
+func buildIndexResponseData(result *index.IndexResult, totalSyms, totalEdges int) map[string]any {
 	data := map[string]any{
 		"project":     result.Project,
 		"path":        result.Path,
@@ -3502,15 +3521,28 @@ func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		"deleted":     result.Deleted, // #326: files removed from disk since last run, GC'd this index
 		"duration_ms": result.DurationMS,
 	}
-	// When the index produces zero symbols, surface *why* in _meta so the
-	// agent doesn't guess "is it broken?" — the answer is usually obvious
-	// from the counts (no source files vs all blocked vs all unchanged).
-	// Trustworthy + explainable: the user gets a clear diagnostic instead
-	// of a silent zero. Skipped on healthy non-zero runs.
-	if meta := diagnoseEmptyIndex(result, force); meta != nil {
+	// #1231 follow-up to #1233: surface parity-check counts in the MCP
+	// response when non-zero. Without this, the per-file parity slog.Warn
+	// fires in the daemon's stderr but is invisible to MCP callers — the
+	// agent runs an index, sees no warnings in the response, and assumes
+	// the run was healthy. Surfacing the counts (and a warning string)
+	// makes the silent-loss signal observable in real time without
+	// requiring stderr access.
+	if result.ParityMismatchFiles > 0 {
+		data["parity_mismatch_files"] = result.ParityMismatchFiles
+		data["parity_missing_symbols"] = result.ParityMissingSymbols
+		meta, _ := data["_meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		warnings, _ := meta["warnings"].([]string)
+		warnings = append(warnings, fmt.Sprintf(
+			"silent symbol loss detected on %d file(s): expected counts exceeded actual by %d total symbols (#1231). Check daemon stderr for per-file `pincher.index.parity.mismatch` entries naming the affected paths.",
+			result.ParityMismatchFiles, result.ParityMissingSymbols))
+		meta["warnings"] = warnings
 		data["_meta"] = meta
 	}
-	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
+	return data
 }
 
 func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
