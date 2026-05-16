@@ -159,6 +159,16 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// a real property — and the caller's audit silently read "this
 	// row has nothing." Surface the missing prefix.
 	warnings = append(warnings, collectReturnBarePropertyWarnings(q)...)
+	// #1155: aggregate mixed with non-aggregate in RETURN without
+	// explicit grouping. pinchQL applies implicit GROUP BY on the
+	// non-aggregate columns (#348/#432), so `count(a) AS total, a.name`
+	// returns per-name counts rather than a single overall total. The
+	// alias `AS total` plus per-row scan-order results read as "I'm
+	// getting one number per row" — silently confidently wrong when
+	// the caller expected the overall count. Surface the implicit GROUP
+	// BY so the caller can pick: drop the non-aggregate for a real
+	// overall, or accept the per-group shape as intended.
+	warnings = append(warnings, collectAggregateMixedWithBareWarnings(q)...)
 	res, err := e.run(ctx, q)
 	if err != nil {
 		return res, err
@@ -863,6 +873,95 @@ func collectOrderByAggregateWithoutGroupingWarnings(q *queryAST) []string {
 	return []string{fmt.Sprintf(
 		"ORDER BY %s in a query with no aggregate in RETURN: there is no grouping context, so the aggregate evaluates to one value across all rows, the sort silently no-ops, and results come back in scan order. Add the same aggregate to RETURN to enable grouped sorting (e.g. RETURN n.language, %s ORDER BY %s DESC).",
 		ob, ob, ob)}
+}
+
+// collectAggregateMixedWithBareWarnings (#1155) surfaces when RETURN
+// mixes an aggregate (COUNT/SUM/AVG/MIN/MAX) with a non-aggregate
+// column. pinchQL applies implicit GROUP BY on the bare columns
+// (#348/#432), so:
+//
+//	MATCH (a:Function) RETURN count(a) AS total, a.name LIMIT 5
+//
+// returns 5 rows each with `total=1` (count per distinct name) rather
+// than a single row with `total=2289` (count over all Functions). The
+// alias `AS total` makes the misread more likely — the caller's
+// audit reads "five totals, all 1" and concludes the data is broken
+// when actually pincher faithfully applied Cypher GROUP-BY semantics.
+//
+// Same silent-confidently-wrong family as #1122 (ORDER BY aggregate
+// without projection aggregate) and #1135 (bare RETURN property).
+// The fix is a warning, not a behavior change: implicit GROUP BY is
+// the correct Cypher behavior; the caller just needs to know it's
+// happening so they can choose drop-the-bare (overall count) or
+// keep-the-bare (per-group breakdown).
+func collectAggregateMixedWithBareWarnings(q *queryAST) []string {
+	if q == nil || len(q.returnVars) < 2 {
+		return nil
+	}
+	// DISTINCT or ORDER BY on the aggregate signals the caller
+	// understands per-group output and is consuming it deliberately
+	// (the canonical "count by group" shape). Suppress the warning in
+	// those cases — they are not the silent-confidently-wrong family.
+	// Surfaced by the known-good suite (`distinct_grouped_aggregate`)
+	// when this collector first shipped: that shape is well-formed.
+	if q.distinct {
+		return nil
+	}
+	if q.orderBy != "" {
+		ob := strings.TrimSpace(q.orderBy)
+		if i := strings.Index(ob, "("); i > 0 {
+			if isAggFn(strings.TrimSpace(ob[:i])) {
+				return nil
+			}
+		}
+	}
+	// Narrow to the silent-confidently-wrong shape: an aliased
+	// aggregate ("AS total", "AS mean", etc.) suggests the caller
+	// expected a single overall number — the alias names "the
+	// answer." A bare aggregate without an alias next to a bare
+	// column is the canonical group-by idiom (`RETURN n.language,
+	// COUNT(*)`) and must stay silent, even though the implicit GROUP
+	// BY is the same. Pre-narrowing the warning fired on every
+	// well-formed `n.kind, COUNT(*)` query — false-positive surface.
+	var aggExpr, bareCol string
+	for _, rv := range q.returnVars {
+		if rv.fn != "" && rv.alias != "" && aggExpr == "" {
+			aggExpr = formatAggExpr(rv)
+		}
+		if rv.fn == "" && bareCol == "" {
+			bareCol = formatBareCol(rv)
+		}
+	}
+	if aggExpr == "" || bareCol == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"RETURN mixes aliased aggregate %s with non-aggregate column %s — the alias suggests an overall value, but pinchQL applies implicit GROUP BY on %s (Cypher semantics), so each row's aggregate is per-group, not the overall total. Drop %s for an overall aggregate matching the alias, or drop the alias if per-group breakdown is what you want.",
+		aggExpr, bareCol, bareCol, bareCol)}
+}
+
+// formatAggExpr renders an aggregate returnVar back to its source
+// shape (e.g. `count(a)` or `avg(n.complexity) AS mean`). Used by the
+// #1155 warning so the surfaced text matches what the caller wrote.
+func formatAggExpr(rv returnVar) string {
+	inner := rv.variable
+	if rv.property != "" {
+		inner = rv.variable + "." + rv.property
+	}
+	expr := strings.ToLower(rv.fn) + "(" + inner + ")"
+	if rv.alias != "" {
+		expr += " AS " + rv.alias
+	}
+	return expr
+}
+
+// formatBareCol renders a non-aggregate returnVar (e.g. `a.name` or
+// `a` for whole-node return) used by the #1155 warning.
+func formatBareCol(rv returnVar) string {
+	if rv.property == "" {
+		return rv.variable
+	}
+	return rv.variable + "." + rv.property
 }
 
 // collectRepeatedPatternVarWarnings (#1124) surfaces when a pattern
