@@ -100,15 +100,15 @@
   },
   {
     "name": "dead_code",
-    "description": "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision: `language=Go` (1.0-confidence AST extraction) + `kinds=Function,Method`. Lower `min_confidence` and broaden `kinds` at the cost of false positives from regex-tier extractors that under-resolve cross-file edges. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
+    "description": "**Find unreachable internal functions/methods** — symbols with zero inbound edges (CALLS/READS/WRITES/REFERENCES/IMPORTS) that aren't exported, aren't entry points, and aren't tests. The inverse of `architecture` hotspots. Defaults bias toward precision via `min_confidence=0.95`, which floors to AST-tier extractors (Go and Python at 1.0; JSON/YAML/HCL/TOML parser-backed at 1.0). `language` defaults to empty (all languages above the confidence floor). `kinds` defaults to `Function,Method`. Lower `min_confidence` to include regex-tier languages (TS/JS/Rust/Java/Ruby/PHP/C#/Kotlin/Swift/Lua/Zig/Elixir/Scala/Dart/R at 0.70-0.85) at known false-positive cost — they under-resolve cross-file CALLS. Test fixtures under `testdata/` and `__fixtures__/` are post-filtered out — they have no test runners but aren't real code either.",
     "input_schema": {
       "properties": {
         "kinds": {
-          "description": "Comma-separated kinds to consider, e.g. 'Function,Method' (default), 'Function,Method,Class'. Setting/Variable/Section are excluded by default since dead-DATA has different semantics than dead-code.",
+          "description": "Comma-separated kinds to consider. Default: 'Function,Method' (applied store-side when this field is empty). Pass e.g. 'Function,Method,Class' to widen. Setting/Variable/Section are excluded by default since dead-DATA has different semantics than dead-code.",
           "type": "string"
         },
         "language": {
-          "description": "Language filter, e.g. 'Go'. Default: empty (all languages). Recommended: 'Go' until non-Go AST extractors land — regex extractors under-resolve cross-file CALLS so non-Go results have higher false-positive rates.",
+          "description": "Language filter, e.g. 'Go' or 'Python'. Default: empty (all languages above the min_confidence floor). The default min_confidence=0.95 already restricts results to AST-tier extractors (Go, Python, JSON/YAML/HCL/TOML); pin language= only when you want a single language.",
           "type": "string"
         },
         "limit": {
@@ -116,7 +116,7 @@
           "type": "integer"
         },
         "min_confidence": {
-          "description": "Minimum extraction_confidence (default 0.95 — biases to AST-extracted languages). Drop to 0.0 to include regex-tier languages (higher false-positive rate).",
+          "description": "Minimum extraction_confidence (default 0.95 — biases to AST-tier languages: Go, Python, JSON/YAML/HCL/TOML). Drop to 0.0 to include regex-tier languages (higher false-positive rate from under-resolved cross-file CALLS).",
           "type": "number"
         },
         "project": {
