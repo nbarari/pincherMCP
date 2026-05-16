@@ -3247,7 +3247,7 @@ func (s *Server) registerTools() {
 	// 14. stats — session savings + cumulative counters. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
 		Name:        "stats",
-		Description: "**Use to track context-budget savings** for the current session and all-time. Returns tokens used, tokens saved (vs reading whole files), call count, plus per-project index size (files, symbols, edges). Useful as a sanity check that pincher tools are being preferred over `Read`/`Grep` — if `tokens_saved` is 0 after a chunk of work, the agent is probably bypassing the index.",
+		Description: "**Use to track context-budget savings** for the current session and all-time. Returns a text-rendered box (not JSON) with three sections: SESSION (process uptime, tool calls, tokens-without-pincher baseline, tokens-with-pincher, tokens saved with bounded %, avg latency), ALL-TIME (cumulative tool calls / tokens used / tokens saved across every persisted session — rendered only when the DB has historical data), and PROJECT (name, files, symbols, edges for the session or `project`-arg-resolved project). Process uptime (#420) lets the agent distinguish \"session counters low because the inner respawned 30s ago\" from \"session counters low because nothing has happened.\" Useful as a sanity check that pincher tools are being preferred over `Read`/`Grep` — if `Saved` is 0 after a chunk of work, the agent is probably bypassing the index.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","properties":{
 				"project":{"type":"string","description":"Project to include in index size breakdown. Defaults to session project."}
