@@ -435,7 +435,14 @@ func init() {
 	// significantly harder regex-tier representation (Haskell indentation-
 	// sensitive, Scala mixed-paradigm, Dart/R requiring more nuanced
 	// detection); decide-or-defer documented in their issues under v0.63.
-	Register(stubAdapter("Scala", ".scala"))
+	Register(&langAdapter{
+		primary:    "Scala",
+		exts:       map[string]string{".scala": "Scala", ".sc": "Scala"},
+		confidence: 0.70,
+		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
+			return extractScala(s, p)
+		},
+	})
 	Register(&langAdapter{
 		primary:    "Lua",
 		exts:       map[string]string{".lua": "Lua"},
@@ -461,9 +468,23 @@ func init() {
 		},
 	})
 	Register(stubAdapter("Haskell", ".hs"))
-	Register(stubAdapter("Dart", ".dart"))
+	Register(&langAdapter{
+		primary:    "Dart",
+		exts:       map[string]string{".dart": "Dart"},
+		confidence: 0.70,
+		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
+			return extractDart(s, p)
+		},
+	})
 	// Bash is registered separately by bashExtractor in bash.go (real parser).
-	Register(stubAdapter("R", ".r"))
+	Register(&langAdapter{
+		primary:    "R",
+		exts:       map[string]string{".r": "R", ".R": "R"},
+		confidence: 0.70,
+		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
+			return extractR(s, p)
+		},
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2504,6 +2525,62 @@ func extractZig(source []byte, relPath string) *FileResult {
 	opts := simpleOpts(".", '{')
 	opts.extractCalls = true
 	return zigRE.extract(source, relPath, "Zig", opts)
+}
+
+// #1161 v0.63 round 2 — Scala / Dart / R regex-tier extractors.
+
+var scalaRE = &regexExtractor{
+	// Scala: `def name(...)`, `def name[T](...)`. Modifiers may include
+	// `private`/`protected`/`override`/`final`/`abstract`/`implicit`. Methods
+	// inside class/object/trait scope land via the existing pipeline's
+	// classRE-tracked currentClass when funcRE matches.
+	funcRE:      regexp.MustCompile(`(?m)^\s*(?:private(?:\[\w+\])?\s+|protected\s+|override\s+|final\s+|abstract\s+|implicit\s+|sealed\s+)*def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)`),
+	classRE:     regexp.MustCompile(`(?m)^\s*(?:sealed\s+)?(?:abstract\s+)?(?:final\s+)?(?:case\s+)?(?:class|object|trait)\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
+	interfaceRE: regexp.MustCompile(`(?m)^\s*trait\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
+}
+
+func extractScala(source []byte, relPath string) *FileResult {
+	opts := simpleOpts(".", '{')
+	opts.extractCalls = true
+	return scalaRE.extract(source, relPath, "Scala", opts)
+}
+
+var dartRE = &regexExtractor{
+	// Dart's function shape is C-family: optional modifiers + return-type
+	// tokens + name + `(`. Differentiation from Java is permissive — Dart
+	// allows top-level functions without classes, so we treat the regex
+	// the same way as TS's methodRE (modifier-permissive at line start)
+	// but require either a type token before the name OR a static
+	// modifier. The trailing `\(` anchor reduces false-positives.
+	funcRE:      regexp.MustCompile(`(?m)^\s*(?:static\s+|external\s+|abstract\s+)?(?:async\s+)?(?:[A-Za-z_$][A-Za-z0-9_$<>?,\s]*?\s+)?(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(`),
+	classRE:     regexp.MustCompile(`(?m)^\s*(?:abstract\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_$]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_$]*))?`),
+	interfaceRE: regexp.MustCompile(`(?m)^\s*(?:abstract\s+)?(?:mixin|interface)\s+(?P<name>[A-Z][A-Za-z0-9_$]*)`),
+	enumRE:      regexp.MustCompile(`(?m)^\s*enum\s+(?P<name>[A-Z][A-Za-z0-9_$]*)`),
+}
+
+func extractDart(source []byte, relPath string) *FileResult {
+	opts := simpleOpts(".", '{')
+	opts.extractCalls = true
+	result := dartRE.extract(source, relPath, "Dart", opts)
+	// Dart's funcRE permissive shape catches `if (cond) {` and similar
+	// control-flow false positives the same way TS's methodRE did
+	// (#1158). Reuse the TS keyword filter — the lists are equivalent
+	// (Dart inherits JS/TS control-flow vocabulary).
+	result.Symbols = dropTSKeywordFalsePositives(result.Symbols)
+	return result
+}
+
+var rRE = &regexExtractor{
+	// R: `name <- function(...)`, `name = function(...)`. R lacks a
+	// dedicated keyword; assignment-style function definitions are
+	// the convention.
+	funcRE: regexp.MustCompile(`(?m)^\s*(?P<name>[A-Za-z_.][A-Za-z0-9_.]*)\s*(?:<-|=)\s*function\s*\(`),
+}
+
+func extractR(source []byte, relPath string) *FileResult {
+	opts := simpleOpts(".", '{')
+	opts.extractCalls = true
+	return rRE.extract(source, relPath, "R", opts)
 }
 
 var elixirRE = &regexExtractor{

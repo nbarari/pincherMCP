@@ -234,26 +234,146 @@ func TestExtractElixir_PerFileCalls_EmitsEdges(t *testing.T) {
 	}
 }
 
-// Control: Scala / Haskell / Dart / R remain stub-tier — extractor
-// returns an empty FileResult. Pins the v0.63 deferral decision so
-// a future regex extractor for any of these has to opt in to a
-// non-stub registration and this test then fails loudly, prompting
-// proper test coverage for the new extractor.
-func TestExtractStubTier_RemainsEmpty(t *testing.T) {
-	cases := []struct{ lang, src, path string }{
-		{"Scala", "class Foo { def bar() = 1 }", "src/Foo.scala"},
-		{"Haskell", "module M where\nfoo :: Int\nfoo = 42\n", "src/M.hs"},
-		{"Dart", "void main() { print('hi'); }", "src/main.dart"},
-		{"R", "foo <- function(x) { x + 1 }", "src/foo.r"},
+// Control: Haskell remains stub-tier — indentation-sensitive layout
+// makes regex-tier representation significantly harder. Pins the
+// v0.63 deferral decision so a future regex extractor has to opt in
+// to a non-stub registration and this test then fails loudly,
+// prompting proper test coverage for the new extractor.
+//
+// Scala, Dart, R were also stub-tier pre-v0.63 round 2; they're
+// covered by their own positive-extraction tests below.
+func TestExtractStubTier_HaskellRemainsEmpty(t *testing.T) {
+	r := Extract([]byte("module M where\nfoo :: Int\nfoo = 42\n"), "Haskell", "src/M.hs")
+	if r == nil {
+		return // acceptable
 	}
-	for _, c := range cases {
-		r := Extract([]byte(c.src), c.lang, c.path)
-		if r == nil {
-			continue // also acceptable as "stub"
+	if len(r.Symbols) > 0 {
+		t.Errorf("Haskell should still be stub-tier in v0.63; got %d symbols. If you implemented an extractor, update this test to cover it.",
+			len(r.Symbols))
+	}
+}
+
+// SCALA -----------------------------------------------------------
+
+const scalaSrc = `class Foo {
+  def bar(x: Int): Int = x + 1
+  def baz(): String = "hello"
+
+  private def helper(): Unit = {
+    println("private")
+  }
+}
+
+object Constants {
+  def pi: Double = 3.14
+}
+`
+
+func TestExtractScala_PromotedToRegex_ExtractsFunctions(t *testing.T) {
+	r := Extract([]byte(scalaSrc), "Scala", "src/Foo.scala")
+	if r == nil {
+		t.Fatal("nil result")
+	}
+	want := map[string]bool{
+		"bar":    false,
+		"baz":    false,
+		"helper": false,
+		"pi":     false,
+	}
+	for _, s := range r.Symbols {
+		if s.Kind != "Function" && s.Kind != "Method" {
+			continue
 		}
-		if len(r.Symbols) > 0 {
-			t.Errorf("%s should still be stub-tier in v0.63; got %d symbols. If you implemented an extractor, update this test to cover it.",
-				c.lang, len(r.Symbols))
+		if _, expected := want[s.Name]; expected {
+			want[s.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("Scala def %q not extracted", name)
+		}
+	}
+}
+
+// DART ------------------------------------------------------------
+
+const dartSrc = `void main() {
+  print("hello");
+  greet("world");
+}
+
+String greet(String name) {
+  return "Hi, " + name;
+}
+
+class Cart {
+  void add(Item item) {
+    items.add(item);
+  }
+}
+`
+
+func TestExtractDart_PromotedToRegex_ExtractsFunctions(t *testing.T) {
+	r := Extract([]byte(dartSrc), "Dart", "src/main.dart")
+	if r == nil {
+		t.Fatal("nil result")
+	}
+	want := map[string]bool{
+		"main":  false,
+		"greet": false,
+		"add":   false,
+	}
+	for _, s := range r.Symbols {
+		if s.Kind != "Function" && s.Kind != "Method" {
+			continue
+		}
+		if _, expected := want[s.Name]; expected {
+			want[s.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("Dart symbol %q not extracted", name)
+		}
+	}
+}
+
+// R ---------------------------------------------------------------
+
+const rSrc = `foo <- function(x) {
+  x + 1
+}
+
+bar = function(y) {
+  y * 2
+}
+
+helper.fn <- function() {
+  42
+}
+`
+
+func TestExtractR_PromotedToRegex_ExtractsFunctions(t *testing.T) {
+	r := Extract([]byte(rSrc), "R", "src/util.r")
+	if r == nil {
+		t.Fatal("nil result")
+	}
+	want := map[string]bool{
+		"foo":       false,
+		"bar":       false,
+		"helper.fn": false,
+	}
+	for _, s := range r.Symbols {
+		if s.Kind != "Function" {
+			continue
+		}
+		if _, expected := want[s.Name]; expected {
+			want[s.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("R function %q not extracted", name)
 		}
 	}
 }
