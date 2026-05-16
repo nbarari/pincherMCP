@@ -1972,8 +1972,18 @@ var rustRE = &regexExtractor{
 }
 
 // extractRust: 'pub' keyword marks exports; approximated here as always-exported.
+//
+// #1159 v0.62: enable per-file CALLS pass. Pre-fix, every Rust
+// project's edge graph was empty — `trace`/`dead_code`/`neighborhood`
+// returned the #858 edge-graph-empty warning. Rust's `name(` call
+// syntax matches regexCallRE; same-file calls resolve, cross-file
+// calls drop until the v0.62 Rust receiver-type resolver lands.
+// Macro invocations `name!(...)` aren't `name(...)` so they don't
+// false-match.
 func extractRust(source []byte, relPath string) *FileResult {
-	return rustRE.extract(source, relPath, "Rust", simpleOpts("::", '{'))
+	opts := simpleOpts("::", '{')
+	opts.extractCalls = true
+	return rustRE.extract(source, relPath, "Rust", opts)
 }
 
 var javaRE = &regexExtractor{
@@ -2004,6 +2014,10 @@ func extractJava(source []byte, relPath string) *FileResult {
 		// rather than mislabel public ones.
 		exportedFn: func(name string) bool { return true },
 		isTest:     func(name string) bool { return false },
+		// #1159 v0.62: enable per-file CALLS pass. Java's `name(` call
+		// syntax matches regexCallRE; same-file calls resolve. Cross-
+		// file resolution is still a v0.62+ resolver-side task.
+		extractCalls: true,
 	}
 	return javaRE.extract(source, relPath, "Java", opts)
 }
