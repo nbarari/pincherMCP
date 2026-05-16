@@ -10471,12 +10471,7 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// representative shapes). Pretty-print preserved behind
 	// PINCHER_DEBUG_META=1 for human-eyeball debugging of raw MCP
 	// traffic.
-	var out []byte
-	if os.Getenv("PINCHER_DEBUG_META") == "1" {
-		out, _ = json.MarshalIndent(data, "", "  ")
-	} else {
-		out, _ = json.Marshal(data)
-	}
+	out := marshalMetaJSON(data)
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
 	}
@@ -10653,6 +10648,23 @@ func errResult(msg string) *mcp.CallToolResult {
 	}
 }
 
+// marshalMetaJSON is the single encode path for tool-response JSON
+// envelopes. All three sites that produce a `_meta`-bearing body
+// (jsonResultWithMeta success, errResultRich error, withRequestID
+// middleware re-encode) route through here so PINCHER_DEBUG_META=1
+// behaves consistently. Pre-fix, errResultRich always emitted compact
+// JSON regardless of the env flag — caught by
+// TestToolResponse_DebugEnvPretty exercising the error path because
+// the test server has no usable project.
+func marshalMetaJSON(data any) []byte {
+	if os.Getenv("PINCHER_DEBUG_META") == "1" {
+		b, _ := json.MarshalIndent(data, "", "  ")
+		return b
+	}
+	b, _ := json.Marshal(data)
+	return b
+}
+
 // shortNameFromID extracts the bare name from a symbol ID for use in
 // search-by-name remediation hints (#704). Symbol ID format is
 // {file_path}::{qualified_name}#{kind}; the short name is the last
@@ -10730,9 +10742,8 @@ func (s *Server) errResultRich(msg string, nextSteps []map[string]string) *mcp.C
 		"error": msg,
 		"_meta": meta,
 	}
-	b, _ := json.Marshal(body)
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
+		Content: []mcp.Content{&mcp.TextContent{Text: string(marshalMetaJSON(body))}},
 		IsError: true,
 	}
 }
