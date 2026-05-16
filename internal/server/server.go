@@ -3217,7 +3217,8 @@ func (s *Server) registerTools() {
 				"id":{"type":"string","description":"Symbol ID to fetch with its imports."},
 				"project":{"type":"string"},
 				"fields":{"type":"string","description":"Comma-separated top-level keys to include, e.g. 'symbol,callees' to drop imports. Omit for all. _meta is preserved unconditionally."},
-				"lite":{"type":"boolean","description":"When true, return only {id, source} — no imports, no callees, no next_steps. Used by PreToolUse hook to land on minimum-envelope shape when redirecting a Read call. Default false."}
+				"lite":{"type":"boolean","description":"When true, return only {id, source} — no imports, no callees, no next_steps. Used by PreToolUse hook to land on minimum-envelope shape when redirecting a Read call. Default false."},
+				"cross_project":{"type":"boolean","description":"#1232 opt-in: when the requested ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning the other project's data — including its callees + imports, which would also belong to the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly."}
 			}
 		}`),
 	}, s.handleContext)
@@ -4347,22 +4348,41 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 		), nil
 	}
 
-	// #1050: cross-project leak warning, mirroring #1049 on handleSymbol.
-	// When projectArg is omitted, the GetSymbol fallback above resolves
-	// to whichever indexed project happens to carry the ID — mirror
-	// projects (sniffer mirrors, MCP_Combine staging, .pincher-supported
-	// snapshots) carry identical IDs to their primary repo. Pre-fix the
-	// agent got source bytes (and the source bytes of every callee/import)
-	// from a stale fork with no signal the lookup crossed project
-	// boundaries. context is the more dangerous shape than symbol —
+	// #1232 (context arm): silent-cross-project default flipped to
+	// strict-error. context is the more dangerous shape than symbol —
 	// its EdgesFrom calls walk the leaked project's graph, so callee
-	// sources and import paths also belong to the wrong tree. Warn
-	// whenever the unscoped lookup resolved outside the session project.
+	// sources AND import paths also belong to the wrong tree. Pre-fix
+	// the agent got a coherent-looking response from a stale mirror
+	// with only a warning string. Now: rich-error with both fix
+	// actions, unless cross_project=true opts back into legacy shape.
+	// "*" and explicit-project bypass the strict guard (caller chose).
+	crossProjectAllowed := boolArg(args, "cross_project")
+	if projectArg := str(args, "project"); projectArg == "" &&
+		s.sessionID != "" && sym.ProjectID != s.sessionID && !crossProjectAllowed {
+		return s.errResultRich(
+			fmt.Sprintf(
+				"symbol %q is not in the session project %q — it exists only in project %q. Pre-#1232 context returned the other project's row PLUS its callees + imports silently (with a warning string); now it errors so callers that don't parse warnings can't ship cross-project data unintentionally. Re-issue with project=%q to use that project's data, or pass cross_project=true to opt back into the legacy silent-fallback behaviour.",
+				id, s.sessionID, sym.ProjectID, sym.ProjectID,
+			),
+			[]map[string]string{
+				{"tool": "context", "args": fmt.Sprintf(`{"id":%q,"project":%q}`, id, sym.ProjectID),
+					"why": "use the project where this symbol actually lives"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q,"project":%q}`, shortNameFromID(id), s.sessionID),
+					"why": "look for the equivalent symbol in the session project (which is where you probably meant to be)"},
+				{"tool": "context", "args": fmt.Sprintf(`{"id":%q,"cross_project":true}`, id),
+					"why": "opt into legacy silent-fallback behaviour — same data as before, no shape change"},
+			},
+		), nil
+	}
+	// #1050 (legacy path, now only reached when cross_project=true):
+	// keep the warning string so the opt-in caller still gets the
+	// programmatic signal that the lookup crossed project boundaries.
 	var contextCrossProjectWarning string
 	if projectArg := str(args, "project"); projectArg == "" &&
 		s.sessionID != "" && sym.ProjectID != s.sessionID {
+		// crossProjectAllowed must be true at this point.
 		contextCrossProjectWarning = fmt.Sprintf(
-			"symbol %q resolved from project %q rather than the session project %q — an indexed mirror or stale snapshot carries an ID identical to your working tree. Imports + callees in this response come from the same off-tree project. Re-issue with project=%q to pin scope, or project=%q if you intended that source.",
+			"symbol %q resolved from project %q rather than the session project %q (cross_project=true). Imports + callees in this response come from the same off-tree project. Re-issue with project=%q to pin scope, or project=%q if you intended that source.",
 			id, sym.ProjectID, s.sessionID, s.sessionID, sym.ProjectID,
 		)
 	}

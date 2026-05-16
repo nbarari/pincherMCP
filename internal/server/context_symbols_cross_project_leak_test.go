@@ -16,8 +16,13 @@ import (
 // bytes from a stale fork with no signal. context is particularly
 // dangerous because its EdgesFrom walks the leaked project's
 // graph, so callees + imports also come from the wrong tree.
+//
+// #1232 update (2026-05-16): default behaviour flipped to strict-
+// error — silent-cross-project is now an explicit choice (cross_project=
+// true). This test now pins the OPT-IN warning shape; strict-error
+// coverage lives in context_cross_project_strict_test.go.
 
-func TestHandleContext_NoProject_CrossProjectResolution_Warns(t *testing.T) {
+func TestHandleContext_CrossProject_OptInStillWarns(t *testing.T) {
 	t.Parallel()
 	srv, store, _ := newTestServer(t)
 	sessionPID := "p-ctx-session"
@@ -37,8 +42,9 @@ func TestHandleContext_NoProject_CrossProjectResolution_Warns(t *testing.T) {
 	})
 
 	result, err := srv.handleContext(context.Background(), makeReq(map[string]any{
-		"id":   "shared.go::pkg.Common#Function",
-		"lite": true,
+		"id":            "shared.go::pkg.Common#Function",
+		"lite":          true,
+		"cross_project": true, // #1232 opt-in to legacy silent-fallback shape
 	}))
 	if err != nil {
 		t.Fatalf("handleContext: %v", err)
@@ -46,7 +52,7 @@ func TestHandleContext_NoProject_CrossProjectResolution_Warns(t *testing.T) {
 	body := decode(t, result)
 	meta, _ := body["_meta"].(map[string]any)
 	if meta == nil {
-		t.Fatal("_meta missing — expected cross-project warning")
+		t.Fatal("_meta missing — expected cross-project warning on opt-in path")
 	}
 	warnings, _ := meta["warnings"].([]any)
 	saw := false
