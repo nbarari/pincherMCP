@@ -53,7 +53,7 @@ func runWebCLI(args []string) {
 	noStart := fs.Bool("no-start", false, "Do not auto-start an HTTP server when none is running; exit 1 instead")
 	port := fs.Int("port", webDefaultStartPort, "Starting port for auto-start scan")
 	jsonOut := fs.Bool("json", false, "Emit a single JSON line {url, pid, started_by} instead of a human banner")
-	timeoutSec := fs.Int("timeout", 8, "Seconds to wait for an auto-started server to become ready")
+	timeoutSec := fs.Int("timeout", int(webBackgroundReadyTimeout/time.Second), "Seconds to wait for an auto-started server to become ready")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: pincher web [--data-dir DIR] [--no-start] [--port N] [--json] [--timeout SEC]")
 		fmt.Fprintln(os.Stderr, "  Resolves the active pincher HTTP URL. Auto-starts a server on demand.")
