@@ -119,6 +119,15 @@ func (e *Executor) Execute(ctx context.Context, query string) (*Result, error) {
 	// coerced by SQLite affinity and typically yields 0 rows. Same
 	// silent-confidently-wrong shape as #473 etc.; surface the mismatch.
 	warnings = append(warnings, collectTypeMismatchWarnings(q)...)
+	// #1108: MIN/MAX/SUM/AVG silently return null when the aggregator
+	// target is a text/bool property (e.g. `RETURN MAX(n.name)`).
+	// SQLite's MAX/MIN actually work on text (lexicographic compare),
+	// but pincher's computeAgg parses each value as float64 and skips
+	// non-numeric rows — so a text aggregator with N text rows gets
+	// nums=[], returns nil. Pre-fix the response was `MAX(n.name): null`
+	// with no signal; the agent reads it as "no rows match" when the
+	// real cause is the aggregator/column-type mismatch.
+	warnings = append(warnings, collectAggregateTypeMismatchWarnings(q)...)
 	res, err := e.run(ctx, q)
 	if err != nil {
 		return res, err
@@ -510,6 +519,67 @@ func sampleLiteralFor(propType string) string {
 		return "true"
 	}
 	return ""
+}
+
+// collectAggregateTypeMismatchWarnings (#1108) warns when MIN/MAX/SUM/
+// AVG is applied to a text or bool property. computeAgg silently parses
+// each row's value as float64 and skips non-numeric ones, so the
+// aggregator returns nil over an all-text column. SQLite's MAX/MIN
+// actually work lexicographically on text — pincher's behavior diverges
+// silently. The warning surfaces the mismatch so the agent can either
+// swap to a numeric column or use COUNT (which handles all types). Same
+// silent-confidently-wrong family as #889 (WHERE type mismatch).
+func collectAggregateTypeMismatchWarnings(q *queryAST) []string {
+	if q == nil {
+		return nil
+	}
+	type key struct {
+		fn       string
+		prop     string
+		propType string
+	}
+	seen := map[key]bool{}
+	for _, rv := range q.returnVars {
+		switch rv.fn {
+		case "MIN", "MAX", "SUM", "AVG":
+		default:
+			continue
+		}
+		if rv.property == "" {
+			// Bare aggregator on a variable (e.g. MAX(n)) — already
+			// rejected at parse time, no need to warn here.
+			continue
+		}
+		propType := cypherPropType(rv.property)
+		if propType == "" {
+			// Unknown property — #473's collectUnknownPropertyWarnings
+			// handles the warning text. Skip here so we don't double-warn.
+			continue
+		}
+		if propType == "text" || propType == "bool" {
+			seen[key{fn: rv.fn, prop: rv.property, propType: propType}] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	keys := make([]key, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].fn != keys[j].fn {
+			return keys[i].fn < keys[j].fn
+		}
+		return keys[i].prop < keys[j].prop
+	})
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf(
+			"%s aggregator on %s-typed property %q returns null — MIN/MAX/SUM/AVG parse each row as float64 and skip non-numeric values, so an all-%s column collapses to nil. Use COUNT(n.%s) to count non-null rows, or aggregate a numeric column (e.g. n.complexity, n.start_line).",
+			k.fn, k.propType, k.prop, k.propType, k.prop))
+	}
+	return out
 }
 
 // collectUnknownOrderByWarnings (#881) warns when ORDER BY names a
