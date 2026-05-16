@@ -254,6 +254,27 @@ fields="id,name,source"               # name + full source, skip metadata
 
 Available fields: `id`, `name`, `qualified_name`, `kind`, `language`, `file_path`, `start_line`, `end_line`, `signature`, `docstring`, `source`, `is_exported`, `extraction_confidence`. Omitting `fields` returns all columns.
 
+### Empty-response taxonomy
+
+Every tool that can return an empty result stamps `_meta.empty_reason` (stable machine-readable code) alongside `_meta.diagnosis` (human-readable text). The enum is the routing-friendly signal — agents, aggregators, and fallback chains consume the code; humans read the diagnosis. `meta=lite` callers keep both fields; they're per-call actionable, not dogfood-only.
+
+| Code | When it fires | Recovery |
+|---|---|---|
+| `no_project_indexed` | No project matches the session/explicit arg; symbol store is empty | `index <path>` |
+| `stale_index` | Running binary is newer than `schema_version_at_index` OR working tree drifted vs index | `index force=true` |
+| `unsupported_language` | File extension detected but no extractor registered (Haskell, post-v0.63) | Wait on [#1161](https://github.com/kwad77/pincher/issues/1161) |
+| `low_confidence_extractor` | Extractor ran but every symbol fell below `min_confidence` floor | Lower the floor or pick a higher-tier language |
+| `same_file_only` | Language has same-file CALLS but no cross-file resolver | Scope to same file or wait on cross-file work |
+| `cross_file_unavailable` | Extractor emits zero edges; ghost-extraction signature (#815) | Force re-index; check `doctor` extraction_failures |
+| `query_too_narrow` | Combined filters (kind + language + corpus + min_confidence) excluded everything; verifier names which one | Drop the filter named in `diagnosis` |
+| `no_results_in_corpus` | Query and filters are fine but the symbol genuinely isn't indexed | Re-spell or widen the corpus |
+| `cap_dropped_all` | Every candidate was dropped by `max_hops` / `limit` / `offset` cap (incl. #1033 offset-past-end) | Raise the cap or paginate |
+| `incremental_no_change` | Index ran but every file was unchanged (incremental fast path) | Expected; `force=true` if you suspect corruption |
+| `all_files_blocked` | Every discovered file was filtered by `ast.ShouldSkip` (lockfiles, minified bundles) | Index a parent directory if sources are nested elsewhere |
+| `extractor_emitted_nothing` | Files processed and not blocked, but extractor returned zero symbols | Language-detection gap; check `health` per-language coverage |
+
+Stamped by: `search`, `query`, `trace`, `neighborhood`, `dead_code`, `architecture`, `schema`, `list`, `index`, `changes`. The enum lives in `internal/server/empty_reason.go`; add new codes there and the gate test fails if a stamp site uses a literal. ([#1252](https://github.com/kwad77/pincher/issues/1252))
+
 ### Extraction confidence
 
 Every symbol carries an `extraction_confidence` score surfaced in search results and graph queries.

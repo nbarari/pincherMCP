@@ -3508,18 +3508,21 @@ func diagnoseEmptyIndex(result *index.IndexResult, force bool) map[string]any {
 	switch {
 	case result.Files == 0 && result.Blocked == 0 && result.Skipped == 0:
 		return map[string]any{
-			"diagnosis": "no indexable source files found at this path",
-			"hint":      "verify the path is a project root (contains code in a recognised language) or check `pincher health` for indexing failures",
+			"empty_reason": EmptyReasonNoProjectIndexed,
+			"diagnosis":    "no indexable source files found at this path",
+			"hint":         "verify the path is a project root (contains code in a recognised language) or check `pincher health` for indexing failures",
 		}
 	case result.Files == 0 && result.Blocked > 0:
 		return map[string]any{
-			"diagnosis": fmt.Sprintf("all %d files were blocked by ast.ShouldSkip (lockfiles, minified bundles, source maps)", result.Blocked),
-			"hint":      "expected for vendor-only or build-artifact-only directories; index a parent directory if your sources are nested elsewhere",
+			"empty_reason": EmptyReasonAllFilesBlocked,
+			"diagnosis":    fmt.Sprintf("all %d files were blocked by ast.ShouldSkip (lockfiles, minified bundles, source maps)", result.Blocked),
+			"hint":         "expected for vendor-only or build-artifact-only directories; index a parent directory if your sources are nested elsewhere",
 		}
 	case result.Files == 0 && result.Skipped > 0 && !force:
 		return map[string]any{
-			"diagnosis": fmt.Sprintf("incremental index — all %d files unchanged since last run", result.Skipped),
-			"hint":      "this is the expected fast path. Pass `force=true` if you suspect index corruption.",
+			"empty_reason": EmptyReasonIncrementalNoChange,
+			"diagnosis":    fmt.Sprintf("incremental index — all %d files unchanged since last run", result.Skipped),
+			"hint":         "this is the expected fast path. Pass `force=true` if you suspect index corruption.",
 		}
 	case result.Files > 0 && result.Skipped > 0:
 		// #425: incremental re-index where some files were reprocessed but
@@ -3527,13 +3530,15 @@ func diagnoseEmptyIndex(result *index.IndexResult, force bool) map[string]any {
 		// that didn't add/remove declarations). Not a bug — distinguish
 		// from the genuine extractor-missing case below.
 		return map[string]any{
-			"diagnosis": fmt.Sprintf("incremental re-index: %d files unchanged, %d reprocessed without new or removed symbols", result.Skipped, result.Files),
-			"hint":      "no action needed — symbol-neutral edits (comments, whitespace, body-only changes) produce zero net symbol delta",
+			"empty_reason": EmptyReasonIncrementalNoChange,
+			"diagnosis":    fmt.Sprintf("incremental re-index: %d files unchanged, %d reprocessed without new or removed symbols", result.Skipped, result.Files),
+			"hint":         "no action needed — symbol-neutral edits (comments, whitespace, body-only changes) produce zero net symbol delta",
 		}
 	default:
 		return map[string]any{
-			"diagnosis": "files were processed but no symbols extracted",
-			"hint":      "language detection may be missing extension support; check `pincher health` per-language coverage",
+			"empty_reason": EmptyReasonExtractorEmittedNothing,
+			"diagnosis":    "files were processed but no symbols extracted",
+			"hint":         "language detection may be missing extension support; check `pincher health` per-language coverage",
 		}
 	}
 }
@@ -5338,9 +5343,9 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		// the same response. Agents reading the diagnosis concluded the
 		// symbol didn't exist; agents reading total knew it did. The
 		// confidently-wrong text won.
-		meta["diagnosis"] = fmt.Sprintf(
+		stampEmpty(meta, EmptyReasonCapDroppedAll, fmt.Sprintf(
 			"offset=%d is past the end of the result set (total=%d) — pagination overshoot. Pass offset=0 (or omit) to start at the top, or a value < %d to land inside the result window.",
-			offset, searchTotal, searchTotal)
+			offset, searchTotal, searchTotal))
 		meta["next_steps"] = []map[string]string{
 			{"tool": "search", "args": nextStepArgs(map[string]any{"query": query, "kind": kind, "language": language, "corpus": corpus}),
 				"why": fmt.Sprintf("retry without offset — the query matched %d symbol(s) at offset=0", searchTotal)},
@@ -5365,10 +5370,15 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 			return len(r), nil
 		}
 		if cause, steps, ok := verifyEmptySearchCause(query, kind, language, corpus, minConfidence, rawPreConfidenceCount, relax); ok {
-			meta["diagnosis"] = cause
+			// Verifier proved a single filter relaxation surfaces results
+			// — so the query is too narrow, not absent from the corpus.
+			stampEmpty(meta, EmptyReasonQueryTooNarrow, cause)
 			meta["next_steps"] = steps
 		} else {
-			meta["diagnosis"] = diagnoseEmptySearch(query, kind, language, corpus, minConfidence)
+			// No relaxation rescues the query — the symbol genuinely isn't
+			// in this corpus (or the spelling is wrong, which the
+			// diagnoseEmptySearch text already names).
+			stampEmpty(meta, EmptyReasonNoResultsInCorpus, diagnoseEmptySearch(query, kind, language, corpus, minConfidence))
 			meta["next_steps"] = suggestEmptySearchNextSteps(query, kind, language, minConfidence)
 		}
 	}
@@ -6318,9 +6328,9 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if projectID != "" && !allowAllProjects {
 		if symCount, edgeCount, _, _, gerr := s.store.GraphStats(projectID); gerr == nil {
 			if len(rows) == 0 && edgeCount == 0 && symCount >= 100 {
-				meta["diagnosis"] = fmt.Sprintf(
+				stampEmpty(meta, EmptyReasonCrossFileUnavailable, fmt.Sprintf(
 					"query returned 0 rows AND the scoped project has %d symbols but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; edge-traversal queries will silently return zero rows. Use `architecture` or `doctor` for the full picture.",
-					symCount)
+					symCount))
 				ghostSteps := []map[string]string{
 					{"tool": "architecture", "args": "{}",
 						"why": "confirm the ghost-extraction shape (langs histogram + 0 edges)"},
@@ -7064,9 +7074,9 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			{"tool": "trace", "args": retryArgs,
 				"why": fmt.Sprintf("%d hop(s) were filtered as test/fixture paths — re-run with include_tests=true to see them", testFilteredCount)},
 		}
-		meta["diagnosis"] = fmt.Sprintf(
+		stampEmpty(meta, EmptyReasonQueryTooNarrow, fmt.Sprintf(
 			"empty result, but %d hop(s) exist in test/fixture files (filtered by default include_tests=false). Pass include_tests=true if test coverage is what you're after.",
-			testFilteredCount)
+			testFilteredCount))
 	} else {
 		// Empty trace = no inbound/outbound CALLS edges. Likely a leaf
 		// (no callers) or an entry point (no callees). Direct the agent
@@ -7080,7 +7090,12 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		// the second case — say so rather than letting it read like a
 		// genuine leaf result.
 		if gap := s.edgeCoverageGap(projectID); gap != "" {
-			meta["diagnosis"] = gap
+			stampEmpty(meta, EmptyReasonCrossFileUnavailable, gap)
+		} else {
+			// Empty trace with no edge-coverage gap is a genuine leaf —
+			// no callers / no callees at this depth, the graph just
+			// terminates here.
+			meta["empty_reason"] = EmptyReasonNoResultsInCorpus
 		}
 	}
 	data := map[string]any{
@@ -7422,13 +7437,13 @@ func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*
 			})
 		}
 		if len(otherScopesWithChanges) > 0 {
-			meta["diagnosis"] = fmt.Sprintf(
+			stampEmpty(meta, EmptyReasonQueryTooNarrow, fmt.Sprintf(
 				"scope=%q is clean (0 changed files). Other scopes DO have changes: %s — re-issue with the right scope to see them.",
-				scope, strings.Join(otherScopesWithChanges, ", "))
+				scope, strings.Join(otherScopesWithChanges, ", ")))
 		} else {
-			meta["diagnosis"] = fmt.Sprintf(
+			stampEmpty(meta, EmptyReasonNoResultsInCorpus, fmt.Sprintf(
 				"scope=%q is clean and so are the other scopes (staged/unstaged/all) — the working tree has no changes at all. Use scope=\"base:<branch>\" to compare against a committed baseline.",
-				scope)
+				scope))
 		}
 		// next_steps already set if suggestChangesNextSteps fired
 		// (it won't on an empty changedSyms list, but defensively merge).
@@ -7840,6 +7855,7 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 			validList = strings.Join(validKindsForDiag, ", ")
 		}
 		data["_meta"] = map[string]any{
+			"empty_reason": EmptyReasonQueryTooNarrow,
 			"diagnosis": fmt.Sprintf(
 				"every value in kinds=%v is unknown for this project — dead_code can't filter to a non-existent kind. Available kinds: %s. Drop the filter or pick a real one.",
 				kinds, validList),
@@ -7879,8 +7895,9 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 			})
 		}
 		data["_meta"] = map[string]any{
-			"diagnosis":  diag,
-			"next_steps": nextSteps,
+			"empty_reason": EmptyReasonQueryTooNarrow,
+			"diagnosis":    diag,
+			"next_steps":   nextSteps,
 		}
 	} else if gap := s.edgeCoverageGap(projectID); gap != "" {
 		// #858: the empty result isn't "no dead code" — it's "this
@@ -7888,7 +7905,8 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 		// caller that instead of the misleading "lower min_confidence"
 		// advice (there are no edges at any confidence to lower toward).
 		data["_meta"] = map[string]any{
-			"diagnosis": gap,
+			"empty_reason": EmptyReasonCrossFileUnavailable,
+			"diagnosis":    gap,
 			"next_steps": []map[string]string{
 				{"tool": "health", "args": "{}",
 					"why": "see the per-language extraction + edge coverage breakdown for this project"},
@@ -7921,8 +7939,9 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 			diagnosis = fmt.Sprintf("no dead code at min_confidence ≥ %.2f — already at the widest floor; broaden kinds (e.g. Function,Method,Class) to surface more candidates, or this language genuinely has no unreferenced internal symbols", minConfidence)
 		}
 		data["_meta"] = map[string]any{
-			"diagnosis":  diagnosis,
-			"next_steps": nextSteps,
+			"empty_reason": EmptyReasonQueryTooNarrow,
+			"diagnosis":    diagnosis,
+			"next_steps":   nextSteps,
 		}
 	}
 
@@ -7956,8 +7975,9 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 					"why": "extraction_failures list may explain why the resolver phase produced no edges"},
 			}
 			data["_meta"] = map[string]any{
-				"diagnosis":  diagnosis,
-				"next_steps": ghostSteps,
+				"empty_reason": EmptyReasonCrossFileUnavailable,
+				"diagnosis":    diagnosis,
+				"next_steps":   ghostSteps,
 			}
 		} else if symCount >= 1000 && edgeCount > 0 &&
 			float64(edgeCount)/float64(symCount) < 0.001 {
@@ -8195,9 +8215,19 @@ func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolReques
 				{"tool": "search", "args": fmt.Sprintf(`{"query":"*","corpus":"config","project":"%s"}`, projectID), "why": "list all Settings to confirm this is a config/docs project"},
 			}
 		}
+		archEmptyReason := EmptyReasonNoResultsInCorpus
+		switch {
+		case p == nil:
+			archEmptyReason = EmptyReasonNoProjectIndexed
+		case symCount == 0:
+			archEmptyReason = EmptyReasonNoProjectIndexed
+		case hasCodeLang && edgeCount == 0:
+			archEmptyReason = EmptyReasonCrossFileUnavailable
+		}
 		data["_meta"] = map[string]any{
-			"diagnosis":  diagnosis,
-			"next_steps": nextSteps,
+			"empty_reason": archEmptyReason,
+			"diagnosis":    diagnosis,
+			"next_steps":   nextSteps,
 		}
 	}
 	// #1067: ratio-class ghost-extraction warning. The #1040 diagnosis
@@ -8268,7 +8298,8 @@ func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// #983 (list empty-state) and #974 (errResultRich progress).
 	if symCount == 0 {
 		meta := map[string]any{
-			"diagnosis": "this project has 0 indexed symbols — either the project really is empty, or the project arg resolved to a stale name-collision (e.g. \"pincher\" matching a dead-on-disk row instead of \"pincher-repo\"). Confirm with `list` or re-index the intended path.",
+			"empty_reason": EmptyReasonNoProjectIndexed,
+			"diagnosis":    "this project has 0 indexed symbols — either the project really is empty, or the project arg resolved to a stale name-collision (e.g. \"pincher\" matching a dead-on-disk row instead of \"pincher-repo\"). Confirm with `list` or re-index the intended path.",
 			"next_steps": []map[string]string{
 				{"tool": "list", "args": `{"include_dead":true}`,
 					"why": "include dead-on-disk projects so a name-collision shows up — compare the path on the row that resolved here"},
@@ -8301,6 +8332,7 @@ func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 		if hasCallableKind {
 			meta := map[string]any{
+				"empty_reason": EmptyReasonCrossFileUnavailable,
 				"diagnosis": fmt.Sprintf(
 					"project has %d symbols (including callable kinds like Function/Method) but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; `trace`/`query` over this project will silently return zero rows.",
 					symCount),
@@ -8604,9 +8636,9 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 		if meta == nil {
 			meta = map[string]any{}
 		}
-		meta["diagnosis"] = fmt.Sprintf(
+		stampEmpty(meta, EmptyReasonCapDroppedAll, fmt.Sprintf(
 			"offset=%d is past the end of the result set (total=%d after filters) — pagination overshoot. Pass offset=0 (or omit) to start at the top.",
-			offset, total)
+			offset, total))
 		meta["next_steps"] = []map[string]string{
 			{"tool": "list", "args": "{}",
 				"why": fmt.Sprintf("retry without offset — %d project(s) match the current filters at offset=0", total)},
@@ -8624,7 +8656,7 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 		if meta == nil {
 			meta = map[string]any{}
 		}
-		meta["diagnosis"] = "no projects indexed yet — pincher's symbol store is empty"
+		stampEmpty(meta, EmptyReasonNoProjectIndexed, "no projects indexed yet — pincher's symbol store is empty")
 		meta["next_steps"] = []map[string]string{
 			{"tool": "index", "args": `{"path":"/path/to/your/project"}`,
 				"why": "index a repo to populate the symbol store; subsequent `search`/`context`/`trace` calls require at least one indexed project"},
@@ -8648,7 +8680,7 @@ func (s *Server) handleList(ctx context.Context, req *mcp.CallToolRequest) (*mcp
 			if droppedLowEdges > 0 {
 				causes = append(causes, fmt.Sprintf("%d below min_edges=%d", droppedLowEdges, minEdges))
 			}
-			meta["diagnosis"] = fmt.Sprintf("no projects after filters: %s — pass the recovery args below to widen the scope", strings.Join(causes, ", "))
+			stampEmpty(meta, EmptyReasonQueryTooNarrow, fmt.Sprintf("no projects after filters: %s — pass the recovery args below to widen the scope", strings.Join(causes, ", ")))
 			recovery := []map[string]string{}
 			if droppedInactive > 0 {
 				recovery = append(recovery, map[string]string{"tool": "list", "args": `{"active":false}`,

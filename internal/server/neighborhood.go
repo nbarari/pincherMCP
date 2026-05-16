@@ -375,9 +375,9 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 		if meta == nil {
 			meta = map[string]any{}
 		}
-		meta["diagnosis"] = fmt.Sprintf(
+		stampEmpty(meta, EmptyReasonCapDroppedAll, fmt.Sprintf(
 			"offset=%d is past the end of the neighbor list (total=%d) — pagination overshoot. Pass offset=0 (or omit) to start at the top of the file.",
-			origOffset, totalNeighbors)
+			origOffset, totalNeighbors))
 		meta["next_steps"] = []map[string]string{
 			{"tool": "neighborhood", "args": fmt.Sprintf(`{"id":%q}`, seed.ID),
 				"why": fmt.Sprintf("retry without offset — the file has %d neighbor(s) at offset=0", totalNeighbors)},
