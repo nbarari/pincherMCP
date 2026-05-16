@@ -190,7 +190,7 @@
   },
   {
     "name": "health",
-    "description": "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST vs Regex) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable.",
+    "description": "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST / Regex / Stub) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable. Stub-tier languages register at confidence 0.0 and return empty extraction — after v0.63 (#1186, #1187) only Haskell remains stub-tier.",
     "input_schema": {
       "properties": {
         "project": {

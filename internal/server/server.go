@@ -3236,7 +3236,7 @@ func (s *Server) registerTools() {
 	// 13. health — drift signals + extraction coverage. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
 		Name:        "health",
-		Description: "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST vs Regex) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable.",
+		Description: "**Use to verify extraction quality before trusting graph results**, or to detect a stale index. Returns schema version, index staleness, and per-language coverage with parser identity (AST / Regex / Stub) and avg/p10/p50 confidence per (language, kind). A low p10 on a corpus you care about means `search` results in that area need a higher `min_confidence` to be reliable. Stub-tier languages register at confidence 0.0 and return empty extraction — after v0.63 (#1186, #1187) only Haskell remains stub-tier.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","properties":{
 				"project":{"type":"string","description":"Project to report on. Defaults to session project."}
@@ -8436,9 +8436,22 @@ func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// renamed extractors after a re-index).
 	for i := range report.Coverage {
 		if rc := ast.RegisteredConfidence(report.Coverage[i].Language); rc >= 0 {
-			if rc >= 0.99 {
+			switch {
+			case rc >= 0.99:
 				report.Coverage[i].Parser = "AST"
-			} else {
+			case rc < 0.5:
+				// v0.64 #635-adjacent: stub-tier extractors register at
+				// confidence 0.0 — they return an empty FileResult on
+				// every call. Pre-fix they got mis-labeled "Regex"
+				// because the `else` branch covered everything below
+				// the AST threshold. Agents filtering health output by
+				// parser identity would see stub-tier languages mixed
+				// in with real regex coverage; the stub label makes
+				// the distinction visible. After v0.63 promotions
+				// (#1186/#1187), Haskell is the only stub-tier
+				// language left.
+				report.Coverage[i].Parser = "Stub"
+			default:
 				report.Coverage[i].Parser = "Regex"
 			}
 		}
