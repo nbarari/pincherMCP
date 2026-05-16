@@ -1793,10 +1793,42 @@ func (p *parser) parseQuery() (*queryAST, error) {
 
 		case "LIMIT":
 			p.next()
-			if p.peek().kind == "NUMBER" {
-				n, _ := strconv.Atoi(p.next().value)
-				q.limit = n
+			// #1130: pre-fix, LIMIT silently dropped any value strconv.Atoi
+			// couldn't parse — `LIMIT 1.5` (float), `LIMIT abc` (junk),
+			// and the no-token-at-all case all swallowed the error and
+			// left q.limit at 0 ("explicit zero rows"). The result: 0
+			// rows, no warning, no error. Same silent-confidently-wrong
+			// family as #1120 / #1124. Validate explicitly: float literals
+			// and bare "-" (negative LIMIT shape) both produce a
+			// LIMIT-aware error rather than a generic "unexpected token"
+			// or silent zero. Reject anything other than a non-negative
+			// integer NUMBER token.
+			tok := p.peek()
+			if tok.value == "-" {
+				return nil, fmt.Errorf(
+					"pinchQL: LIMIT requires a non-negative integer (got `-`); negative LIMIT is not supported. To suppress rows use `LIMIT 0`; omit LIMIT to fall back to max_rows.")
 			}
+			if tok.kind != "NUMBER" {
+				return nil, fmt.Errorf(
+					"pinchQL: LIMIT requires a non-negative integer (got %q at token kind %s).",
+					tok.value, tok.kind)
+			}
+			if strings.ContainsAny(tok.value, ".eE") {
+				return nil, fmt.Errorf(
+					"pinchQL: LIMIT requires a non-negative integer (got float literal %q). Use an integer, e.g. `LIMIT %d`.",
+					tok.value, int(mustParseFloatForErr(tok.value)))
+			}
+			n, err := strconv.Atoi(p.next().value)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"pinchQL: LIMIT requires a non-negative integer (got %q: %v).",
+					tok.value, err)
+			}
+			if n < 0 {
+				return nil, fmt.Errorf(
+					"pinchQL: LIMIT requires a non-negative integer (got %d); negative LIMIT is not supported.", n)
+			}
+			q.limit = n
 
 		case "WITH":
 			// #433: WITH is a real Cypher projection-pipeline keyword
@@ -3526,6 +3558,15 @@ func cypherLessThan(a, b any, desc bool) bool {
 // or floating-point shapes pincher's symRow / map projections might
 // carry. Returns (_, false) for strings, nil, or anything else so
 // the caller falls back to string compare.
+// mustParseFloatForErr is used only to suggest an integer alternative
+// in LIMIT-with-float error messages. Returns 0 on any parse failure
+// (the caller's error already names the bad input — the int suggestion
+// is just a hint).
+func mustParseFloatForErr(s string) float64 {
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
+}
+
 func toFloatForOrderBy(v any) (float64, bool) {
 	switch n := v.(type) {
 	case int:
