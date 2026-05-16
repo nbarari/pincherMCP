@@ -357,6 +357,29 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			slog.Debug("pincher.index.blocked", "path", path, "reason", reason)
 			continue
 		}
+		// #996: skip extraction for files inside fixture paths (testdata/
+		// __fixtures__ / etc.) when they are NOT the project's own root.
+		// Pre-fix, external projects like warp-fork (4360 files, mostly
+		// JSON test fixtures) extracted every JSON object as a symbol,
+		// producing 1.45M symbols / 247 edges — a ratio that wedged
+		// graph queries, blew up the dashboard, and made aggregate
+		// answers misleading. The fixture path detector already exists
+		// (used by resolution at #750) but was never wired into the
+		// indexer's per-file gate. Compute relPath here so we can skip
+		// BEFORE reading file bytes / hashing / extracting.
+		//
+		// pincher's own pinned-corpus tests are unaffected: when a
+		// corpus is indexed as its OWN project root, file paths are
+		// relative to the corpus dir and isFixturePath returns false
+		// (the heuristic checks for `/testdata/` etc. in the relative
+		// path, which is absent at corpus-root indexing time).
+		relPathProbe, _ := filepath.Rel(absPath, path)
+		relPathProbe = filepath.ToSlash(relPathProbe)
+		if isFixturePath(relPathProbe) {
+			totalBlocked++
+			slog.Debug("pincher.index.fixture_skip", "path", path, "relPath", relPathProbe)
+			continue
+		}
 		if !ast.IsSourceFile(path) && !ast.MayHaveShebang(path) {
 			continue
 		}
