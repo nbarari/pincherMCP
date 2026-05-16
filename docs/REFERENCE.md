@@ -203,7 +203,7 @@ All latencies measured on this codebase. Token counts use cl100k_base BPE — th
 
 | Tool | Capability | Tested latency |
 |---|---|---|
-| `search` | FTS5 BM25 across names, signatures, docstrings. Wildcards (`auth*`), phrases (`"process order"`), AND/OR. `kind`/`language`/`corpus` filters. `corpus` defaults to `code`; pass `config` for YAML/JSON/HCL settings, `docs` for Markdown / Documents, `all` for the legacy index. `fields` projects columns. `project=*` searches all repos. | 1 ms |
+| `search` | FTS5 BM25 across names, signatures, docstrings. Wildcards (`auth*`), phrases (`"process order"`), AND/OR. `kind`/`language`/`corpus` filters. `corpus` defaults to `code`; pass `config` for YAML/JSON/HCL settings, `docs` for Markdown / Documents. The legacy `all` value was removed in v0.5; older callers passing it get soft-redirected to `code` with a deprecation log line. `fields` projects columns. `project=*` searches all repos. | 1 ms |
 | `query` | pinchQL graph queries — Cypher-shaped subset. Three SQL paths: node scan, single-hop JOIN, variable-length BFS. `max_rows` (default 200, max 10000). Parameter: `pinchql` (legacy alias `cypher` accepted for one release). | 2 ms (single-hop) |
 | `trace` | BFS call-path trace — who calls this, or what does it call. Grouped by depth. Risk labels: CRITICAL (depth 1) → LOW (depth 4+). | <5 ms (depth 3) |
 
@@ -217,6 +217,19 @@ All latencies measured on this codebase. Token counts use cl100k_base BPE — th
 | `health` | Schema version, index staleness, per-language extraction coverage. Detects stale indexes. | 1 ms |
 | `stats` | Session savings as a formatted CLI summary. Persists across reconnects. | 8 ms |
 | `fetch` | Fetch a URL, extract its text, store as a searchable `Document` symbol in the project knowledge base. Body cap: 512 KB fetched, 32 KB stored. Retrieve via `search kind:Document` or `symbol`. | ~200 ms (network) |
+
+### Code audit & admin
+
+The remaining six tools — restored to MCP in v0.52 (reversal of the v0.42 #624 split). All read-only except `init` (writes per-target config), `rebuild_fts` (rebuilds the FTS5 virtual tables), and `index` (already listed above).
+
+| Tool | Capability | Notes |
+|---|---|---|
+| `dead_code` | Symbols with zero inbound CALLS / READS / WRITES / REFERENCES / IMPORTS edges. Defaults bias toward precision: `language=Go`, `kinds=Function,Method`, `min_confidence=0.95`. Test fixtures filtered. | The inverse of `architecture` hotspots. |
+| `neighborhood` | Same-file siblings of a seed symbol, paginated. **NOT graph adjacency** — name is preserved for compat (#498); use `trace direction=both` for graph adjacency. | Useful for in-file refactor planning. |
+| `init` | Write CLAUDE.md / `.claude/config.json` / Cursor rules / Codex AGENTS.md / etc. — preflight (diff_preview) or `apply=true`. Supports multiple targets via `target=<name>` or `target=all`. Codex AGENTS.md always lives in `~/.codex/AGENTS.md` and emits a `skipped_always_global` entry when `target=all` is used in a project context. | Per-target `{target, path, action, diff_preview, bytes_in, bytes_out}`. Codex emits `{target, action: "skipped_always_global", reason}`. |
+| `doctor` | Schema version, DB + WAL sizes, per-project staleness, recent extraction failures, recent slow queries, advisories (ghost-extraction, DB bloat). | Same data as `pincher doctor --json`. |
+| `rebuild_fts` | Drop + repopulate the three FTS5 virtual tables (`symbols_code_fts`, `symbols_config_fts`, `symbols_docs_fts`). Use after schema-level FTS5 trigger changes. | Safe but slow on large indexes. |
+| `self_test` | Smoke-test the install: open DB → create synthetic project → index → search → byte-offset retrieve. | Read-only; uses a temp project cleaned up before return. |
 
 ### Stable symbol IDs
 
@@ -247,9 +260,11 @@ Every symbol carries an `extraction_confidence` score surfaced in search results
 
 | Score | Parser | Languages |
 |---|---|---|
-| `1.0` | `go/ast` / `yaml.v3` / `mvdan.cc/sh/v3` / `hashicorp/hcl/v2/hclsyntax` / `BurntSushi/toml` / `yuin/goldmark` / `nikolalohinski/gonja` | Go, YAML, JSON, Bash, HCL/Terraform, TOML, Markdown, Jinja2 |
-| `0.85` | Stable regex | Python, JavaScript, JSX, TypeScript, TSX, Rust, Java, Makefile, SQL |
-| `0.70` | Approximate regex | Ruby, PHP, C, C++, C#, Kotlin, Swift |
+| `1.0` | `go/ast` / `yaml.v3` / `mvdan.cc/sh/v3` / `hashicorp/hcl/v2/hclsyntax` / `BurntSushi/toml` / `yuin/goldmark` / `nikolalohinski/gonja` / `python/ast` (#856) | Go, YAML, JSON, Bash, HCL/Terraform, TOML, Markdown, Jinja2, Python |
+| `~0.92–0.98` | AST/regex blends | HTML (Section, 0.917), JavaScript/TypeScript (Regex, ~0.96–0.98 typical) |
+| `0.85` | Stable regex | JSX, TSX, Rust, Java, Makefile, SQL |
+| `~0.9` | Approximate regex (#1107 Ruby tuning) | Ruby |
+| `0.70` | Approximate regex | PHP, C, C++, C#, Kotlin, Swift |
 
 ---
 
@@ -622,7 +637,7 @@ Measured on this codebase (13 files, 618 symbols, 5,785 edges, Windows 11, SQLit
 
 ## Schema
 
-Schema is versioned via the `schema_version` table. Current version: **v11**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
+Schema is versioned via the `schema_version` table. Current version: **v26**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
 
 Migration history:
 
@@ -635,10 +650,25 @@ Migration history:
 | v4→v5 | (slot reserved during refactor; no DDL) |
 | v5→v6 | Generated `symbol_id` column for FTS5 external-content lookups |
 | v6→v7 | `extraction_failures` table for `pincher doctor` |
-| v7→v8 | `slow_queries` table (--slow-query-ms capture) |
+| v7→v8 | `slow_queries` table (`--slow-query-ms` capture) |
 | v8→v9 | Per-corpus FTS5 split — `symbols_{code,config,docs}_fts` + routing triggers |
 | v9→v10 | TOML routed to the config corpus (DROP/CREATE triggers) |
 | v10→v11 | `http_url` + `http_pid` columns on sessions for `pincher web` discovery |
+| v11→v12 | Remove the legacy `symbols_fts` virtual table and pre-corpus triggers |
+| v12→v13 | Route HTML to the docs corpus alongside Markdown |
+| v13→v14 | Route XML to the config corpus alongside YAML/JSON/HCL/TOML |
+| v14→v15 | `projects.schema_version_at_index` (#236) — drift detection |
+| v15→v16 | Per-language call counts on sessions (#240) |
+| v16→v17 | Query-failure / retry-rate counters on sessions (#241) |
+| v17→v18 | `projects.binary_version` — captures producing binary identity |
+| v18→v19 | `pending_edges` — persisted per-file deferred edge resolution |
+| v19→v20 | `edges.source` — tag each row with its origin (resolver / extractor / closure) |
+| v20→v21 | `celebrations` — one-shot record of cumulative milestones |
+| v21→v22 | Receiver-type tracking for Go method calls (#423) |
+| v22→v23 | `interface_methods` table — Go interface method names |
+| v23→v24 | `hook_invocations` telemetry (#626) |
+| v24→v25 | Closure table — materialized transitive closure of the call graph |
+| v25→v26 | `pending_edges.base_type` — Go READS candidate disambiguation |
 
 ---
 
