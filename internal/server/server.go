@@ -7596,6 +7596,21 @@ func (s *Server) handleSchema(ctx context.Context, req *mcp.CallToolRequest) (*m
 			data["_meta"] = meta
 		}
 	}
+	// #1068: ratio-class ghost-extraction warning, matching #1067
+	// (architecture) and #1010 (doctor). The strict edgeCount == 0
+	// arm above fires only when the resolver produced NO edges at
+	// all — ratio-class ghosts that leak a handful of edges (e.g.
+	// 11181 syms / 9 edges = ratio 0.0008) slip through. Same
+	// 0.001 floor, anchored two orders of magnitude below the
+	// lowest observed healthy ratio. Attached as a warning (not a
+	// diagnosis-replacement) so existing zero-edge callers keep
+	// the richer next_steps response shape.
+	if symCount >= 1000 && edgeCount > 0 &&
+		float64(edgeCount)/float64(symCount) < 0.001 {
+		attachWarning(data, fmt.Sprintf(
+			"project has %d symbols and %d edges — ratio %.6f, well below the healthy floor of ~0.01 (ghost-extraction signature, #815). The kind/edge histograms above reflect the small subset that did resolve. Force a re-index, then check `doctor`'s extraction_failures if the ratio doesn't improve.",
+			symCount, edgeCount, float64(edgeCount)/float64(symCount)))
+	}
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
 }
 
