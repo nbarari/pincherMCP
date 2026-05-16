@@ -4303,6 +4303,21 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 	if contextCrossProjectWarning != "" {
 		attachWarning(data, contextCrossProjectWarning)
 	}
+	// #1145: when the project's edge graph is empty due to non-Go/
+	// Python dominant language, context returns callees=[]+imports=[]
+	// for every symbol because the resolver never ran — not because
+	// the symbol is a leaf. Flag the cause so the agent doesn't read
+	// the empty arrays as "this function calls nothing." Only fires
+	// when both lists are empty (a Go function with some real callees
+	// is genuinely informative; we only want to surface the gap when
+	// the response is silent).
+	if len(callees) == 0 && len(imports) == 0 {
+		if lang, gap := s.edgeGraphEmptyForLanguage(sym.ProjectID); gap {
+			attachWarning(data, fmt.Sprintf(
+				"context.callees and context.imports are empty because this project is predominantly %s and cross-file edge resolution covers Go and Python only (#858) — not because this symbol has no callees or imports. Use search for %s navigation.",
+				lang, lang))
+		}
+	}
 	responseJSON, _ := json.Marshal(data)
 	return s.jsonResultWithMeta(data, start, tool, args, s.savedVsFileSizesSession(sym.ProjectID, root, allPaths, responseJSON)), nil
 }
