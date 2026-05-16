@@ -5879,25 +5879,41 @@ func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// (allowAllProjects=false) — cross-project queries would need a
 	// per-project check that's not worth the latency. Cheap probe:
 	// one extra GraphStats call only when rows is empty.
-	if len(rows) == 0 && projectID != "" && !allowAllProjects {
-		if symCount, edgeCount, _, _, gerr := s.store.GraphStats(projectID); gerr == nil &&
-			edgeCount == 0 && symCount >= 100 {
-			meta["diagnosis"] = fmt.Sprintf(
-				"query returned 0 rows AND the scoped project has %d symbols but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; edge-traversal queries will silently return zero rows. Use `architecture` or `doctor` for the full picture.",
-				symCount)
-			ghostSteps := []map[string]string{
-				{"tool": "architecture", "args": "{}",
-					"why": "confirm the ghost-extraction shape (langs histogram + 0 edges)"},
-				{"tool": "doctor", "args": "{}",
-					"why": "extraction_failures list may explain why the resolver phase produced no edges"},
-			}
-			// Don't clobber any existing next_steps (id-suggestion above
-			// won't fire when rows is empty, so this is safe in practice
-			// — but merge defensively for any future addition).
-			if existing, ok := meta["next_steps"].([]map[string]string); ok && len(existing) > 0 {
-				meta["next_steps"] = append(existing, ghostSteps...)
-			} else {
-				meta["next_steps"] = ghostSteps
+	if projectID != "" && !allowAllProjects {
+		if symCount, edgeCount, _, _, gerr := s.store.GraphStats(projectID); gerr == nil {
+			if len(rows) == 0 && edgeCount == 0 && symCount >= 100 {
+				meta["diagnosis"] = fmt.Sprintf(
+					"query returned 0 rows AND the scoped project has %d symbols but ZERO edges — ghost-extraction signature (#815). Resolver phase produced no graph; edge-traversal queries will silently return zero rows. Use `architecture` or `doctor` for the full picture.",
+					symCount)
+				ghostSteps := []map[string]string{
+					{"tool": "architecture", "args": "{}",
+						"why": "confirm the ghost-extraction shape (langs histogram + 0 edges)"},
+					{"tool": "doctor", "args": "{}",
+						"why": "extraction_failures list may explain why the resolver phase produced no edges"},
+				}
+				// Don't clobber any existing next_steps (id-suggestion above
+				// won't fire when rows is empty, so this is safe in practice
+				// — but merge defensively for any future addition).
+				if existing, ok := meta["next_steps"].([]map[string]string); ok && len(existing) > 0 {
+					meta["next_steps"] = append(existing, ghostSteps...)
+				} else {
+					meta["next_steps"] = ghostSteps
+				}
+			} else if symCount >= 1000 && edgeCount > 0 &&
+				float64(edgeCount)/float64(symCount) < 0.001 {
+				// #1073: ratio-class ghost warning. Same shape as
+				// #1010 / #1067 / #1068 / #1071. Fires regardless of
+				// whether rows is empty — a query that returned some
+				// rows on a ratio-ghost project is reporting only the
+				// resolved portion; agents need to know the bulk of
+				// the corpus has no edges so they don't generalize
+				// the partial result to the whole project. Appended to
+				// any existing warnings (not clobbering meta) so the
+				// rich envelope stays composable.
+				warnings, _ := meta["warnings"].([]string)
+				meta["warnings"] = append(warnings, fmt.Sprintf(
+					"project has %d symbols and %d edges — ratio %.6f, well below the healthy floor of ~0.01 (ghost-extraction signature, #815). Edge-traversal queries reflect only the small resolved subset; the bulk of the corpus has no inbound edges. Force a re-index, then check `doctor`'s extraction_failures if the ratio doesn't improve.",
+					symCount, edgeCount, float64(edgeCount)/float64(symCount)))
 			}
 		}
 	}
