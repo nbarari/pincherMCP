@@ -11102,6 +11102,20 @@ func firstFTS5IncompatibleRegexChar(q string) string {
 	if len(q) > 2 && q[0] == '/' && q[len(q)-1] == '/' {
 		return "/.../"
 	}
+	// #1110: regex anchors at the start/end of the query. `^handle` and
+	// `handle$` are clear regex patterns — FTS5 doesn't honor anchors,
+	// it sanitizes the `^`/`$` away and runs a partial-match search.
+	// Pre-fix the agent got an empty result with the generic
+	// "lower min_confidence" diagnosis instead of "drop the regex
+	// anchor". Same regex-leak family as #509 / #788 (slash-delimited).
+	// Guarded on `len(q) > 1` so a bare `^` or `$` doesn't trigger
+	// (handled by the FTS5 syntax-error path).
+	if len(q) > 1 && q[0] == '^' {
+		return "^... (regex anchor)"
+	}
+	if len(q) > 1 && q[len(q)-1] == '$' {
+		return "...$ (regex anchor)"
+	}
 	inQuote := false
 	for i := 0; i < len(q)-1; i++ {
 		c := q[i]
