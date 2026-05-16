@@ -3315,11 +3315,11 @@ func (s *Server) registerTools() {
 	// 19. doctor — drift + sanity diagnostics. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
 		Name:        "doctor",
-		Description: "**Diagnostic report from the local pincher database** — schema version, DB + WAL file sizes, per-project staleness, recent extraction failures, recent slow queries. Same data the `pincher doctor --json` CLI returns; exposed via MCP so dashboards and ops automations can poll without shelling out. Read-only; safe to call repeatedly.",
+		Description: "**Diagnostic report from the local pincher database**. Returns: `schema_version` (current migration head), `binary_version` (running pincher), `db_size_bytes` + `wal_size_bytes`, `projects` (per-project rows with `schema_version_at_index` + `binary_version` so the agent can spot per-project drift against the running binary — top-N by symbol count), `advisories` (advisory strings naming pathological states: large-DB > 1GB with sizing hint #732, ghost-project where the indexer ran but extraction produced near-zero symbols #1009), `extraction_failures` (recent failure rows from the lookback window), `slow_queries` (recent slow-query log). Same data the `pincher doctor --json` CLI returns; exposed via MCP so dashboards and ops automations can poll without shelling out. Read-only; safe to call repeatedly.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","properties":{
 				"lookback_hours":{"type":"integer","description":"Hours of history to include in failures + slow-query lists. Default 168 (7 days)."},
-				"top":{"type":"integer","description":"Maximum entries returned per section — caps the extraction-failures list, the slow-queries list, AND the projects list (#575, response-size bound on multi-project installs). Projects are sorted by symbol count desc, so the largest are kept; projects_truncated reports the count omitted. Use the list tool for full project enumeration. Default 10."}
+				"top":{"type":"integer","description":"Maximum entries returned per section — caps the extraction-failures list, the slow-queries list, AND the projects list (#575, response-size bound on multi-project installs). Projects are sorted by symbol count desc, so the largest are kept; projects_truncated reports the count omitted. Use the list tool for full project enumeration. Default 10, max 50 — values above 50 are clamped with a warning (#1054, the MCP per-call token cap)."}
 			}
 		}`),
 	}, s.handleDoctor)
