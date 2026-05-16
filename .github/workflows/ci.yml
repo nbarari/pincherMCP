@@ -225,3 +225,22 @@ jobs:
 
       - name: Verify CHANGELOG stub
         run: bash scripts/changelog-stub-check.sh "origin/${{ github.base_ref }}"
+
+  # #1103: PR title's (#N) conventional-commit suffix and PR body's
+  # `Closes #M` references must agree, otherwise the auto-close
+  # mechanism may close an issue unrelated to the PR's actual fix.
+  # Observed twice in 24h on this repo (#1075, #1094 closed by
+  # unrelated PRs #1092, #1095). This gate catches the mismatch
+  # before merge.
+  pr-issue-consistency:
+    name: PR title/body issue refs
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR title (#N) ↔ body Closes #M consistency
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/pr-issue-consistency.sh "$PR_TITLE" "$PR_BODY"
