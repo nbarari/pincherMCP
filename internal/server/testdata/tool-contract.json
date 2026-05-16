@@ -293,6 +293,10 @@
           "description": "Stable symbol ID of the seed. The neighborhood is every symbol that shares its file.",
           "type": "string"
         },
+        "include_fixtures": {
+          "description": "#1228: if true, allow seeds whose file_path lives in a pinned-corpus fixture (testdata/, __fixtures__/, test-fixtures/). Default false — the typical agent intent is real source-tree symbols. When the seed IS in a fixture path and include_fixtures is unset, neighborhood returns a rich-error with the opt-in remediation. Mirrors #1212 query + #1225 trace fixture-filter behaviour.",
+          "type": "boolean"
+        },
         "include_self": {
           "description": "If true, include the seed symbol itself in the neighbors list. Default false (caller already has it).",
           "type": "boolean"
@@ -552,6 +556,10 @@
         "kinds": {
           "description": "Comma-separated list of edge kinds to traverse (e.g. 'CALLS' or 'READS,WRITES'). Default: CALLS-family (CALLS,HTTP_CALLS,ASYNC_CALLS) — covers the typical 'who calls this' use case. Pass READS / WRITES (Go vars only, see #264/#265) to follow data-flow edges. Whitespace and case-insensitive.",
           "type": "string"
+        },
+        "max_hops": {
+          "description": "#1228: upper-bound cap on the number of hops returned (default 50). A hub function (logging utility, error helper called from 200+ sites) returns 100+ hops at depth=1; the auto-deepen trim doesn't help because depth=1 already crosses the threshold. When cap fires, _meta.truncated=true + _meta.total_before_cap + _meta.max_hops surface so the caller knows the response was truncated and can re-issue with a wider max_hops. Default 50 matches architecture's hotspot cap.",
+          "type": "integer"
         },
         "min_confidence": {
           "description": "Minimum extraction_confidence (0.0-1.0). Default 0.0 (no filter). Hops whose target symbol scores below the threshold are excluded from the result.",

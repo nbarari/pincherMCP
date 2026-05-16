@@ -3276,6 +3276,7 @@ func (s *Server) registerTools() {
 				"include_tests":{"type":"boolean","description":"If true, surface hops in test files (*_test.go, *.spec.ts, etc.). Default false. As of #1225 this no longer also governs fixture paths — use include_fixtures for those. Set true when you genuinely want a symbol's test coverage."},
 				"include_fixtures":{"type":"boolean","description":"#1225: if true, surface hops in testdata/__fixtures__/ pinned-corpus paths. Default false. Pre-#1225 these were grouped under include_tests; split so callers can selectively unlock real tests without also unlocking pincher's snapshot inputs (mirrors #1212 pinchQL fixture filter)."},
 				"compact":{"type":"boolean","description":"#1225: thin-client envelope. Drops per-hop kind + via fields and the top-level risk_summary block. Default false. On hot traces these account for 30-50% of payload that thin-client consumers (Cursor / Continue / Claude Desktop) don't render. Risk-aware consumers (dashboards, dogfood) stick with the default."},
+				"max_hops":{"type":"integer","description":"#1228: upper-bound cap on the number of hops returned (default 50). A hub function (logging utility, error helper called from 200+ sites) returns 100+ hops at depth=1; the auto-deepen trim doesn't help because depth=1 already crosses the threshold. When cap fires, _meta.truncated=true + _meta.total_before_cap + _meta.max_hops surface so the caller knows the response was truncated and can re-issue with a wider max_hops. Default 50 matches architecture's hotspot cap."},
 				"fields":{"type":"string","description":"Comma-separated top-level keys to include, e.g. 'hops,total' to drop risk_summary. Per-hop fields are NOT trimmed — pass shape via downstream symbol/symbols calls. _meta is preserved."}
 			}
 		}`),
@@ -3426,7 +3427,8 @@ func (s *Server) registerTools() {
 				"include_self":{"type":"boolean","description":"If true, include the seed symbol itself in the neighbors list. Default false (caller already has it)."},
 				"limit":{"type":"integer","description":"Maximum neighbors to return (default 50, max 500). Files with more symbols paginate via _meta.next_steps."},
 				"offset":{"type":"integer","description":"Skip the first N neighbors (default 0). Use the value from _meta.next_steps to walk the file."},
-				"cross_project":{"type":"boolean","description":"#1232 opt-in: when the seed ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning every in-file sibling from that other project — agents using the neighbor list to plan an in-file refactor would otherwise edit the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly."}
+				"cross_project":{"type":"boolean","description":"#1232 opt-in: when the seed ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning every in-file sibling from that other project — agents using the neighbor list to plan an in-file refactor would otherwise edit the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly."},
+				"include_fixtures":{"type":"boolean","description":"#1228: if true, allow seeds whose file_path lives in a pinned-corpus fixture (testdata/, __fixtures__/, test-fixtures/). Default false — the typical agent intent is real source-tree symbols. When the seed IS in a fixture path and include_fixtures is unset, neighborhood returns a rich-error with the opt-in remediation. Mirrors #1212 query + #1225 trace fixture-filter behaviour."}
 			}
 		}`),
 	}, s.handleNeighborhood)
@@ -6870,6 +6872,28 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		}
 	}
 
+	// #1228 (thin-client umbrella PR 4): upper-bound hop cap. A hub
+	// function (e.g. logging utility, error helper called from 200+
+	// sites) returns 100+ hops at depth=1; the auto-deepen trim
+	// doesn't help because depth=1 already crosses the threshold.
+	// Cap at maxHops (default 50, configurable via max_hops arg);
+	// surface truncated=true + total_before_cap in _meta so the
+	// caller knows the response was capped + can widen if they
+	// need the full set. Same shape as architecture's hotspot cap.
+	maxHops := intArg(args, "max_hops", 50)
+	var traceMaxHopsClampMsg string
+	if maxHops <= 0 {
+		traceMaxHopsClampMsg = fmt.Sprintf("trace: max_hops=%d clamped to 50 (must be positive)", maxHops)
+		maxHops = 50
+	}
+	traceTotalBeforeCap := len(hops)
+	traceTruncated := false
+	if len(hops) > maxHops {
+		hops = hops[:maxHops]
+		confs = confs[:maxHops]
+		traceTruncated = true
+	}
+
 	// Group by depth
 	byDepth := make(map[int][]map[string]any)
 	riskCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -6944,9 +6968,20 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if traceCrossProjectWarning != "" {
 		traceWarnings = append(traceWarnings, traceCrossProjectWarning)
 	}
+	if traceMaxHopsClampMsg != "" {
+		traceWarnings = append(traceWarnings, traceMaxHopsClampMsg)
+	}
 	traceWarnings = append(traceWarnings, traceKindWarnings...)
 	if len(traceWarnings) > 0 {
 		meta["warnings"] = traceWarnings
+	}
+	// #1228: surface the truncation flag + the total-before-cap so the
+	// caller can decide whether to widen max_hops. Same shape as
+	// architecture's hotspot truncation surface.
+	if traceTruncated {
+		meta["truncated"] = true
+		meta["total_before_cap"] = traceTotalBeforeCap
+		meta["max_hops"] = maxHops
 	}
 	// #402: when auto-deepen trimmed the result below the requested
 	// depth, tell the agent so depth_used vs depth_requested is

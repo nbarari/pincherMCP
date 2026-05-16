@@ -40,6 +40,14 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	projectArg := str(args, "project")
 	includeSource := boolArg(args, "include_source") // default false
 	includeSelf := boolArg(args, "include_self")     // default false
+	// #1228 (thin-client umbrella PR 4): include_fixtures defaults to
+	// false. Mirrors trace #1225 + query #1212 fixture-filter behaviour.
+	// When the seed's file_path matches isTestFixturePath (testdata/,
+	// __fixtures__/, test-fixtures/, etc.) and the caller didn't pass
+	// include_fixtures=true, return a rich-error explaining why — the
+	// seed is in a pinned-corpus fixture and the agent likely meant a
+	// real source-tree symbol. Opt-out via include_fixtures=true.
+	includeFixtures := boolArg(args, "include_fixtures")
 	// #293: pagination. The pre-fix tool dumped every symbol in the
 	// file, which blew the response budget on big files
 	// (server.go = 114 symbols → 54KB). Default to 50 so a
@@ -197,6 +205,25 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 			"seed %q resolved from project %q rather than the session project %q (cross_project=true). The neighbor list + every file_path below belongs to the off-tree project. Re-issue with project=%q to pin scope, or project=%q if you intended that source.",
 			id, seed.ProjectID, s.sessionID, s.sessionID, seed.ProjectID,
 		))
+	}
+	// #1228: seed-in-fixture rich-error. neighborhood scopes by file,
+	// so a fixture-path seed means the entire neighbor list lives in
+	// a pinned-corpus fixture. The agent likely meant a real source-
+	// tree symbol; refuse cleanly with the opt-in remediation rather
+	// than silently returning a list of test inputs.
+	if !includeFixtures && isTestFixturePath(seed.FilePath) {
+		return s.errResultRich(
+			fmt.Sprintf(
+				"seed %q lives in a pinned-corpus fixture path (%q). neighborhood scopes to that file, so the neighbor list would be entirely fixture inputs — likely not what you meant. Pass include_fixtures=true to opt in, or pick a seed from real source code.",
+				id, seed.FilePath,
+			),
+			[]map[string]string{
+				{"tool": "neighborhood", "args": fmt.Sprintf(`{"id":%q,"include_fixtures":true}`, id),
+					"why": "opt into surfacing fixture-path neighbors"},
+				{"tool": "search", "args": fmt.Sprintf(`{"query":%q}`, shortNameFromID(id)),
+					"why": "find an equivalent symbol outside the fixture corpus"},
+			},
+		), nil
 	}
 	siblings, err := s.store.GetSymbolsForFile(projectID, seed.FilePath)
 	if err != nil {
