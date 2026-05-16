@@ -2539,7 +2539,10 @@ func (e *Executor) runNodeScan(ctx context.Context, q *queryAST, pat pattern) (*
 	// unknown columns). buildResult re-sorts in Go — harmless, the SQL
 	// pre-sort just guarantees the right rows survive the LIMIT.
 	if !hasAggregation(q) && q.orderBy != "" {
-		if col := orderByCol(q.orderBy, pat.fromVar); col != "" {
+		// #1126: resolve alias → source so the SQL pushdown works for
+		// `RETURN n.complexity AS cx ORDER BY cx`.
+		obForSQL := resolveOrderByAlias(q.orderBy, q.returnVars)
+		if col := orderByCol(obForSQL, pat.fromVar); col != "" {
 			sqlQ += " ORDER BY " + col
 			if strings.EqualFold(q.orderDir, "DESC") {
 				sqlQ += " DESC"
@@ -2612,6 +2615,31 @@ func orderByCol(orderBy, fromVar string) string {
 		return "" // aggregate target — not a plain column
 	}
 	return cypherPropToCol(ob)
+}
+
+// resolveOrderByAlias (#1126) maps an ORDER BY alias back to its
+// source `var.prop` form so the SQL pushdown in runNodeScan /
+// runJoinQuery can ORDER BY the underlying column. Pre-fix, an
+// aliased projection like `RETURN n.complexity AS cx ORDER BY cx
+// DESC` left `q.orderBy = "cx"`; orderByCol returned "" because "cx"
+// isn't in the property whitelist; the SQL skipped its ORDER BY; the
+// safety LIMIT clamped scan to an arbitrary scanLimitFor window; and
+// buildResult's post-scan sort ran on that window only. Result: ORDER
+// BY <alias> silently returned the top-N of a random scan slice
+// instead of the global top-N (same #847 family that bit the
+// non-aliased path).
+//
+// Returns orderBy unchanged when no alias matches.
+func resolveOrderByAlias(orderBy string, returnVars []returnVar) string {
+	if orderBy == "" {
+		return orderBy
+	}
+	for _, rv := range returnVars {
+		if rv.alias != "" && rv.alias == orderBy && rv.variable != "" && rv.property != "" {
+			return rv.variable + "." + rv.property
+		}
+	}
+	return orderBy
 }
 
 // joinOrderByCol resolves a JOIN-query ORDER BY target to its table
@@ -2891,7 +2919,9 @@ func (e *Executor) runJoinQuery(ctx context.Context, q *queryAST, pat pattern) (
 	// left unpushed (ambiguous across the two joined tables); buildResult
 	// still sorts it post-scan, the pre-fix behaviour.
 	if !hasAggregation(q) && q.orderBy != "" {
-		if alias, col := joinOrderByCol(q.orderBy, pat); col != "" {
+		// #1126: resolve alias → source for SQL pushdown.
+		obForSQL := resolveOrderByAlias(q.orderBy, q.returnVars)
+		if alias, col := joinOrderByCol(obForSQL, pat); col != "" {
 			sqlQ += " ORDER BY " + alias + col
 			if strings.EqualFold(q.orderDir, "DESC") {
 				sqlQ += " DESC"
