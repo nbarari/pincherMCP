@@ -4,10 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// ansibleJinjaVarRefRE matches `{{ name` (with optional whitespace and
+// optional leading `-` for trim markers) and captures the bare leading
+// identifier. Captures only the LEFTMOST identifier in the expression —
+// `{{ db_host.port | default('x') }}` yields `db_host`. The regex is
+// deliberately permissive about what comes after the name (filter
+// chains, attribute access, calls); resolution of the rest is the
+// extractor's job for .j2 files (#1165 jinja path), not the YAML
+// string-value scanner. Multiple `{{ ... }}` expressions in the same
+// string each contribute one reference via FindAllStringSubmatch.
+var ansibleJinjaVarRefRE = regexp.MustCompile(`\{\{-?\s*([A-Za-z_][A-Za-z0-9_]*)`)
 
 // extractYAML parses a YAML or JSON document and emits a Setting symbol per key.
 //
@@ -204,6 +216,19 @@ func extractYAML(source []byte, relPath string) *FileResult {
 	}
 	if isAnsibleYAMLInventoryFile(relPath) {
 		result.Edges = append(result.Edges, ansibleLoadsEdges(docs, result.Module)...)
+	}
+
+	// Ansible USES_VAR dataflow edges (#1165, completing #71 Phase 2).
+	// Walk every string scalar in task / playbook files and emit a
+	// USES_VAR edge per `{{ var_name ... }}` substitution. Confidence
+	// 0.85: this is a regex over string values, not a Jinja parse —
+	// false positives in the form of `{{ literal_looking_string }}`
+	// inside intentional escape sequences are accepted in exchange for
+	// not pulling gonja into the YAML hot path. The resolver drops any
+	// reference whose name doesn't bind to a Setting symbol in a
+	// canonical Ansible var-declaration path, so noise stays bounded.
+	if isAnsibleTaskFile(relPath) {
+		result.Edges = append(result.Edges, ansibleUsesVarEdges(docs, result.Module)...)
 	}
 
 	return result
@@ -527,6 +552,74 @@ func ansibleLoadsEdges(docs []*yaml.Node, module string) []ExtractedEdge {
 					}
 				}
 				walk(v)
+			}
+		}
+	}
+	for _, d := range docs {
+		walk(d)
+	}
+	return edges
+}
+
+// ansibleUsesVarEdges walks every scalar string value in an Ansible
+// task/playbook document and emits one USES_VAR edge per `{{ var_name }}`
+// substitution. The walker descends through every YAML kind (Mapping,
+// Sequence, Document) so substitutions in deeply-nested constructs like
+// `when:`, `loop:`, `vars: { foo: "{{ bar }}" }`, and `with_items:` all
+// get captured.
+//
+// Dedup is per-(module, var_name): a task file that references `{{ db_host }}`
+// in five places emits one edge, not five. The graph cares "does file X
+// reference var Y?", not "how many syntactic occurrences"; the latter
+// adds N row noise without changing answers to any audit-shaped query.
+//
+// Confidence 0.85: regex over string scalars, not a parsed Jinja AST —
+// see ansibleJinjaVarRefRE godoc for the tradeoff. Skips
+// jinja-reserved tokens (loop / true / none / ...) via
+// isUsefulJinjaVarName so common loop bodies don't emit dangling
+// `loop`-bound edges.
+func ansibleUsesVarEdges(docs []*yaml.Node, module string) []ExtractedEdge {
+	var edges []ExtractedEdge
+	seen := make(map[string]bool)
+
+	emit := func(name string) {
+		if !isUsefulJinjaVarName(name) {
+			return
+		}
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		edges = append(edges, ExtractedEdge{
+			FromQN:     module,
+			ToName:     name,
+			Kind:       "USES_VAR",
+			Confidence: 0.85,
+		})
+	}
+
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.MappingNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.ScalarNode:
+			if n.Value == "" || !strings.Contains(n.Value, "{{") {
+				return
+			}
+			for _, m := range ansibleJinjaVarRefRE.FindAllStringSubmatch(n.Value, -1) {
+				if len(m) >= 2 {
+					emit(m[1])
+				}
 			}
 		}
 	}

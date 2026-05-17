@@ -213,7 +213,8 @@ func jinjaBlockSymbol(name string, w *nodes.Wrapper, source []byte, module strin
 }
 
 // jinjaWalkNodes recurses through gonja AST nodes, emitting Setting
-// symbols for {% set %} and IMPORTS edges for {% extends/include/import %}.
+// symbols for {% set %}, IMPORTS edges for {% extends/include/import %},
+// and USES_VAR edges for {{ var_name }} output expressions (#1165).
 // Macros and Blocks are handled separately via Template.Macros / .Blocks
 // (gonja indexes them there); this walker handles the rest.
 func jinjaWalkNodes(ns []nodes.Node, source []byte, module, relPath string, out *FileResult) {
@@ -224,8 +225,98 @@ func jinjaWalkNodes(ns []nodes.Node, source []byte, module, relPath string, out 
 			jinjaHandleStatement(v, source, currentQN, out)
 		case *nodes.Wrapper:
 			jinjaWalkNodes(v.Nodes, source, currentQN, relPath, out)
+		case *nodes.Output:
+			jinjaHandleOutput(v, currentQN, out)
 		}
 	}
+}
+
+// jinjaHandleOutput extracts USES_VAR edges from a {{ ... }} output
+// expression. The leftmost identifier in the expression is treated as
+// the referenced var name — handles plain {{ x }}, filtered {{ x | f }},
+// attribute/index access {{ x.y }} / {{ x[0] }}, and calls {{ x() }}.
+//
+// The ternary form {{ a if cond else b }} contributes up to three
+// references (a, cond, b) so resolve binds them all if their decls
+// exist. Literal-only outputs ({{ 42 }}, {{ "hello" }}) contribute none.
+//
+// A small set of Jinja-reserved names (`loop`, `super`, `caller`, ...)
+// is skipped at extraction time — they never bind to a Setting declaration
+// and would otherwise dangle into the synthetic-external pool unnecessarily.
+// Ansible builtin facts (`ansible_*`, `inventory_hostname`) are left to
+// the resolver to drop — they may or may not have a counterpart in
+// user-defined vars depending on the repo.
+func jinjaHandleOutput(o *nodes.Output, parentQN string, out *FileResult) {
+	if o == nil {
+		return
+	}
+	for _, e := range []nodes.Expression{o.Expression, o.Condition, o.Alternative} {
+		if e == nil {
+			continue
+		}
+		name := jinjaBaseName(e)
+		if !isUsefulJinjaVarName(name) {
+			continue
+		}
+		out.Edges = append(out.Edges, ExtractedEdge{
+			FromQN:     parentQN,
+			ToName:     name,
+			Kind:       "USES_VAR",
+			Confidence: 1.0,
+		})
+	}
+}
+
+// jinjaBaseName returns the leftmost identifier in an expression node.
+// Recurses through filters, attribute/index access, calls, and test
+// expressions so the deepest base identifier is returned. Returns ""
+// for literal-only expressions (no identifier to bind to a var decl).
+func jinjaBaseName(e nodes.Expression) string {
+	if e == nil {
+		return ""
+	}
+	switch v := e.(type) {
+	case *nodes.Name:
+		if v.Name != nil {
+			return v.Name.Val
+		}
+		return v.String()
+	case *nodes.FilteredExpression:
+		return jinjaBaseName(v.Expression)
+	case *nodes.TestExpression:
+		return jinjaBaseName(v.Expression)
+	case *nodes.Getattr:
+		if inner, ok := v.Node.(nodes.Expression); ok {
+			return jinjaBaseName(inner)
+		}
+	case *nodes.Getitem:
+		if inner, ok := v.Node.(nodes.Expression); ok {
+			return jinjaBaseName(inner)
+		}
+	case *nodes.Call:
+		if inner, ok := v.Func.(nodes.Expression); ok {
+			return jinjaBaseName(inner)
+		}
+	case *nodes.Variable:
+		if len(v.Parts) > 0 && v.Parts[0].Type == nodes.VarTypeIdent {
+			return v.Parts[0].S
+		}
+	}
+	return ""
+}
+
+// isUsefulJinjaVarName drops literal-keyword tokens and Jinja-internal
+// loop/macro names that can never bind to a user-declared var.
+func isUsefulJinjaVarName(name string) bool {
+	if name == "" {
+		return false
+	}
+	switch name {
+	case "loop", "super", "self", "caller", "varargs", "kwargs",
+		"true", "false", "none", "True", "False", "None", "_":
+		return false
+	}
+	return true
 }
 
 // jinjaHandleStatement extracts a symbol/edge from a single

@@ -424,6 +424,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		pendingImport  []ast.ExtractedEdge // deferred IMPORTS: resolved globally after full pass
 		pendingCalls   []ast.ExtractedEdge // deferred Go CALLS: resolved globally after full pass
 		pendingReads   []ast.ExtractedEdge // deferred Go READS (#247 #3): resolved globally; only Variable targets persist
+		pendingUsesVar []ast.ExtractedEdge // deferred Ansible USES_VAR (#1165): resolved against Setting symbols in canonical var-decl paths
 		bufMu          sync.Mutex
 		lastStatsFlush time.Time           // throttle for in-flight project counts; guarded by bufMu
 		seenFiles      = map[string]bool{} // #326: relPaths the walker yielded this run; tail-pass GC's symbols for files NOT in this set. Populated in the main (single-threaded) loop so no mutex.
@@ -566,7 +567,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			// the file rather than crashing the whole indexer goroutine.
 			// Without this, one malformed file kills the entire index run.
 			result := safeExtractWithModule(idx, projectID, lang, relPath, content, modulePath)
-			if result == nil || len(result.Symbols) == 0 {
+			if result == nil || (len(result.Symbols) == 0 && len(result.Edges) == 0) {
 				// #1313: zero-symbol extraction is a legitimate
 				// outcome — empty test fixtures (`package X` only),
 				// Markdown with no headings and no preamble, YAML
@@ -579,6 +580,14 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				// pass on pincherMCP-on-Mac. Stamp the hash here so
 				// the next pass's hash-check at line ~486 fires and
 				// skips.
+				//
+				// #1165: relaxed to also stay in the pipeline when a
+				// file extracted ZERO symbols but DID yield deferred
+				// edges (`.j2` templates that contain only
+				// `{{ var_name }}` output expressions are the canonical
+				// case). Otherwise USES_VAR refs from those files would
+				// silently drop here before reaching the deferred-edge
+				// loop / persistence below.
 				_ = idx.store.SetFileHash(projectID, relPath, hash)
 				return
 			}
@@ -647,6 +656,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			deferredImports := make([]ast.ExtractedEdge, 0)
 			deferredCalls := make([]ast.ExtractedEdge, 0)
 			deferredReads := make([]ast.ExtractedEdge, 0)
+			deferredUsesVar := make([]ast.ExtractedEdge, 0)
 			for _, e := range result.Edges {
 				// Stamp the source file before deferral so the resolver
 				// can disambiguate FromQN against project-wide name
@@ -659,6 +669,15 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				}
 				if (e.Kind == "READS" || e.Kind == "WRITES") && lang == "Go" {
 					deferredReads = append(deferredReads, e)
+					continue
+				}
+				if e.Kind == "USES_VAR" {
+					// #1165: USES_VAR always defers — the target is a Setting
+					// symbol whose canonical declaration lives in a sibling
+					// file (group_vars/, host_vars/, roles/*/defaults/, ...).
+					// Per-file nameToID never sees those, so binding has to
+					// wait for the project-wide pass.
+					deferredUsesVar = append(deferredUsesVar, e)
 					continue
 				}
 				fromID := nameToID[e.FromQN]
@@ -694,7 +713,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			// still has its IMPORTS / CALLS / READS / WRITES in the
 			// candidate pool. Without this, edges from a skipped file
 			// to a changed file get dropped on resolve.
-			fileDeferred := make([]db.PendingEdge, 0, len(deferredImports)+len(deferredCalls)+len(deferredReads))
+			fileDeferred := make([]db.PendingEdge, 0, len(deferredImports)+len(deferredCalls)+len(deferredReads)+len(deferredUsesVar))
 			appendDeferred := func(src []ast.ExtractedEdge) {
 				for _, e := range src {
 					fileDeferred = append(fileDeferred, db.PendingEdge{
@@ -712,6 +731,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			appendDeferred(deferredImports)
 			appendDeferred(deferredCalls)
 			appendDeferred(deferredReads)
+			appendDeferred(deferredUsesVar)
 			if err := idx.store.ReplacePendingEdgesForFile(projectID, relPath, fileDeferred); err != nil {
 				slog.Warn("pincher.pending_edges.replace.err", "file", relPath, "err", err)
 			}
@@ -780,6 +800,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			pendingImport = append(pendingImport, deferredImports...)
 			pendingCalls = append(pendingCalls, deferredCalls...)
 			pendingReads = append(pendingReads, deferredReads...)
+			pendingUsesVar = append(pendingUsesVar, deferredUsesVar...)
 			// #1231 v0.66 DOGFOOD: record this file's extracted-symbol
 			// count under bufMu so the post-pass parity check
 			// (Index() tail) can compare against the DB's
@@ -884,6 +905,15 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			totalEdges += n
 		}
 		if n := idx.resolveReads(projectID, allReads, qnMap); n > 0 {
+			totalEdges += n
+		}
+
+		// #1165 Phase 2: bind Ansible USES_VAR refs to Setting symbols in
+		// canonical var-declaration paths. Loads its own pool (no
+		// pre-load reuse with QN-keyed allImports/allCalls/allReads —
+		// USES_VAR resolution is name-keyed, not QN-keyed).
+		allUsesVar := loadOrFallback(idx, projectID, "USES_VAR", pendingUsesVar)
+		if n := idx.resolveUsesVar(projectID, allUsesVar); n > 0 {
 			totalEdges += n
 		}
 	}
@@ -2105,6 +2135,270 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		return 0
 	}
 	return len(edges)
+}
+
+// resolveUsesVar binds Ansible USES_VAR pending edges (#1165) emitted
+// by the YAML extractor (task / playbook string scalars) and the Jinja
+// extractor ({{ var_name }} output expressions) to the canonical
+// Setting symbol whose file lives in a recognised Ansible var-declaration
+// path:
+//
+//   - group_vars/<name>.yml         (or group_vars/<name>/main.yml form)
+//   - host_vars/<name>.yml          (or host_vars/<name>/main.yml form)
+//   - roles/*/defaults/main.yml     (lowest precedence — role defaults)
+//   - roles/*/vars/main.yml         (higher than defaults)
+//   - vars/*.yml                    (playbook-level vars files)
+//
+// The resolver loads every Setting symbol in the project once, indexes
+// them by `name`, and binds each pending edge against that index. When
+// the same var name is declared in multiple var-files (common —
+// `db_host` in group_vars/all.yml and an override in group_vars/staging.yml),
+// the lexicographically smallest symbol ID is chosen as canonical
+// (mirrors #428's pickCanonical for IMPORTS). The full Ansible 22-level
+// precedence model is intentionally NOT implemented here — the audit
+// queries this graph feeds (`dead_code`, "what uses var X?") answer
+// correctly with the canonical-pick approximation, and modelling true
+// host-context precedence would require per-play resolution well
+// outside the scope of #1165 (filed as future work in the issue's
+// Out-of-scope section).
+//
+// FromQN binds to the file's own Module symbol (the YAML/Jinja extractor
+// emits FromQN = module). Per-file collisions on Module QN are rare in
+// the Ansible context — task files and templates are filename-keyed —
+// but the existing IMPORTS resolver pattern (canonical-pick by ID) is
+// reused for consistency.
+func (idx *Indexer) resolveUsesVar(projectID string, pending []ast.ExtractedEdge) int {
+	if len(pending) == 0 {
+		return 0
+	}
+
+	// One bulk load of all symbols, then bucket Settings by name and
+	// Modules by QN. Pre-load avoids N round-trips for pending edges
+	// that re-reference the same var name across many files.
+	allByQN, err := idx.store.LoadAllSymbolsByQN(projectID)
+	if err != nil {
+		slog.Warn("pincher.uses_var.preload.err", "err", err)
+		return 0
+	}
+
+	// Setting-by-name index, scoped to Ansible var-declaration paths.
+	// Multiple Settings with the same name across var-files compete;
+	// the lex-smallest ID wins as canonical (#428).
+	//
+	// From-side lookup tables: the YAML/Jinja extractors don't emit a
+	// Module symbol per file (they only emit Settings / Functions /
+	// Blocks). The pending-edge FromQN is the file's bare module name
+	// ("main", "config", ...), which by itself doesn't disambiguate
+	// across the project. Bucket every symbol by file_path so the
+	// resolver can pick a representative — any symbol in the source
+	// file — when no Module exists. The representative is the
+	// lex-smallest symbol ID in the file, which is stable across
+	// re-indexes the same way pickCanonical is.
+	settingByName := make(map[string][]db.Symbol)
+	moduleByQN := make(map[string][]db.Symbol)
+	symsByFile := make(map[string][]db.Symbol)
+	for _, syms := range allByQN {
+		for _, s := range syms {
+			symsByFile[s.FilePath] = append(symsByFile[s.FilePath], s)
+			switch s.Kind {
+			case "Setting":
+				if isAnsibleVarDeclFile(s.FilePath) {
+					settingByName[s.Name] = append(settingByName[s.Name], s)
+				}
+			case "Module":
+				moduleByQN[s.QualifiedName] = append(moduleByQN[s.QualifiedName], s)
+			}
+		}
+	}
+
+	pickCanonical := func(syms []db.Symbol) string {
+		if len(syms) == 0 {
+			return ""
+		}
+		canonical := syms[0].ID
+		for i := 1; i < len(syms); i++ {
+			if syms[i].ID < canonical {
+				canonical = syms[i].ID
+			}
+		}
+		return canonical
+	}
+
+	// FromQN cache keeps repeated module lookups cheap. When the QN
+	// doesn't bind to a Module (the YAML/Jinja extractors don't emit
+	// one — see symsByFile godoc above), fall back to a representative
+	// symbol from the FromFile so the edge still anchors at "some
+	// symbol in this file". Last-ditch: a .j2 template that contains
+	// only `{{ var }}` output expressions and no {% macro %} / {% block %} /
+	// {% set %} produces ZERO symbols — synthesize a per-file Module
+	// symbol so the USES_VAR edge has a stable anchor. The synthetic
+	// rows are persisted in the same BulkUpsertSymbols call as the
+	// externals in resolveImports (#1340), keeping all-or-nothing
+	// semantics on the from-side.
+	fromCache := make(map[string]string)
+	synthFiles := make(map[string]db.Symbol)
+	resolveFrom := func(qn, fromFile string) string {
+		cacheKey := qn + "\x00" + fromFile
+		if id, ok := fromCache[cacheKey]; ok {
+			return id
+		}
+		id := pickCanonical(moduleByQN[qn])
+		if id == "" && fromFile != "" {
+			id = pickCanonical(symsByFile[fromFile])
+		}
+		if id == "" && fromFile != "" {
+			synth := syntheticFileModuleSymbol(projectID, fromFile, qn)
+			synthFiles[synth.ID] = synth
+			id = synth.ID
+		}
+		fromCache[cacheKey] = id
+		return id
+	}
+	// ToName cache: same `db_host` referenced from many places resolves
+	// to one canonical ID — compute it once.
+	toCache := make(map[string]string)
+	resolveTo := func(name string) string {
+		if id, ok := toCache[name]; ok {
+			return id
+		}
+		id := pickCanonical(settingByName[name])
+		toCache[name] = id
+		return id
+	}
+
+	seen := make(map[string]bool)
+	edges := make([]db.Edge, 0, len(pending))
+	for _, e := range pending {
+		fromID := resolveFrom(e.FromQN, e.FromFile)
+		toID := resolveTo(e.ToName)
+		if fromID == "" || toID == "" {
+			continue
+		}
+		key := fromID + "\x00" + toID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		edges = append(edges, db.Edge{
+			ProjectID:  projectID,
+			FromID:     fromID,
+			ToID:       toID,
+			Kind:       "USES_VAR",
+			Confidence: e.Confidence,
+			Source:     "resolve_pass",
+		})
+	}
+
+	// Persist any synthesized per-file Module symbols BEFORE the edges
+	// that reference them — mirrors the #1340 external-module ordering
+	// in resolveImports. Without this, an edge whose from_id is the
+	// synthetic dangles into a non-existent symbol row.
+	if len(synthFiles) > 0 {
+		synthSyms := make([]db.Symbol, 0, len(synthFiles))
+		for _, s := range synthFiles {
+			synthSyms = append(synthSyms, s)
+		}
+		if err := idx.store.BulkUpsertSymbols(synthSyms); err != nil {
+			slog.Warn("pincher.uses_var.synth_from_upsert.err", "err", err, "count", len(synthSyms))
+			// Drop edges that pointed at synthetics so they don't dangle.
+			filtered := edges[:0]
+			for _, e := range edges {
+				if _, isSynth := synthFiles[e.FromID]; !isSynth {
+					filtered = append(filtered, e)
+				}
+			}
+			edges = filtered
+		}
+	}
+
+	// Atomic replace, same pattern as resolveImports (#475). Without
+	// this, removing a Jinja/YAML var reference between re-index runs
+	// would leave the prior edge behind forever.
+	if err := idx.store.DeleteEdgesByKindAndSource(projectID, "USES_VAR", "resolve_pass"); err != nil {
+		slog.Warn("pincher.uses_var.delete_prior.err", "err", err)
+	}
+	if len(edges) == 0 {
+		return 0
+	}
+	if err := idx.store.BulkUpsertEdges(edges); err != nil {
+		slog.Warn("pincher.uses_var.upsert.err", "err", err)
+		return 0
+	}
+	return len(edges)
+}
+
+// syntheticFileModuleSymbol creates a Module symbol that represents the
+// source file when the file produced no extractable symbols of its own
+// (common for .j2 templates that contain only `{{ var }}` outputs).
+// The synthetic anchors USES_VAR edges (#1165) so audit queries like
+// "what uses var X?" can list the referencing file even when there's no
+// Function/Block/Setting in it.
+//
+// The Module symbol uses the file's basename (minus extension) as both
+// Name and QualifiedName, matching jinjaModuleName / YAML extractor
+// conventions. Confidence 0.5 — half the regex-tier baseline — flags
+// the row as resolver-synthesized vs extractor-emitted; downstream
+// consumers that want extractor-only symbols can filter on that floor.
+func syntheticFileModuleSymbol(projectID, filePath, qnHint string) db.Symbol {
+	qn := qnHint
+	if qn == "" {
+		qn = filepath.Base(filePath)
+		if i := strings.LastIndex(qn, "."); i > 0 {
+			qn = qn[:i]
+		}
+	}
+	return db.Symbol{
+		ID:                   db.MakeSymbolID(filePath, qn, "Module"),
+		ProjectID:            projectID,
+		FilePath:             filePath,
+		Name:                 qn,
+		QualifiedName:        qn,
+		Kind:                 "Module",
+		Language:             ast.DetectLanguage(filePath),
+		IsExported:           true,
+		ExtractionConfidence: 0.5,
+	}
+}
+
+// isAnsibleVarDeclFile returns true when relPath looks like an
+// Ansible variable declaration file. Conservative — only recognised
+// canonical paths qualify, so generic YAML config can't be
+// mistaken for a var-decl source. The set:
+//
+//   - group_vars/<name>.yml      (file form)
+//   - group_vars/<name>/*.yml    (directory form)
+//   - host_vars/<name>.yml       (file form)
+//   - host_vars/<name>/*.yml     (directory form)
+//   - roles/<role>/defaults/main.yml
+//   - roles/<role>/vars/main.yml
+//   - vars/<name>.yml            (playbook-adjacent vars/)
+//
+// Plays can declare vars inline via `vars:` blocks — those Settings
+// have file_paths matching the parent playbook (`site.yml` etc.) and
+// are intentionally NOT recognised here. The audit-shaped queries this
+// graph feeds care about cross-file binding; inline play vars don't
+// produce graph value because the use and decl already share a file.
+func isAnsibleVarDeclFile(relPath string) bool {
+	clean := strings.ReplaceAll(relPath, "\\", "/")
+	if !strings.HasSuffix(clean, ".yml") && !strings.HasSuffix(clean, ".yaml") {
+		return false
+	}
+	if strings.HasPrefix(clean, "group_vars/") || strings.Contains(clean, "/group_vars/") {
+		return true
+	}
+	if strings.HasPrefix(clean, "host_vars/") || strings.Contains(clean, "/host_vars/") {
+		return true
+	}
+	if strings.HasPrefix(clean, "vars/") || strings.Contains(clean, "/vars/") {
+		// `roles/<r>/vars/main.yml` also matches this branch via
+		// `/vars/`, which is intentional.
+		return true
+	}
+	if strings.Contains(clean, "/defaults/") {
+		// `roles/<r>/defaults/main.yml`
+		return true
+	}
+	return false
 }
 
 // loadOrFallback returns the project's persisted pending_edges of the
