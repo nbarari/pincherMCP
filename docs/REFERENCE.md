@@ -590,7 +590,17 @@ Diagnostic report — schema version, index staleness, extraction-failure counts
 pincher doctor                       # Markdown report
 pincher doctor --json                # structured output for CI
 pincher doctor --lookback 24h        # filter slow queries / failures by age
+pincher doctor --fix                 # auto-resolve the safe subset of advisories
+pincher doctor --fix --json          # structured fix-action report for CI
 ```
+
+**`--fix` safe-action allowlist (#1260 §3 v0.69):**
+
+| Action | Condition | Status if applied |
+|---|---|---|
+| `vacuum-db` | DB has >50 MB reclaimable space (VACUUM run; threshold gates the cost on a clean install) | reports `applied` with byte counts |
+
+Each action ends up `applied` / `noop` (criterion not met) / `skipped` (precondition like an open WAL reader blocks the fix) / `error` (the fix attempted and failed). **Destructive remediations** — project deletion, force-reindex, prune-stale — stay explicit-action and require the targeted subcommand (`pincher project rm`, `pincher index --force`, `pincher project prune-stale`). Their cost or destructiveness shouldn't be silently absorbed into a generic `--fix`.
 
 ### `pincher self-test`
 

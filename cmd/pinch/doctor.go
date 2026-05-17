@@ -39,9 +39,11 @@ func runDoctorCLI(args []string) {
 	asJSON := fs.Bool("json", false, "Emit structured JSON instead of Markdown")
 	lookbackHours := fs.Int("lookback", 168, "Hours of history to include in failure / slow-query lists (default 168 = 7 days)")
 	top := fs.Int("top", 10, "Maximum number of failures / slow queries to list per section")
+	fix := fs.Bool("fix", false, "Auto-resolve the safe subset of advisories (currently: VACUUM the DB when >50 MB of reclaimable space). Destructive remediations (project deletion, force-reindex) stay explicit-action — run their targeted subcommands. (#1260 §3)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: pincher doctor [--json] [--data-dir DIR] [--lookback HOURS] [--top N]")
+		fmt.Fprintln(os.Stderr, "usage: pincher doctor [--json] [--fix] [--data-dir DIR] [--lookback HOURS] [--top N]")
 		fmt.Fprintln(os.Stderr, "  Prints a diagnostic report from the local pincher database.")
+		fmt.Fprintln(os.Stderr, "  Pass --fix to auto-resolve the safe subset of advisories (VACUUM bloated DB).")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -54,6 +56,14 @@ func runDoctorCLI(args []string) {
 			fmt.Fprintf(os.Stderr, "pincher: failed to determine data directory: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	// #1260 §3: --fix bypasses the diagnose path and runs the safe-
+	// action allowlist directly. Mutually exclusive with the diagnose
+	// modes; fix shares the same DB open + close.
+	if *fix {
+		runDoctorFixCLI(dir, *asJSON)
+		return
 	}
 
 	store, err := db.Open(dir)
