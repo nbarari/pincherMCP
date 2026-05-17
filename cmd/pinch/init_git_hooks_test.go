@@ -154,6 +154,42 @@ func TestInstallGitHooks_DryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// TestPincherGitHookBody_PostCheckoutNoOpShortcuts pins the #1303 §2a
+// behavior: post-checkout's body must include both no-op shortcuts
+// (file-checkout and same-HEAD), and must apply ONLY to post-checkout
+// — post-merge and post-rewrite always fire (no useful no-op signals
+// in their arg shapes).
+func TestPincherGitHookBody_PostCheckoutNoOpShortcuts(t *testing.T) {
+	postCheckout := pincherGitHookBody("post-checkout")
+	if !strings.Contains(postCheckout, `"${3:-1}" = "0"`) {
+		t.Error("post-checkout must skip on $3=0 (file checkout) — #1303 §2a")
+	}
+	if !strings.Contains(postCheckout, `"$1" = "$2"`) {
+		t.Error("post-checkout must skip when prev_HEAD == new_HEAD — #1303 §2a")
+	}
+	// Each shortcut is a separate exit 0; verify both fire before the
+	// reindex line so the early-return wiring is correct.
+	exitIdx := strings.Index(postCheckout, "exit 0")
+	pincherIdx := strings.Index(postCheckout, "pincher index")
+	if exitIdx < 0 || pincherIdx < 0 || exitIdx > pincherIdx {
+		t.Errorf("post-checkout no-op exits must precede the pincher index call; got exit@%d index@%d", exitIdx, pincherIdx)
+	}
+
+	postMerge := pincherGitHookBody("post-merge")
+	postRewrite := pincherGitHookBody("post-rewrite")
+	for _, body := range []string{postMerge, postRewrite} {
+		if strings.Contains(body, `"${3:-1}" = "0"`) {
+			t.Error("only post-checkout should carry $3 no-op shortcut; post-merge/post-rewrite must not")
+		}
+		if strings.Contains(body, `"$1" = "$2"`) {
+			t.Error("only post-checkout should carry same-HEAD no-op; post-merge/post-rewrite must not")
+		}
+		if !strings.Contains(body, "pincher index") {
+			t.Error("post-merge / post-rewrite must always fire the reindex (no useful no-op signals in their arg shapes)")
+		}
+	}
+}
+
 // TestPincherGitHookBody_StructuralInvariants pins three properties
 // of the generated hook body that downstream tooling depends on:
 //   - leading shebang for POSIX exec

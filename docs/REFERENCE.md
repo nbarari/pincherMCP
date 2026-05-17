@@ -666,7 +666,9 @@ Installs git hooks into `.git/hooks/` so branch switches, fast-forward merges, a
 
 Each hook carries the `pincher.io/managed` marker so future runs can safely replace pincher-managed hooks without clobbering hand-written user hooks. The hook is a small POSIX sh script that calls `pincher index "$REPO_ROOT" --force` in the background — git operations don't block, and the indexer fires as soon as `git checkout` returns. `command -v pincher` guard means a missing pincher binary never breaks the user's git workflow.
 
-§2 (schema `branch` column for branch-aware queries — `search`/`query` filterable by branch dimension) deferred to its own issue.
+**post-checkout no-op shortcuts (#1303 §2a):** the post-checkout hook respects git's no-op signals — file checkouts (`git checkout README.md`, where `$3=0`) and re-checkouts of the current branch (where `$1=$2`) skip the reindex entirely. Saves the per-call BuildClosure cost on every routine file-level operation; only real branch movement triggers a reindex.
+
+§2b (schema `branch` column for branch-aware queries — `search`/`query` filterable by branch dimension) deferred to its own follow-up issue.
 
 ### `pincher project`
 

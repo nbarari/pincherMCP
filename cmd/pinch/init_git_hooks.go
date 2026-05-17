@@ -102,7 +102,16 @@ const gitHookMarker = "pincher.io/managed"
 
 // pincherGitHookBody returns the shell-script body for the named git
 // hook. Three hooks are supported (post-checkout, post-merge,
-// post-rewrite); each one fires the same eager-reindex command.
+// post-rewrite); each one fires the same eager-reindex command —
+// except post-checkout which respects git's no-op signals (#1303 §2a):
+//
+//   - post-checkout receives 3 args: $1=prev_HEAD, $2=new_HEAD, $3=flag
+//     (1=branch checkout, 0=file checkout). File checkouts (`git
+//     checkout README.md`) don't move HEAD and don't need a reindex —
+//     skip when $3=0. Same-branch checkouts (`git checkout main` while
+//     already on main) also don't change state — skip when $1==$2.
+//   - post-merge / post-rewrite always fire (no useful no-op signals
+//     in their arg shapes worth optimizing for in shell).
 //
 // The body uses POSIX sh + `git rev-parse` to locate the repo root,
 // so the hook works regardless of where the developer's shell was
@@ -112,7 +121,7 @@ const gitHookMarker = "pincher.io/managed"
 // background. If pincher isn't on PATH, the hook silently no-ops
 // (the `command -v` guard) — never breaks the user's git workflow.
 func pincherGitHookBody(name string) string {
-	return `#!/bin/sh
+	header := `#!/bin/sh
 # ` + gitHookMarker + `: pincher git hook — fires an eager reindex
 # on ` + name + ` so the index doesn't lag the working tree after
 # branch switches / pulls / rebases (#1261).
@@ -121,7 +130,30 @@ func pincherGitHookBody(name string) string {
 # eventually; this hook just collapses the window from seconds to
 # milliseconds. Replace freely — pincher init --git-hooks will
 # refuse to clobber non-pincher hooks (no marker comment).
+`
 
+	// #1303 §2a: post-checkout no-op shortcuts. File checkouts and
+	// same-branch checkouts don't change the working tree's branch
+	// state, so the reindex is pure overhead — skip them. Saves the
+	// per-call BuildClosure cost (~500ms on pincher-repo) on every
+	// `git checkout README.md` or repeated `git checkout main`.
+	noopBranch := ""
+	if name == "post-checkout" {
+		noopBranch = `
+# #1303 §2a: skip when this isn't actually a branch change.
+#   $1 = ref of previous HEAD
+#   $2 = ref of new HEAD
+#   $3 = 1 if branch checkout, 0 if file checkout
+if [ "${3:-1}" = "0" ]; then
+    exit 0   # file checkout — working tree unchanged, no reindex needed
+fi
+if [ "$1" = "$2" ]; then
+    exit 0   # same HEAD — re-checkout of current branch is a no-op
+fi
+`
+	}
+
+	return header + noopBranch + `
 if command -v pincher >/dev/null 2>&1; then
     REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
     if [ -n "$REPO_ROOT" ]; then
