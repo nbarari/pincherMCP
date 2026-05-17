@@ -58,39 +58,71 @@ func (m *markdownExtractor) Extract(source []byte, _, relPath string, _ ExtractO
 	md := goldmark.New()
 	doc := md.Parser().Parse(text.NewReader(source))
 
-	// Pass 1: collect all headings in document order with level + byte offsets.
+	// Pass 1: collect all headings in document order with level + byte
+	// offsets. The same walk also collects link nodes for the REFERENCES
+	// pass (#1343 v0.71). Tracking a running heading-context stack lets
+	// each link record its enclosing section as FromQN.
 	type headingInfo struct {
 		level    int
 		title    string
 		startTxt int // byte offset of the heading text (after `# `)
 	}
 	var headings []headingInfo
+	type linkInfo struct {
+		dest        string // raw href: `other.md`, `#section`, `https://...`
+		fromSection string // slug-joined path of the enclosing section, or ""
+	}
+	var links []linkInfo
+	type ctxFrame struct {
+		level int
+		slug  string
+	}
+	var ctxStack []ctxFrame
+	currentSectionPath := func() string {
+		if len(ctxStack) == 0 {
+			return ""
+		}
+		parts := make([]string, 0, len(ctxStack))
+		for _, f := range ctxStack {
+			parts = append(parts, f.slug)
+		}
+		return strings.Join(parts, ".")
+	}
 
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
-		h, ok := n.(*ast.Heading)
-		if !ok {
-			return ast.WalkContinue, nil
-		}
-		lines := h.Lines()
-		if lines == nil || lines.Len() == 0 {
-			return ast.WalkContinue, nil
-		}
-		startTxt := lines.At(0).Start
-
-		var buf bytes.Buffer
-		for c := h.FirstChild(); c != nil; c = c.NextSibling() {
-			if t, ok := c.(*ast.Text); ok {
-				buf.Write(t.Segment.Value(source))
+		switch node := n.(type) {
+		case *ast.Heading:
+			lines := node.Lines()
+			if lines == nil || lines.Len() == 0 {
+				return ast.WalkContinue, nil
+			}
+			startTxt := lines.At(0).Start
+			var buf bytes.Buffer
+			for c := node.FirstChild(); c != nil; c = c.NextSibling() {
+				if t, ok := c.(*ast.Text); ok {
+					buf.Write(t.Segment.Value(source))
+				}
+			}
+			title := strings.TrimSpace(buf.String())
+			if title == "" {
+				return ast.WalkContinue, nil
+			}
+			headings = append(headings, headingInfo{level: node.Level, title: title, startTxt: startTxt})
+			// Maintain the section-context stack: pop until top's
+			// level < this level, then push.
+			for len(ctxStack) > 0 && ctxStack[len(ctxStack)-1].level >= node.Level {
+				ctxStack = ctxStack[:len(ctxStack)-1]
+			}
+			ctxStack = append(ctxStack, ctxFrame{level: node.Level, slug: markdownSlug(title)})
+		case *ast.Link:
+			dest := string(node.Destination)
+			if dest != "" {
+				links = append(links, linkInfo{dest: dest, fromSection: currentSectionPath()})
 			}
 		}
-		title := strings.TrimSpace(buf.String())
-		if title == "" {
-			return ast.WalkContinue, nil
-		}
-		headings = append(headings, headingInfo{level: h.Level, title: title, startTxt: startTxt})
 		return ast.WalkContinue, nil
 	})
 
@@ -205,11 +237,138 @@ func (m *markdownExtractor) Extract(source []byte, _, relPath string, _ ExtractO
 		})
 	}
 
+	// #1343 v0.71: REFERENCES edges from each link's enclosing section
+	// to the resolved target. Three shapes:
+	//
+	//   - `[text](#anchor)` — intra-doc; ToName = "<file-basename>.<slug>"
+	//     so the cross-file resolver binds it to the same file's Section.
+	//   - `[text](other.md)` or `[text](other.md#anchor)` — inter-doc;
+	//     ToName = "<other-basename>" or "<other-basename>.<slug>".
+	//   - External URLs (`http://`, `https://`, `mailto:`, etc.) — skip;
+	//     no symbol target exists. Unlike the IMPORTS / external-import
+	//     case (#1340), external-target docs links are intentionally not
+	//     deferred — they're never resolvable.
+	//
+	// Goldmark renders most absolute URLs back as `node.Destination` raw,
+	// so a simple scheme-prefix check is sufficient.
+	seenEdge := make(map[string]struct{})
+	for _, lnk := range links {
+		toName := canonicalDocsLinkTarget(lnk.dest, result.Module)
+		if toName == "" {
+			continue
+		}
+		fromQN := lnk.fromSection
+		// Self-edges (link to the same section that contains it) are
+		// noise. Mirrors the HCL self-reference guard.
+		if fromQN != "" && fromQN == toName {
+			continue
+		}
+		key := fromQN + "->" + toName
+		if _, dup := seenEdge[key]; dup {
+			continue
+		}
+		seenEdge[key] = struct{}{}
+		result.Edges = append(result.Edges, ExtractedEdge{
+			FromQN:     fromQN,
+			ToName:     toName,
+			Kind:       "REFERENCES",
+			Confidence: 1.0,
+		})
+	}
+
 	// #115 disambiguation happens centrally in ExtractWithModule —
 	// goldmark gives us tree-aware paths, but identical heading text in
 	// different sections still collides (`installation_from_source.windows`
 	// in docs/source.md was the canonical case).
 	return result
+}
+
+// canonicalDocsLinkTarget converts a Markdown link href into a ToName
+// shape the cross-file resolver can match against extracted Section
+// QNs. Returns "" for external / non-symbol-bearing destinations.
+// #1343 v0.71.
+func canonicalDocsLinkTarget(dest, selfModule string) string {
+	if dest == "" {
+		return ""
+	}
+	// External schemes: http/https/mailto/ftp/tel/data/javascript.
+	if i := strings.Index(dest, "://"); i > 0 && i <= 10 {
+		return ""
+	}
+	if strings.HasPrefix(dest, "mailto:") ||
+		strings.HasPrefix(dest, "tel:") ||
+		strings.HasPrefix(dest, "javascript:") ||
+		strings.HasPrefix(dest, "data:") {
+		return ""
+	}
+	// Protocol-relative `//cdn.example/...` — treated as external.
+	if strings.HasPrefix(dest, "//") {
+		return ""
+	}
+
+	// Split off the fragment / anchor.
+	anchor := ""
+	if i := strings.IndexByte(dest, '#'); i >= 0 {
+		anchor = dest[i+1:]
+		dest = dest[:i]
+	}
+	// Strip query string.
+	if i := strings.IndexByte(dest, '?'); i >= 0 {
+		dest = dest[:i]
+	}
+
+	// Intra-doc anchor only: `[See](#section)` → resolve against the
+	// current file's slugged sections.
+	if dest == "" && anchor != "" {
+		return selfModule + "." + markdownSlug(anchor)
+	}
+	if dest == "" {
+		return ""
+	}
+
+	// Drop trailing slash on directory-style links.
+	dest = strings.TrimSuffix(dest, "/")
+	if dest == "" {
+		return ""
+	}
+
+	// File-extension-based filter: only .md / .markdown / .mdx / .mdc
+	// target docs symbols. Links to other file types (.png, .pdf) are
+	// not extracted as docs symbols.
+	base := dest
+	ext := ""
+	if i := strings.LastIndexByte(base, '.'); i >= 0 {
+		ext = strings.ToLower(base[i:])
+		base = base[:i]
+	}
+	switch ext {
+	case ".md", ".markdown", ".mdx", ".mdc":
+		// OK — proceed.
+	case "":
+		// Bare path with no extension (rare for docs links). Could
+		// resolve at the resolver layer with extension probing, but
+		// emitting an edge with no extension hint is more likely to
+		// false-bind than not. Skip.
+		return ""
+	default:
+		return ""
+	}
+
+	// Strip path components: `docs/foo.md` → `foo`. The Markdown
+	// extractor's Module field is the file basename, so the target
+	// QN root is the basename of the linked file.
+	if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "" {
+		return ""
+	}
+
+	target := base
+	if anchor != "" {
+		target = base + "." + markdownSlug(anchor)
+	}
+	return target
 }
 
 // markdownModuleName turns "docs/intro.md" into "intro" — the file basename
