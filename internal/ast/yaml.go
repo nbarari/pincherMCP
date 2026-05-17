@@ -193,6 +193,19 @@ func extractYAML(source []byte, relPath string) *FileResult {
 		result.Edges = append(result.Edges, ansibleRenderEdges(docs, result.Module)...)
 	}
 
+	// Ansible structural edges (#1160, completing #71 Phase 1).
+	// Playbooks: emit INCLUDES edges for `roles:` / `import_role:` /
+	// `include_role:` keys. YAML inventories: emit LOADS edges for hosts
+	// to their `host_vars/<H>.yml` files. The two extractors gate on
+	// distinct file-path conventions so a playbook isn't mistaken for an
+	// inventory and vice versa.
+	if isAnsiblePlaybookFile(relPath) {
+		result.Edges = append(result.Edges, ansibleIncludesEdges(docs, result.Module)...)
+	}
+	if isAnsibleYAMLInventoryFile(relPath) {
+		result.Edges = append(result.Edges, ansibleLoadsEdges(docs, result.Module)...)
+	}
+
 	return result
 }
 
@@ -296,6 +309,243 @@ func ansibleFindSrc(n *yaml.Node) string {
 		k := n.Content[i]
 		v := n.Content[i+1]
 		if k != nil && k.Kind == yaml.ScalarNode && k.Value == "src" &&
+			v != nil && v.Kind == yaml.ScalarNode {
+			return v.Value
+		}
+	}
+	return ""
+}
+
+// isAnsiblePlaybookFile returns true when relPath looks like an Ansible
+// playbook — i.e. a top-level orchestration YAML that may declare
+// `roles:` / `import_role:` / `include_role:` against sibling
+// `roles/<name>/` directories.
+//
+// Detection covers the canonical filenames (`site.yml`, `deploy.yml`,
+// `playbook.yml`, anything starting with `playbook`) plus YAML files at
+// the project root that aren't inside `tasks/` / `handlers/` /
+// `vars/` / `defaults/` / `group_vars/` / `host_vars/` / `roles/`
+// (those are role-internal files, not playbooks). Files in
+// `playbooks/` are also accepted (common Ansible layout convention).
+func isAnsiblePlaybookFile(relPath string) bool {
+	clean := strings.ReplaceAll(relPath, "\\", "/")
+	base := filepath.Base(clean)
+	if !strings.HasSuffix(base, ".yml") && !strings.HasSuffix(base, ".yaml") {
+		return false
+	}
+	switch base {
+	case "site.yml", "site.yaml",
+		"deploy.yml", "deploy.yaml",
+		"playbook.yml", "playbook.yaml":
+		return true
+	}
+	if strings.HasPrefix(base, "playbook") {
+		return true
+	}
+	if strings.Contains(clean, "/playbooks/") || strings.HasPrefix(clean, "playbooks/") {
+		return true
+	}
+	return false
+}
+
+// isAnsibleYAMLInventoryFile returns true when relPath looks like an
+// Ansible YAML-format inventory. The conservative detection covers
+// files literally named `inventory.yml` / `inventory.yaml` /
+// `hosts.yml` / `hosts.yaml`, plus anything under an `inventory/` or
+// `inventories/` directory ending in `.yml` / `.yaml`. INI-format
+// inventories aren't covered here — they don't parse as YAML and
+// would need a separate extractor (out of scope for #1160 Phase 1
+// per its "Out of scope" section on Salt + INI inventories).
+func isAnsibleYAMLInventoryFile(relPath string) bool {
+	clean := strings.ReplaceAll(relPath, "\\", "/")
+	base := filepath.Base(clean)
+	if !strings.HasSuffix(base, ".yml") && !strings.HasSuffix(base, ".yaml") {
+		return false
+	}
+	switch base {
+	case "inventory.yml", "inventory.yaml",
+		"hosts.yml", "hosts.yaml":
+		return true
+	}
+	if strings.Contains(clean, "/inventory/") || strings.HasPrefix(clean, "inventory/") {
+		return true
+	}
+	if strings.Contains(clean, "/inventories/") || strings.HasPrefix(clean, "inventories/") {
+		return true
+	}
+	return false
+}
+
+// ansibleIncludesEdges scans a parsed playbook for the three forms of
+// role inclusion and emits INCLUDES edges to the role's
+// `tasks/main.yml` Module.
+//
+// The patterns recognised:
+//
+//	# play-level roles list
+//	- hosts: all
+//	  roles:
+//	    - common
+//	    - { role: nginx, vars: {...} }
+//
+//	# task-level import / include
+//	- import_role: { name: postgres }
+//	- include_role: { name: backup }
+//
+// Edge target: the literal `roles/<name>/tasks/main.yml` relative path.
+// The indexer's edge-resolution pass will bind it against the global
+// symbol table (modules are keyed by file_path on the YAML extractor
+// side, so the lookup hits whichever role's tasks/main.yml has been
+// indexed). When the role lives at a non-standard path (custom
+// `roles_path`), the edge will dangle on the resolution pass — the
+// downstream synthetic-external path (#1340) catches those so the
+// edge persists rather than silently dropping.
+func ansibleIncludesEdges(docs []*yaml.Node, module string) []ExtractedEdge {
+	var edges []ExtractedEdge
+
+	emit := func(roleName string) {
+		if roleName == "" {
+			return
+		}
+		edges = append(edges, ExtractedEdge{
+			FromQN:     module,
+			ToName:     "roles/" + roleName + "/tasks/main.yml",
+			Kind:       "INCLUDES",
+			Confidence: 1.0,
+		})
+	}
+
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				k := n.Content[i]
+				v := n.Content[i+1]
+				if k == nil || k.Kind != yaml.ScalarNode {
+					continue
+				}
+				switch k.Value {
+				case "roles":
+					// `roles:` value is a sequence; each item is either a
+					// bare string or a mapping with a `role:` field.
+					if v != nil && v.Kind == yaml.SequenceNode {
+						for _, item := range v.Content {
+							switch item.Kind {
+							case yaml.ScalarNode:
+								emit(item.Value)
+							case yaml.MappingNode:
+								emit(ansibleFindMappingScalar(item, "role"))
+							}
+						}
+					}
+				case "import_role", "include_role":
+					// Both take a mapping with a `name:` field. The role
+					// argument is sometimes also passed as a bare scalar
+					// in older playbooks — handle both shapes.
+					if v != nil {
+						switch v.Kind {
+						case yaml.ScalarNode:
+							emit(v.Value)
+						case yaml.MappingNode:
+							emit(ansibleFindMappingScalar(v, "name"))
+						}
+					}
+				}
+				walk(v)
+			}
+		}
+	}
+	for _, d := range docs {
+		walk(d)
+	}
+	return edges
+}
+
+// ansibleLoadsEdges scans a parsed YAML inventory for host entries and
+// emits LOADS edges to their `host_vars/<H>.yml` files. The YAML
+// inventory shape is a nested map:
+//
+//	all:
+//	  hosts:
+//	    web-01:
+//	      ansible_host: 10.0.1.1
+//	  children:
+//	    db_servers:
+//	      hosts:
+//	        db-01: {}
+//
+// The walker emits one LOADS edge per host name encountered under any
+// `hosts:` mapping, regardless of nesting depth. The edge target is
+// the canonical `host_vars/<H>.yml` path; if the project uses the
+// directory-form (`host_vars/<H>/main.yml`) the indexer's resolution
+// pass + synthetic-external fallback (#1340) keeps the edge bound.
+//
+// `group_vars/<G>.yml` for groups is not emitted in this Phase 1
+// slice — group resolution requires walking the `children:` tree
+// structurally, and the value-add over host-only edges is marginal
+// for the audit-shaped queries the edges feed. Filed as a follow-up
+// rather than expanding the Phase 1 scope.
+func ansibleLoadsEdges(docs []*yaml.Node, module string) []ExtractedEdge {
+	var edges []ExtractedEdge
+	seen := make(map[string]bool) // dedup repeat host references
+
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				k := n.Content[i]
+				v := n.Content[i+1]
+				if k != nil && k.Kind == yaml.ScalarNode && k.Value == "hosts" &&
+					v != nil && v.Kind == yaml.MappingNode {
+					for j := 0; j+1 < len(v.Content); j += 2 {
+						hk := v.Content[j]
+						if hk != nil && hk.Kind == yaml.ScalarNode && hk.Value != "" && !seen[hk.Value] {
+							seen[hk.Value] = true
+							edges = append(edges, ExtractedEdge{
+								FromQN:     module,
+								ToName:     "host_vars/" + hk.Value + ".yml",
+								Kind:       "LOADS",
+								Confidence: 1.0,
+							})
+						}
+					}
+				}
+				walk(v)
+			}
+		}
+	}
+	for _, d := range docs {
+		walk(d)
+	}
+	return edges
+}
+
+// ansibleFindMappingScalar returns the scalar value at key `key` in
+// mapping node n, or "" if absent or not a scalar.
+func ansibleFindMappingScalar(n *yaml.Node, key string) string {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		v := n.Content[i+1]
+		if k != nil && k.Kind == yaml.ScalarNode && k.Value == key &&
 			v != nil && v.Kind == yaml.ScalarNode {
 			return v.Value
 		}

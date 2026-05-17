@@ -629,6 +629,184 @@ func TestExtractYAML_AnsibleRendersEdge_NoTemplateNoEdge(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #1160 — Ansible structural edges (INCLUDES playbook→role, LOADS host→host_vars)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Positive: playbook-level `roles:` list emits one INCLUDES edge per
+// listed role, both bare-scalar and mapping-with-role-key forms.
+func TestExtractYAML_AnsibleIncludes_RolesList(t *testing.T) {
+	src := `---
+- hosts: webservers
+  roles:
+    - common
+    - { role: nginx, vars: { port: 8080 } }
+    - role: postgres
+`
+	r := Extract([]byte(src), "YAML", "site.yml")
+	got := edgesByName(r.Edges, "INCLUDES")
+	for _, want := range []string{
+		"roles/common/tasks/main.yml",
+		"roles/nginx/tasks/main.yml",
+		"roles/postgres/tasks/main.yml",
+	} {
+		if !contains(got, want) {
+			t.Errorf("missing INCLUDES edge to %q; got: %v", want, got)
+		}
+	}
+}
+
+// Positive: task-level `import_role:` and `include_role:` keys also
+// emit INCLUDES edges. Both mapping form (`{ name: foo }`) and bare-
+// scalar legacy form must work.
+func TestExtractYAML_AnsibleIncludes_ImportAndInclude(t *testing.T) {
+	src := `---
+- hosts: all
+  tasks:
+    - import_role: { name: postgres }
+    - include_role:
+        name: backup
+    - import_role: legacy
+`
+	r := Extract([]byte(src), "YAML", "playbook.yml")
+	got := edgesByName(r.Edges, "INCLUDES")
+	for _, want := range []string{
+		"roles/postgres/tasks/main.yml",
+		"roles/backup/tasks/main.yml",
+		"roles/legacy/tasks/main.yml",
+	} {
+		if !contains(got, want) {
+			t.Errorf("missing INCLUDES edge to %q; got: %v", want, got)
+		}
+	}
+}
+
+// Negative — path filtering: INCLUDES must not fire for non-playbook
+// YAML even when `roles:` appears. A Helm values.yaml or kustomization
+// could legitimately use `roles:` for completely different semantics
+// (e.g. RBAC), and silently emitting INCLUDES would mislead graph
+// traversals.
+func TestExtractYAML_AnsibleIncludes_PathFiltering(t *testing.T) {
+	src := `---
+roles:
+  - admin
+  - reader
+`
+	for _, path := range []string{
+		"helm/values.yaml",
+		"k8s/rbac.yaml",
+		"roles/x/tasks/main.yml", // role-internal task file, not a playbook
+		"group_vars/all.yml",
+	} {
+		t.Run(path, func(t *testing.T) {
+			r := Extract([]byte(src), "YAML", path)
+			got := edgesByName(r.Edges, "INCLUDES")
+			if len(got) != 0 {
+				t.Errorf("non-playbook path %q produced INCLUDES edges: %v", path, got)
+			}
+		})
+	}
+}
+
+// Control — playbook with no role inclusions emits no INCLUDES edges.
+func TestExtractYAML_AnsibleIncludes_NoRolesNoEdges(t *testing.T) {
+	src := `---
+- hosts: all
+  tasks:
+    - name: just a debug
+      debug: { msg: hi }
+`
+	r := Extract([]byte(src), "YAML", "site.yml")
+	got := edgesByName(r.Edges, "INCLUDES")
+	if len(got) != 0 {
+		t.Errorf("playbook without roles produced INCLUDES edges: %v", got)
+	}
+}
+
+// Positive — YAML inventory hosts emit LOADS edges to host_vars.
+// Nested under `all.hosts:` AND under `children.<group>.hosts:` both
+// resolve.
+func TestExtractYAML_AnsibleLoads_NestedHosts(t *testing.T) {
+	src := `---
+all:
+  hosts:
+    web-01:
+      ansible_host: 10.0.1.1
+    web-02:
+  children:
+    db_servers:
+      hosts:
+        db-01: {}
+        db-02:
+          ansible_host: 10.0.2.2
+`
+	r := Extract([]byte(src), "YAML", "inventory/hosts.yml")
+	got := edgesByName(r.Edges, "LOADS")
+	for _, want := range []string{
+		"host_vars/web-01.yml",
+		"host_vars/web-02.yml",
+		"host_vars/db-01.yml",
+		"host_vars/db-02.yml",
+	} {
+		if !contains(got, want) {
+			t.Errorf("missing LOADS edge to %q; got: %v", want, got)
+		}
+	}
+}
+
+// Negative — path filtering: LOADS must not fire for non-inventory YAML
+// even when the file has a `hosts:` key. Many k8s ingress / route specs
+// legitimately use `hosts:`.
+func TestExtractYAML_AnsibleLoads_PathFiltering(t *testing.T) {
+	src := `---
+spec:
+  hosts:
+    example-com: {}
+`
+	for _, path := range []string{
+		"k8s/ingress.yaml",
+		"helm/values.yaml",
+		"docker-compose.yml",
+	} {
+		t.Run(path, func(t *testing.T) {
+			r := Extract([]byte(src), "YAML", path)
+			got := edgesByName(r.Edges, "LOADS")
+			if len(got) != 0 {
+				t.Errorf("non-inventory path %q produced LOADS edges: %v", path, got)
+			}
+		})
+	}
+}
+
+// Cross-check — repeated host references dedupe to one edge per host.
+// An inventory might list a host under multiple groups; LOADS edges
+// should be per-host not per-group-membership.
+func TestExtractYAML_AnsibleLoads_DedupsRepeatedHosts(t *testing.T) {
+	src := `---
+all:
+  hosts:
+    web-01: {}
+  children:
+    web_servers:
+      hosts:
+        web-01: {}   # same host referenced twice
+    monitoring:
+      hosts:
+        web-01: {}   # third reference
+`
+	r := Extract([]byte(src), "YAML", "inventory.yml")
+	got := edgesByName(r.Edges, "LOADS")
+	hits := 0
+	for _, g := range got {
+		if g == "host_vars/web-01.yml" {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Errorf("expected 1 LOADS edge for web-01 (dedup), got %d in %v", hits, got)
+	}
+}
+
 // edgesByName extracts ToName values from edges of a given kind.
 func edgesByName(edges []ExtractedEdge, kind string) []string {
 	out := make([]string, 0, len(edges))
