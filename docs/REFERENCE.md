@@ -628,6 +628,8 @@ Use this if `pincher search` returns results inconsistent with `pincher query` a
 
 Auto-detects whether the binary is running from a clone of pincherMCP (walks ancestors looking for a `go.mod` matching this module). In-repo: `git fetch` + `git pull --ff-only` + `go build`. Otherwise: queries the GitHub releases API, picks an asset matching `GOOS`/`GOARCH`, atomically swaps the running binary aside on Windows before installing the replacement.
 
+**Install-method detection (#1260 §5).** When the running binary's path resolves under a Homebrew prefix (`/opt/homebrew/`, `/usr/local/`, `/home/linuxbrew/.linuxbrew/`), `pincher update` skips the GitHub-asset path and prints the brew command instead (`brew update && brew upgrade pincher`). Pre-fix Mac users got `go install` instructions they couldn't follow without a Go toolchain. Pass `--yes` to invoke brew directly; default stays advisory because brew users generally want to see brew's output live.
+
 ```bash
 pincher update                       # apply update if behind
 pincher update --check               # report status only

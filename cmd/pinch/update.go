@@ -232,11 +232,111 @@ type gitRelease struct {
 	} `json:"assets"`
 }
 
+// detectInstallMethod inspects the running binary's path to figure out
+// how pincher was installed. Returns one of:
+//
+//   - "homebrew"  — installed via brew (path under Homebrew prefix)
+//   - "binary"    — direct download / build (anything else)
+//
+// Used by updateStandalone (#1260 §5) to dispatch the right upgrade
+// command. Homebrew users currently get told to run `go install` which
+// they can't follow without a Go toolchain — directing them to
+// `brew upgrade` instead closes the gap.
+//
+// Skips Scoop (not yet shipped, #1260 §1) and Docker (rare to update
+// from inside a container — users update by pulling a new image).
+//
+// On any error resolving the exe path, returns "binary" so the existing
+// GitHub-asset / go-install path runs unchanged. Defensive: a detection
+// false-negative just routes through the slower path, never blocks.
+func detectInstallMethod(exePath string) string {
+	if exePath == "" {
+		return "binary"
+	}
+	abs, err := filepath.Abs(exePath)
+	if err != nil {
+		return "binary"
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	abs = filepath.ToSlash(abs)
+	// Apple-silicon default + Intel-Mac default + Linuxbrew default.
+	brewPrefixes := []string{
+		"/opt/homebrew/", // Apple silicon (M1+)
+		"/usr/local/",    // Intel Mac (and the default brew --prefix)
+		"/home/linuxbrew/.linuxbrew/",
+	}
+	for _, p := range brewPrefixes {
+		if strings.HasPrefix(abs, p) {
+			return "homebrew"
+		}
+	}
+	return "binary"
+}
+
+// upgradeViaHomebrew renders the brew upgrade hint OR runs the command
+// directly when --yes is passed. Stays advisory by default: brew is the
+// kind of tool whose output the user generally wants to see live, and
+// running it from inside an unrelated process can confuse a user who
+// then re-runs brew themselves.
+func upgradeViaHomebrew(out io.Writer, check, yes, dryRun bool) error {
+	fmt.Fprintln(out, "  install method: homebrew")
+	fmt.Fprintln(out, "  recommended:    brew update && brew upgrade pincher")
+	if check {
+		return nil
+	}
+	if dryRun {
+		fmt.Fprintln(out, "  would run: brew update && brew upgrade pincher")
+		return nil
+	}
+	if !yes {
+		fmt.Fprintln(out, "  re-run with --yes to invoke brew automatically, or run the command above yourself.")
+		return nil
+	}
+	if _, err := exec.LookPath("brew"); err != nil {
+		return fmt.Errorf("brew not found on PATH despite homebrew install path; run manually")
+	}
+	fmt.Fprintln(out, "  running: brew update")
+	if err := runBrew(out, "update"); err != nil {
+		return fmt.Errorf("brew update: %w", err)
+	}
+	fmt.Fprintln(out, "  running: brew upgrade pincher")
+	if err := runBrew(out, "upgrade", "pincher"); err != nil {
+		return fmt.Errorf("brew upgrade pincher: %w", err)
+	}
+	return nil
+}
+
+// brewRunner is the indirection point so tests can verify dispatch
+// shape without invoking actual brew on the test runner.
+var brewRunner = func(out io.Writer, args ...string) error {
+	cmd := exec.Command("brew", args...)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	cmd.Env = os.Environ()
+	return cmd.Run()
+}
+
+func runBrew(out io.Writer, args ...string) error {
+	return brewRunner(out, args...)
+}
+
 // updateStandalone implements the no-checkout path: query GitHub releases,
 // pick a matching asset for this platform, fall back to `go install`.
+//
+// #1260 §5: when the running binary lives under a Homebrew prefix,
+// short-circuit and direct the user to `brew upgrade pincher` instead.
+// Pre-fix Mac users got `go install` instructions they couldn't follow.
 func updateStandalone(out io.Writer, check, yes, dryRun bool) error {
 	fmt.Fprintln(out, "pincher update: standalone mode")
 	fmt.Fprintf(out, "  current: v%s\n", version)
+
+	if exe, err := os.Executable(); err == nil {
+		if method := detectInstallMethod(exe); method == "homebrew" {
+			return upgradeViaHomebrew(out, check, yes, dryRun)
+		}
+	}
 
 	rel, err := fetchLatestRelease()
 	if err != nil {
