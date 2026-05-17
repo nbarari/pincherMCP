@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // hclExtractor parses Terraform .tf and .tfvars files via hashicorp/hcl/v2's
@@ -116,7 +117,55 @@ func (h *hclExtractor) Extract(source []byte, _, relPath string, _ ExtractOption
 	for _, blk := range hclSortedBlocks(body) {
 		result.Edges = append(result.Edges, hclCollectReferences(blk, "")...)
 	}
+
+	// IMPORTS edges for `module "x" { source = "..." }` (#1342 v0.71).
+	// Terraform module declarations carry a `source` attribute whose
+	// literal string value is a path/URL/registry-shorthand pointing
+	// at the underlying module. Local paths (./modules/vpc) resolve
+	// against in-tree Module symbols cleanly; registry / git sources
+	// drop at the cross-file resolver until non-Go IMPORTS resolution
+	// is in (#1340). Walking only top-level `module` blocks — nested
+	// blocks (provider, lifecycle) don't have a `source` semantic.
+	for _, blk := range hclSortedBlocks(body) {
+		if blk.Type != "module" || len(blk.Labels) < 1 {
+			continue
+		}
+		src := hclModuleSourceAttr(blk)
+		if src == "" {
+			continue
+		}
+		name := hclSanitizeLabel(blk.Labels[0])
+		result.Edges = append(result.Edges, ExtractedEdge{
+			FromQN:     "module." + name,
+			ToName:     src,
+			Kind:       "IMPORTS",
+			Confidence: 1.0,
+		})
+	}
+
 	return result
+}
+
+// hclModuleSourceAttr returns the literal string value of a `module`
+// block's `source` attribute. Returns "" when the attribute is absent,
+// not a literal (e.g. interpolated `"${var.module_path}"`), or empty.
+// #1342 v0.71.
+func hclModuleSourceAttr(blk *hclsyntax.Block) string {
+	if blk == nil || blk.Body == nil {
+		return ""
+	}
+	attr, ok := blk.Body.Attributes["source"]
+	if !ok || attr.Expr == nil {
+		return ""
+	}
+	val, diags := attr.Expr.Value(nil)
+	if diags.HasErrors() {
+		return ""
+	}
+	if val.IsNull() || !val.Type().Equals(cty.String) {
+		return ""
+	}
+	return val.AsString()
 }
 
 // hclCollectReferences walks a block's body recursively, finding every
