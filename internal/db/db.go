@@ -4474,6 +4474,65 @@ func (s *Store) ToolCallStatsByTool(windowSeconds int64, limit int) ([]ToolCallT
 	return out, rows.Err()
 }
 
+// ToolCallPayloadRow is one row of the per-tool payload-size distribution
+// surfaced by ToolCallPayloadSizeByTool — feeds the v0.67 dashboard
+// "payload size by tool" panel (#635 panel 3). The point of this panel
+// is finding outliers: tools where max_bytes is many multiples of
+// avg_bytes are the calls that occasionally blow up token bills. Sorting
+// by max_bytes desc puts those at the top.
+type ToolCallPayloadRow struct {
+	Tool      string  `json:"tool"`
+	CallCount int64   `json:"call_count"`
+	MinBytes  int64   `json:"min_bytes"`
+	AvgBytes  float64 `json:"avg_bytes"`
+	MaxBytes  int64   `json:"max_bytes"`
+	SumBytes  int64   `json:"sum_bytes"`
+}
+
+// ToolCallPayloadSizeByTool aggregates response_bytes per tool over the
+// trailing windowSeconds-second window. Sorted by max_bytes DESC so the
+// loudest tools show first — the dashboard "outlier finder" view.
+// Reader-routed (pure SELECT).
+func (s *Store) ToolCallPayloadSizeByTool(windowSeconds int64, limit int) ([]ToolCallPayloadRow, error) {
+	if windowSeconds <= 0 {
+		windowSeconds = 7 * 24 * 60 * 60
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	cutoff := time.Now().Add(-time.Duration(windowSeconds) * time.Second).UnixNano()
+	rows, err := s.ro.Query(`
+		SELECT tool,
+		       COUNT(*)                          AS call_count,
+		       COALESCE(MIN(response_bytes), 0)  AS min_bytes,
+		       COALESCE(AVG(CAST(response_bytes AS REAL)), 0) AS avg_bytes,
+		       COALESCE(MAX(response_bytes), 0)  AS max_bytes,
+		       COALESCE(SUM(response_bytes), 0)  AS sum_bytes
+		  FROM session_tool_calls
+		 WHERE ts >= ?
+		 GROUP BY tool
+		 ORDER BY max_bytes DESC
+		 LIMIT ?`,
+		cutoff, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ToolCallPayloadRow{}
+	for rows.Next() {
+		var r ToolCallPayloadRow
+		if err := rows.Scan(
+			&r.Tool, &r.CallCount, &r.MinBytes,
+			&r.AvgBytes, &r.MaxBytes, &r.SumBytes,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // QueryMetrics carries the v17 query-failure / retry-rate counters
 // flushed onto every sessions row (#241). Pre-v17 rows hold zero on
 // every counter — agents that haven't been instrumented yet stay

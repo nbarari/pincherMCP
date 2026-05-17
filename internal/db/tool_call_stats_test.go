@@ -260,3 +260,109 @@ func TestToolCallStatsByTool_NullPctExcludedFromAvg(t *testing.T) {
 		t.Errorf("avg_tokens_saved_pct = %v; want ~80.0 (NULL pct row excluded)", got)
 	}
 }
+
+// #635 v0.67 panel 3: ToolCallPayloadSizeByTool — surfaces the
+// min/avg/max response_bytes per tool so the dashboard can flag
+// outliers (tools whose max is many multiples of their avg are the
+// occasional bill-blowers).
+
+// Positive: per-tool min/avg/max derived correctly across multiple rows
+// and sorted by max_bytes DESC.
+func TestToolCallPayloadSizeByTool_SortedByMaxBytes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	events := []ToolCallEvent{
+		// "search" — moderate range, max 600.
+		{SessionID: "s1", Tool: "search", TS: now, TokensUsed: 1, ResponseBytes: 100},
+		{SessionID: "s1", Tool: "search", TS: now, TokensUsed: 1, ResponseBytes: 600},
+		// "guide" — single huge outlier, max 50000.
+		{SessionID: "s1", Tool: "guide", TS: now, TokensUsed: 1, ResponseBytes: 50000},
+		// "symbol" — small payload, max 200.
+		{SessionID: "s1", Tool: "symbol", TS: now, TokensUsed: 1, ResponseBytes: 200},
+	}
+	if err := store.RecordToolCalls(events); err != nil {
+		t.Fatalf("RecordToolCalls: %v", err)
+	}
+
+	rows, err := store.ToolCallPayloadSizeByTool(0, 0)
+	if err != nil {
+		t.Fatalf("ToolCallPayloadSizeByTool: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 tool rows; got %d (%+v)", len(rows), rows)
+	}
+	// guide max=50000 → first; search max=600 → second; symbol max=200 → third.
+	if rows[0].Tool != "guide" || rows[0].MaxBytes != 50000 {
+		t.Errorf("expected guide/50000 first; got %+v", rows[0])
+	}
+	if rows[1].Tool != "search" || rows[1].MaxBytes != 600 || rows[1].MinBytes != 100 {
+		t.Errorf("expected search min=100 max=600 second; got %+v", rows[1])
+	}
+	// search avg = (100+600)/2 = 350.
+	if got := rows[1].AvgBytes; got < 349.9 || got > 350.1 {
+		t.Errorf("search avg_bytes = %v; want ~350", got)
+	}
+	if rows[2].Tool != "symbol" || rows[2].MaxBytes != 200 {
+		t.Errorf("expected symbol/200 third; got %+v", rows[2])
+	}
+}
+
+// Negative: empty store returns []ToolCallPayloadRow{} not nil — JSON
+// invariant the dashboard JS relies on.
+func TestToolCallPayloadSizeByTool_EmptyReturnsZeroLenSlice(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rows, err := store.ToolCallPayloadSizeByTool(0, 0)
+	if err != nil {
+		t.Fatalf("ToolCallPayloadSizeByTool on empty store: %v", err)
+	}
+	if rows == nil {
+		t.Errorf("expected zero-len slice on empty store; got nil")
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows on empty store; got %d", len(rows))
+	}
+}
+
+// Control: limit caps row count.
+func TestToolCallPayloadSizeByTool_LimitCaps(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	events := []ToolCallEvent{
+		{SessionID: "s1", Tool: "a", TS: now, ResponseBytes: 500},
+		{SessionID: "s1", Tool: "b", TS: now, ResponseBytes: 400},
+		{SessionID: "s1", Tool: "c", TS: now, ResponseBytes: 300},
+		{SessionID: "s1", Tool: "d", TS: now, ResponseBytes: 200},
+	}
+	if err := store.RecordToolCalls(events); err != nil {
+		t.Fatalf("RecordToolCalls: %v", err)
+	}
+
+	rows, err := store.ToolCallPayloadSizeByTool(0, 2)
+	if err != nil {
+		t.Fatalf("ToolCallPayloadSizeByTool: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows with limit=2; got %d", len(rows))
+	}
+}

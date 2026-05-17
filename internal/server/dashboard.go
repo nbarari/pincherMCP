@@ -128,6 +128,14 @@ const dashboardTemplate = `<!DOCTYPE html>
   <div class="tier-breakdown-card">
     <div id="tier-breakdown-body"><div class="loading">Loading…</div></div>
   </div>
+  <!-- #635 panel 3: per-tool payload-size distribution. Surfaces
+       outliers — tools whose max response is many multiples of their
+       avg, the ones occasionally blowing up token bills. Sorted by
+       max_bytes DESC to put the loud ones first. -->
+  <p class="section-title">Response Payload Size by Tool (last 7 days)</p>
+  <div class="payload-size-card">
+    <div id="payload-size-body"><div class="loading">Loading…</div></div>
+  </div>
 </main>
 </div>
 
@@ -311,6 +319,16 @@ main{max-width:1200px;margin:0 auto;padding:32px}
 .tier-breakdown-table .num{text-align:right;font-variant-numeric:tabular-nums}
 .tier-breakdown-table .num.green{color:var(--green)}
 .tier-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px;vertical-align:middle}
+.payload-size-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:0;margin-bottom:32px;overflow-x:auto}
+.payload-size-table{width:100%;border-collapse:collapse;font-size:13px}
+.payload-size-table th,.payload-size-table td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border)}
+.payload-size-table th{font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);background:#0b1018}
+.payload-size-table tr:last-child td{border-bottom:none}
+.payload-size-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.payload-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;letter-spacing:.3px}
+.payload-tight{background:rgba(57,211,83,.12);color:var(--green)}
+.payload-wide{background:rgba(187,128,9,.18);color:var(--orange)}
+.payload-spike{background:rgba(248,81,73,.18);color:var(--red)}
 
 /* ── Project cards ── */
 .proj-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;transition:border-color .2s;position:relative}
@@ -634,6 +652,16 @@ function dismissAuthNotice() {
 // ── Utilities ──────────────────────────────────────────────────────────────
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n);
 const fmtMs = ms => ms < 1 ? '<1ms' : ms+'ms';
+// #635 panel 3: human-readable byte sizes for the payload-size table.
+// Uses binary units since response sizes are about wire bytes, not
+// human counting. "0 B" is preferred over "—" so users see the column
+// is alive even on empty entries.
+const fmtBytes = n => {
+  if (n == null || isNaN(n)) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+};
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 function timeAgo(iso) {
   if (!iso) return '—';
@@ -931,6 +959,7 @@ async function load() {
   loadHookStats();
   loadToolBreakdown();
   loadTierBreakdown();
+  loadPayloadSize();
   document.getElementById('last-refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
 
@@ -1114,6 +1143,55 @@ async function loadTierBreakdown() {
   } catch (e) {
     document.getElementById('tier-breakdown-body').innerHTML =
       '<div class="error">Failed to load tier breakdown: ' + esc(String(e)) + '</div>';
+  }
+}
+
+// #635 panel 3: per-tool payload-size distribution. Surfaces outliers
+// — tools whose max response is many multiples of their average are
+// the occasional bill-blowers. Ratio column flags ≥5× as "spike," ≥2×
+// as "wide," anything else as "tight." Sorted by max_bytes DESC server-
+// side so loud tools naturally appear at the top.
+async function loadPayloadSize() {
+  try {
+    const data = await fetch('/v1/tool-payload-stats?window_seconds=604800&limit=20').then(r => r.json());
+    const tallies = data.tallies || [];
+    const body = document.getElementById('payload-size-body');
+    if (tallies.length === 0) {
+      body.innerHTML = '<div class="empty">No tool calls recorded in the last 7 days.</div>';
+      return;
+    }
+    let html = '<table class="payload-size-table"><thead><tr>' +
+      '<th>Tool</th>' +
+      '<th class="num">Calls</th>' +
+      '<th class="num">Min</th>' +
+      '<th class="num">Avg</th>' +
+      '<th class="num">Max</th>' +
+      '<th class="num">Total</th>' +
+      '<th>Spread</th>' +
+      '</tr></thead><tbody>';
+    for (const t of tallies) {
+      // ratio of max:avg — outlier signal. Guard avg=0 so we don't /0.
+      const ratio = (t.avg_bytes && t.avg_bytes > 0) ? (t.max_bytes / t.avg_bytes) : 0;
+      let label = 'tight';
+      let cls = 'payload-tight';
+      if (ratio >= 5) { label = 'spike ' + ratio.toFixed(1) + '×'; cls = 'payload-spike'; }
+      else if (ratio >= 2) { label = 'wide ' + ratio.toFixed(1) + '×'; cls = 'payload-wide'; }
+      else if (ratio > 0) { label = 'tight ' + ratio.toFixed(1) + '×'; }
+      html += '<tr>' +
+        '<td><code>' + esc(t.tool) + '</code></td>' +
+        '<td class="num">' + fmt(t.call_count) + '</td>' +
+        '<td class="num">' + fmtBytes(t.min_bytes) + '</td>' +
+        '<td class="num">' + fmtBytes(Math.round(t.avg_bytes)) + '</td>' +
+        '<td class="num">' + fmtBytes(t.max_bytes) + '</td>' +
+        '<td class="num">' + fmtBytes(t.sum_bytes) + '</td>' +
+        '<td><span class="payload-badge ' + cls + '">' + label + '</span></td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } catch (e) {
+    document.getElementById('payload-size-body').innerHTML =
+      '<div class="error">Failed to load payload-size panel: ' + esc(String(e)) + '</div>';
   }
 }
 

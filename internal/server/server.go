@@ -1162,6 +1162,7 @@ var httpGetOnlyRoutes = map[string]bool{
 	"hook-stats":      true, // v0.37 hook conversion-rate dashboard panel (#628)
 	"tool-call-stats": true, // v0.67 per-tool aggregate panel (#635 substrate)
 	"tool-tier-stats": true, // v0.67 per-tier aggregate panel (#635 panel 2)
+	"tool-payload-stats": true, // v0.67 per-tool payload-size panel (#635 panel 3 — outlier finder)
 	"openapi.json":    true,
 	"health":          true,
 	"ready":           true, // #660: k8s readiness probe (200 vs 503)
@@ -1624,6 +1625,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"window_seconds": windowSec,
 			"tallies":        tallies,
+		})
+		return
+	}
+	// GET /v1/tool-payload-stats — per-tool response_bytes distribution
+	// (min/avg/max/sum) over the trailing window. Sorted by max_bytes
+	// DESC so the dashboard "outlier finder" view bubbles up the tools
+	// whose worst-case payload is many multiples of their average.
+	if path == "tool-payload-stats" && r.Method == http.MethodGet {
+		windowSec := int64(7 * 24 * 60 * 60)
+		if v := r.URL.Query().Get("window_seconds"); v != "" {
+			if n, perr := strconv.ParseInt(v, 10, 64); perr == nil && n > 0 {
+				windowSec = n
+			}
+		}
+		limit := 20
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+				limit = n
+			}
+		}
+		rows, err := s.store.ToolCallPayloadSizeByTool(windowSec, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []db.ToolCallPayloadRow{}
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"window_seconds": windowSec,
+			"tallies":        rows,
 		})
 		return
 	}

@@ -103,3 +103,59 @@ func TestToolCallStatsHTTP_EmptyStoreReturnsArrayNotNull(t *testing.T) {
 		t.Errorf("expected zero-len tallies array; got body: %s", body)
 	}
 }
+
+// #635 panel 3: HTTP smoke for /v1/tool-payload-stats.
+// Same shape as the per-tool endpoint — GET-only, sorted DESC by
+// max_bytes server-side, zero-len array on empty.
+func TestToolPayloadStatsHTTP_ReturnsRowsSortedByMaxBytes(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	now := time.Now()
+	store.RecordToolCalls([]db.ToolCallEvent{
+		{SessionID: "s1", Tool: "search", TS: now, TokensUsed: 1, ResponseBytes: 500},
+		{SessionID: "s1", Tool: "guide", TS: now, TokensUsed: 1, ResponseBytes: 50000},
+		{SessionID: "s1", Tool: "symbol", TS: now, TokensUsed: 1, ResponseBytes: 200},
+	})
+
+	req := httptest.NewRequest("GET", "/v1/tool-payload-stats", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not JSON: %v", err)
+	}
+	tallies, ok := resp["tallies"].([]any)
+	if !ok || len(tallies) != 3 {
+		t.Fatalf("expected 3 rows; got %d (%v)", len(tallies), tallies)
+	}
+	first, _ := tallies[0].(map[string]any)
+	if first["tool"] != "guide" {
+		t.Errorf("expected guide first (highest max_bytes); got %v", first)
+	}
+}
+
+func TestToolPayloadStatsHTTP_PostRejected(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest("POST", "/v1/tool-payload-stats", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != 404 && rr.Code != 405 {
+		t.Errorf("expected 404/405 on POST; got %d", rr.Code)
+	}
+}
+
+func TestToolPayloadStatsHTTP_EmptyStoreReturnsArrayNotNull(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/v1/tool-payload-stats", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	body := rr.Body.String()
+	if !containsSubstr(body, `"tallies":[]`) {
+		t.Errorf("expected zero-len tallies array; got body: %s", body)
+	}
+}

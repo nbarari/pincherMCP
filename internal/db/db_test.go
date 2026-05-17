@@ -548,6 +548,9 @@ var readerRoutedStoreMethods = map[string]bool{
 	"ToolCallStatsByTool": true,
 	// #635 v0.67 panel 2: per-tier aggregate, same shape as above.
 	"ToolCallStatsByTier": true,
+	// #635 v0.67 panel 3: per-tool payload-size distribution (min/avg/max
+	// response_bytes) — outlier finder. Reader-routed.
+	"ToolCallPayloadSizeByTool": true,
 }
 
 var writerRoutedStoreMethods = map[string]bool{
