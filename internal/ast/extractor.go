@@ -2660,8 +2660,24 @@ func extractCBareMacros(source []byte, relPath string, existing []ExtractedSymbo
 	}
 
 	taken := make(map[int]struct{}, len(existing))
+	// #1324 v0.71: also dedupe by Function symbol NAME. funcRE captures
+	// `static int probe(struct platform_device *pdev) { ... }` at line N;
+	// then `EXPORT_SYMBOL(probe);` further down emits the macro form via
+	// this pass with the same `arg = "probe"`, producing QN
+	// `<path>::probe` twice — the start-byte dedup above doesn't catch
+	// it because the two symbols live at different offsets. Result was
+	// a per-file `qualified_name_collision` diagnostic on every Linux-
+	// driver-shaped C file (kernel idioms typically pair `static int
+	// probe(...) { ... } EXPORT_SYMBOL(probe);`). Skipping the macro
+	// emission when a Function with the same name was already extracted
+	// keeps the export-style macros (where there's no in-file definition,
+	// the macro IS the symbol of record) and drops the duplicate-of-real-
+	// function case.
+	takenNames := make(map[string]struct{}, len(existing))
 	for _, s := range existing {
-		taken[s.StartByte] = struct{}{}
+		if s.Kind == "Function" {
+			takenNames[s.Name] = struct{}{}
+		}
 	}
 
 	mod := moduleQN(relPath, "::")
@@ -2682,6 +2698,11 @@ func extractCBareMacros(source []byte, relPath string, existing []ExtractedSymbo
 			continue
 		}
 		arg := string(source[argStart:argEnd])
+		if _, dupName := takenNames[arg]; dupName {
+			// #1324: the real function definition is the symbol of
+			// record; this macro is just an export annotation.
+			continue
+		}
 
 		// EndByte: scan forward from match end to the line's terminating
 		// newline OR the matching `;`, whichever comes first. Bare-prefix
