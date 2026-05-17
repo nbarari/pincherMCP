@@ -98,6 +98,15 @@
   <div class="payload-size-card">
     <div id="payload-size-body"><div class="loading">Loading…</div></div>
   </div>
+  <!-- #635 panel 4: tool-mix health. Shannon entropy of the per-tool
+       call distribution surfaces "agent stuck in a narrow loop" vs
+       "healthy diverse exploration" — low-entropy weeks are the ones
+       worth investigating. Computed client-side from the existing
+       /v1/tool-call-stats response (no new endpoint needed). -->
+  <p class="section-title">Tool-Mix Health (last 7 days)</p>
+  <div class="entropy-card">
+    <div id="entropy-body"><div class="loading">Loading…</div></div>
+  </div>
 </main>
 </div>
 

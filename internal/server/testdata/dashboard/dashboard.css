@@ -102,6 +102,25 @@ main{max-width:1200px;margin:0 auto;padding:32px}
 .payload-tight{background:rgba(57,211,83,.12);color:var(--green)}
 .payload-wide{background:rgba(187,128,9,.18);color:var(--orange)}
 .payload-spike{background:rgba(248,81,73,.18);color:var(--red)}
+.entropy-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:32px}
+.entropy-summary{display:flex;align-items:baseline;gap:18px;margin-bottom:10px;flex-wrap:wrap}
+.entropy-bignum{font-size:32px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.entropy-unit{font-size:14px;font-weight:500;color:var(--muted)}
+.entropy-band{font-size:13px;padding:4px 10px;border-radius:12px;font-weight:600}
+.entropy-rich{background:rgba(57,211,83,.14);color:var(--green)}
+.entropy-healthy{background:rgba(88,166,255,.14);color:var(--accent)}
+.entropy-narrow{background:rgba(187,128,9,.18);color:var(--orange)}
+.entropy-stuck{background:rgba(248,81,73,.18);color:var(--red)}
+.entropy-bar-frame{height:8px;background:#0b1018;border:1px solid var(--border);border-radius:4px;overflow:hidden;margin:8px 0 14px}
+.entropy-bar{height:100%;border-radius:3px;transition:width .35s}
+.entropy-bar.entropy-rich{background:var(--green)}
+.entropy-bar.entropy-healthy{background:var(--accent)}
+.entropy-bar.entropy-narrow{background:var(--orange)}
+.entropy-bar.entropy-stuck{background:var(--red)}
+.entropy-meta{font-size:13px;color:var(--muted);margin-bottom:10px}
+.entropy-top{font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:14px;margin-bottom:6px}
+.entropy-rank{list-style:decimal;padding-left:24px;margin:0;font-size:13px;line-height:1.7}
+.entropy-rank code{background:#0b1018;padding:1px 6px;border-radius:4px;font-size:12px}
 
 /* ── Project cards ── */
 .proj-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;transition:border-color .2s;position:relative}

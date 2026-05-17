@@ -136,6 +136,15 @@ const dashboardTemplate = `<!DOCTYPE html>
   <div class="payload-size-card">
     <div id="payload-size-body"><div class="loading">Loading…</div></div>
   </div>
+  <!-- #635 panel 4: tool-mix health. Shannon entropy of the per-tool
+       call distribution surfaces "agent stuck in a narrow loop" vs
+       "healthy diverse exploration" — low-entropy weeks are the ones
+       worth investigating. Computed client-side from the existing
+       /v1/tool-call-stats response (no new endpoint needed). -->
+  <p class="section-title">Tool-Mix Health (last 7 days)</p>
+  <div class="entropy-card">
+    <div id="entropy-body"><div class="loading">Loading…</div></div>
+  </div>
 </main>
 </div>
 
@@ -329,6 +338,25 @@ main{max-width:1200px;margin:0 auto;padding:32px}
 .payload-tight{background:rgba(57,211,83,.12);color:var(--green)}
 .payload-wide{background:rgba(187,128,9,.18);color:var(--orange)}
 .payload-spike{background:rgba(248,81,73,.18);color:var(--red)}
+.entropy-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:32px}
+.entropy-summary{display:flex;align-items:baseline;gap:18px;margin-bottom:10px;flex-wrap:wrap}
+.entropy-bignum{font-size:32px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.entropy-unit{font-size:14px;font-weight:500;color:var(--muted)}
+.entropy-band{font-size:13px;padding:4px 10px;border-radius:12px;font-weight:600}
+.entropy-rich{background:rgba(57,211,83,.14);color:var(--green)}
+.entropy-healthy{background:rgba(88,166,255,.14);color:var(--accent)}
+.entropy-narrow{background:rgba(187,128,9,.18);color:var(--orange)}
+.entropy-stuck{background:rgba(248,81,73,.18);color:var(--red)}
+.entropy-bar-frame{height:8px;background:#0b1018;border:1px solid var(--border);border-radius:4px;overflow:hidden;margin:8px 0 14px}
+.entropy-bar{height:100%;border-radius:3px;transition:width .35s}
+.entropy-bar.entropy-rich{background:var(--green)}
+.entropy-bar.entropy-healthy{background:var(--accent)}
+.entropy-bar.entropy-narrow{background:var(--orange)}
+.entropy-bar.entropy-stuck{background:var(--red)}
+.entropy-meta{font-size:13px;color:var(--muted);margin-bottom:10px}
+.entropy-top{font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:14px;margin-bottom:6px}
+.entropy-rank{list-style:decimal;padding-left:24px;margin:0;font-size:13px;line-height:1.7}
+.entropy-rank code{background:#0b1018;padding:1px 6px;border-radius:4px;font-size:12px}
 
 /* ── Project cards ── */
 .proj-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;transition:border-color .2s;position:relative}
@@ -960,6 +988,7 @@ async function load() {
   loadToolBreakdown();
   loadTierBreakdown();
   loadPayloadSize();
+  loadEntropyPanel();
   document.getElementById('last-refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
 
@@ -1192,6 +1221,78 @@ async function loadPayloadSize() {
   } catch (e) {
     document.getElementById('payload-size-body').innerHTML =
       '<div class="error">Failed to load payload-size panel: ' + esc(String(e)) + '</div>';
+  }
+}
+
+// #635 panel 4: tool-mix health. Computes Shannon entropy of the
+// per-tool call distribution client-side from /v1/tool-call-stats —
+// no new endpoint needed. Surfaces a quality label and a
+// concentration ratio so a glance answers "is the agent exploring
+// or stuck in a 2-tool loop?"
+//
+// Quality bands (chosen for typical 5-12-tool corpora; tunable as
+// real usage data comes in):
+//   ≥3.0 bits  → "rich"     (diverse exploration)
+//   2.0–3.0    → "healthy"
+//   1.0–2.0    → "narrow"   (1-2 tools dominate)
+//   <1.0       → "stuck"    (essentially one tool)
+async function loadEntropyPanel() {
+  try {
+    const data = await fetch('/v1/tool-call-stats?window_seconds=604800&limit=200').then(r => r.json());
+    const tallies = data.tallies || [];
+    const body = document.getElementById('entropy-body');
+    if (tallies.length === 0) {
+      body.innerHTML = '<div class="empty">No tool calls recorded in the last 7 days.</div>';
+      return;
+    }
+    let total = 0;
+    for (const t of tallies) total += (t.call_count || 0);
+    if (total === 0) { body.innerHTML = '<div class="empty">No tool calls recorded in the last 7 days.</div>'; return; }
+    // Shannon entropy H = -Σ pᵢ log₂(pᵢ). Bounded by log₂(N) where
+    // N = tool count; we normalize to a 0–1 "evenness" too so the
+    // bar visualization is independent of tool catalog size.
+    let entropy = 0;
+    const sorted = tallies.slice().sort((a, b) => (b.call_count || 0) - (a.call_count || 0));
+    for (const t of sorted) {
+      const p = (t.call_count || 0) / total;
+      if (p > 0) entropy += -p * (Math.log(p) / Math.LN2);
+    }
+    const maxEntropy = Math.log(tallies.length) / Math.LN2 || 1;
+    const evenness = entropy / maxEntropy; // 0–1
+    let band = 'rich', bandLabel = 'rich exploration', bandClass = 'entropy-rich';
+    if (entropy < 1.0)      { band = 'stuck';  bandLabel = 'stuck (mostly one tool)'; bandClass = 'entropy-stuck'; }
+    else if (entropy < 2.0) { band = 'narrow'; bandLabel = 'narrow (top 1-2 tools dominate)'; bandClass = 'entropy-narrow'; }
+    else if (entropy < 3.0) { band = 'healthy'; bandLabel = 'healthy mix'; bandClass = 'entropy-healthy'; }
+    const top1Share = (sorted[0].call_count / total * 100).toFixed(1);
+    const top3Share = sorted.slice(0, 3).reduce((acc, t) => acc + (t.call_count || 0), 0) / total * 100;
+
+    // Top-3 ranking, each as a row showing tool + count + share.
+    let rankHTML = '<ol class="entropy-rank">';
+    for (const t of sorted.slice(0, Math.min(3, sorted.length))) {
+      const share = (t.call_count / total * 100).toFixed(1);
+      rankHTML += '<li><code>' + esc(t.tool) + '</code> · ' + fmt(t.call_count) + ' calls · ' + share + '%</li>';
+    }
+    rankHTML += '</ol>';
+
+    const evennessPct = (evenness * 100).toFixed(0);
+    body.innerHTML =
+      '<div class="entropy-summary">' +
+        '<div class="entropy-bignum">' + entropy.toFixed(2) + ' <span class="entropy-unit">bits</span></div>' +
+        '<div class="entropy-band ' + bandClass + '">' + esc(bandLabel) + '</div>' +
+      '</div>' +
+      '<div class="entropy-bar-frame" title="Evenness: ' + evennessPct + '% of theoretical max for ' + tallies.length + ' tools">' +
+        '<div class="entropy-bar ' + bandClass + '" style="width:' + evennessPct + '%"></div>' +
+      '</div>' +
+      '<div class="entropy-meta">' +
+        '<span><strong>' + top1Share + '%</strong> of calls hit the top tool</span>' +
+        ' · <span><strong>' + top3Share.toFixed(1) + '%</strong> hit the top three</span>' +
+        ' · <span>' + tallies.length + ' distinct tools used</span>' +
+      '</div>' +
+      '<div class="entropy-top">Top tools by call volume:</div>' +
+      rankHTML;
+  } catch (e) {
+    document.getElementById('entropy-body').innerHTML =
+      '<div class="error">Failed to load tool-mix health panel: ' + esc(String(e)) + '</div>';
   }
 }
 
