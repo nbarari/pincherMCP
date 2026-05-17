@@ -2694,6 +2694,12 @@ var swiftRE = &regexExtractor{
 	funcRE:      regexp.MustCompile(`(?m)^\s*(?:public|private|internal|open)?\s*(?:static\s+)?func\s+(?P<name>[a-zA-Z][a-zA-Z0-9_]*)`),
 	classRE:     regexp.MustCompile(`(?m)^(?:public\s+)?(?:final\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s*:\s*(?P<parent>[A-Z][A-Za-z0-9_, ]*))?`),
 	interfaceRE: regexp.MustCompile(`(?m)^(?:public\s+)?protocol\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
+	// #1183 v0.67 (Swift parallel to Rust impl): `extension Type {}` and
+	// `extension Type: Protocol {}` add methods to an existing type.
+	// Pre-fix those methods emitted as Function with no Parent —
+	// dead_code / trace couldn't bind them to the extended type's
+	// method set. Generic parameters tolerated (`extension Array<T>`).
+	scopeRE: regexp.MustCompile(`(?m)^(?:public\s+)?extension\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:<[^>]*>)?(?:\s*:\s*[A-Z][A-Za-z0-9_, ]*)?\s*\{?`),
 }
 
 func extractSwift(source []byte, relPath string) *FileResult {

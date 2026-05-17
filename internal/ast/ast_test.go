@@ -1248,6 +1248,55 @@ func TestExtractSwift(t *testing.T) {
 	}
 }
 
+// #1183 v0.67: Swift extensions are the parallel of Rust impl blocks
+// — `extension Type { ... }` adds methods to an existing type, and the
+// inner methods should bind to Type (not float as parent-less functions).
+// Mirror test for the Rust impl-scoping behaviour, same shape.
+func TestExtractSwift_ExtensionScopesMethodsToReceiverType(t *testing.T) {
+	src := []byte(`public protocol Drawable {}
+public class Shape {}
+
+extension Shape {
+    public func area() -> Double { 0 }
+    public func perimeter() -> Double { 0 }
+}
+
+extension Shape: Drawable {
+    public func draw() {}
+}
+
+public func standalone() -> Int { 1 }
+`)
+	result := Extract(src, "Swift", "Sources/Shape.swift")
+	if result == nil {
+		t.Fatal("nil result")
+	}
+	byName := map[string]ExtractedSymbol{}
+	for _, s := range result.Symbols {
+		byName[s.Name] = s
+	}
+	for _, m := range []string{"area", "perimeter", "draw"} {
+		sym, ok := byName[m]
+		if !ok {
+			t.Errorf("expected extension method %q to be extracted; missing", m)
+			continue
+		}
+		if sym.Kind != "Method" {
+			t.Errorf("method %q: Kind = %q; want Method", m, sym.Kind)
+		}
+		const wantParentSuffix = ".Shape"
+		if !strings.HasSuffix(sym.Parent, wantParentSuffix) {
+			t.Errorf("method %q: Parent = %q; want suffix %q (extension Shape scoping)", m, sym.Parent, wantParentSuffix)
+		}
+	}
+	if sym, ok := byName["standalone"]; ok && sym.Parent != "" {
+		t.Errorf("standalone func: Parent = %q; want empty", sym.Parent)
+	}
+	if shape, ok := byName["Shape"]; !ok || shape.Kind != "Class" {
+		t.Errorf("expected Shape kind=Class; got %+v", shape)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Extract dispatch (all language branches)
 // ─────────────────────────────────────────────────────────────────────────────
