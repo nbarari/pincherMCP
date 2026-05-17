@@ -20,11 +20,15 @@ Single binary · No cloud dependencies · Any LLM · MCP stdio or HTTP REST
 
 ## What it does
 
+**The grab is token savings.** An agent asks "what does `processPayment` do?" Pincher returns the symbol's source plus its direct callers and imports in ~300 tokens. The same answer from `Read` over the containing file is ~12 KB. Multiply by every navigation step in a long session and the cost collapses an order of magnitude — measured savings ratios on real codebases routinely sit at 80×+ vs the agent's default read-then-grep loop. Every response carries a `_meta` envelope with real BPE token counts (`cl100k_base` — exact for Claude / OpenAI, approximate for Gemini / Llama) and the savings number, totaled across sessions in SQLite so the running balance is always visible.
+
+**The retention is routing.** Pincher is a shared code-intelligence backend that talks both **MCP stdio** (so Claude Code, Codex, Cursor, and any other MCP client get the same answers) and an **HTTP REST gateway** at `/v1/<tool>` with full OpenAPI 3.1.0 contracts (so a router, a webhook, or a curl one-liner reaches the same surface). Every response also advertises `_meta.capabilities`, `_meta.complexity_tier` (`lite`/`standard`/`heavy`), and stable `X-Request-ID` headers — the hooks a multi-agent router needs to assign the right model to the right step. One backend, one index, one running savings total, every agent in your stack.
+
 Sourcegraph, OpenGrok, and IntelliJ index a codebase for humans browsing it; pincherMCP indexes the same codebase for an LLM agent calling tools. The agent-shaped surface is the whole point — responses sized for a context window rather than a UI pane, runtime interception of Read and Grep calls before the agent opens the file, and a local-only binary so neither the index nor the code leaves the machine.
 
-Underneath, it is a single Go binary that indexes the codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — and exposes all three through **22 agent-callable MCP tools**, every one also reachable via the HTTP REST API at `/v1/<tool>`.
+Under the hood: a single Go binary that indexes the codebase into three co-located layers — byte-offset symbol store, knowledge graph, and FTS5 full-text search — populated in a single AST parse pass from one shared `symbols` table; no duplication, no sync overhead. All three are exposed through **22 agent-callable MCP tools**, every one also reachable via the HTTP REST API at `/v1/<tool>`.
 
-Every tool response includes a `_meta` envelope with real BPE token counts (cl100k_base — exact for Claude and OpenAI families, approximate for Gemini/Llama) and latency:
+Concrete shape of a single response — every tool returns the same envelope:
 
 ```json
 {
@@ -34,12 +38,13 @@ Every tool response includes a `_meta` envelope with real BPE token counts (cl10
     "tokens_used":       312,
     "tokens_saved":      14500,
     "tokens_saved_pct":  97.9,
+    "complexity_tier":   "lite",
     "latency_ms":        2
   }
 }
 ```
 
-Token savings accumulate in SQLite across sessions — every reconnect adds to a running all-time total. All three indexes are populated in a **single AST parse pass** from one shared `symbols` table; no duplication, no sync overhead.
+Token savings accumulate in SQLite across sessions — every reconnect adds to the running all-time total surfaced on the dashboard.
 
 > 📖 **Full manual:** [`docs/REFERENCE.md`](docs/REFERENCE.md) — every tool, every flag, every endpoint, schema history, performance numbers, project layout. This README is pitch + quickstart.
 
