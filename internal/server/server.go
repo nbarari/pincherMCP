@@ -4119,11 +4119,35 @@ func (s *Server) handleSymbol(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
+	// #1408: scope-to-session-first when projectArg is empty. Pre-fix
+	// the no-project path went straight to unscoped GetSymbol — when
+	// the ID existed in BOTH the session project and a fork (e.g.
+	// d:\codex\sniffer holds a mirror of pincher-repo), GetSymbol
+	// would return whichever row the schema-driven ORDER hit first
+	// (typically the older / smaller project). The follow-up
+	// "exists only in project X" error pointed the agent away from
+	// the session project — even though the symbol DID exist there.
+	// This diverged from handleSearch (which calls resolveProjectID
+	// with empty projectArg, gets sessionID back, then scopes to it),
+	// breaking the documented search→symbol workflow.
+	// Now: with empty projectArg and a known sessionID, try scoped
+	// to session first. If not found there, fall back to unscoped so
+	// the existing cross-project error path still fires when the
+	// symbol truly lives elsewhere.
 	var sym *db.Symbol
 	var err error
-	if resolvedProjectID != "" {
+	switch {
+	case resolvedProjectID != "":
 		sym, err = s.store.GetSymbolScoped(resolvedProjectID, id)
-	} else {
+	case projectArg == "" && s.sessionID != "":
+		sym, err = s.store.GetSymbolScoped(s.sessionID, id)
+		if err == nil && sym == nil {
+			// Not in session — fall back to unscoped so the
+			// cross-project error path below can name the project
+			// where the symbol actually lives.
+			sym, err = s.store.GetSymbol(id)
+		}
+	default:
 		sym, err = s.store.GetSymbol(id)
 	}
 	if err != nil {
@@ -4727,15 +4751,38 @@ func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*
 	// "*" maps to "look up globally without scoping", which the
 	// GetSymbol path already does. Same fix as symbol + neighborhood.
 	var contextProjectWarning string
+	var resolvedProjectID string
 	if projectArg := str(args, "project"); projectArg != "" && projectArg != "*" {
-		if _, perr := s.resolveProjectID(projectArg); perr != nil {
+		if pid, perr := s.resolveProjectID(projectArg); perr == nil {
+			resolvedProjectID = pid
+		} else {
 			contextProjectWarning = fmt.Sprintf(
 				"context: project %q did not resolve — falling back to unscoped symbol lookup. Call `list` to see indexed projects.",
 				projectArg)
 		}
 	}
 
-	sym, err := s.store.GetSymbol(id)
+	// #1408: scope-to-session-first when projectArg is empty (mirrors
+	// the handleSymbol fix). When the id exists in both the session
+	// project and a fork, the unscoped lookup could return the fork's
+	// row and surface a "exists only in project X" error pointing the
+	// agent AWAY from the session project — where the symbol actually
+	// also lives. context is the higher-leverage of the two surfaces
+	// because EdgesFrom walks the leaked project's graph too.
+	projectArgRaw := str(args, "project")
+	var sym *db.Symbol
+	var err error
+	switch {
+	case resolvedProjectID != "":
+		sym, err = s.store.GetSymbolScoped(resolvedProjectID, id)
+	case projectArgRaw == "" && s.sessionID != "":
+		sym, err = s.store.GetSymbolScoped(s.sessionID, id)
+		if err == nil && sym == nil {
+			sym, err = s.store.GetSymbol(id)
+		}
+	default:
+		sym, err = s.store.GetSymbol(id)
+	}
 	if err != nil || sym == nil {
 		// #1008: context shared handleSymbol's bare not-found envelope.
 		// handleSymbol upgraded in #704; context did not. The recovery

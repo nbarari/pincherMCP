@@ -218,3 +218,49 @@ func TestHandleContext_CrossProject_NoSessionMeansNoStrictGuard(t *testing.T) {
 		t.Fatalf("no-session unscoped lookup must not error; got IsError=true")
 	}
 }
+
+// TestHandleContext_DuplicateIDInTwoProjects_PrefersSession (#1408)
+// regression guard. Pre-fix `s.store.GetSymbol(id)` was unscoped and
+// could return the FORK's row when the same ID lived in both the
+// session project AND a fork (e.g. d:\codex\sniffer mirroring
+// pincher-repo). The downstream strict-guard then errored with
+// "exists only in project X" — even though the symbol DID also live
+// in the session project. Fix: scope to session first when no
+// project= arg, fall back to unscoped only if session miss.
+func TestHandleContext_DuplicateIDInTwoProjects_PrefersSession(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	mustUpsertProject(t, store, "proj-A", "/tmp/A", "projA")
+	mustUpsertProject(t, store, "proj-B", "/tmp/B", "projB")
+	srv.sessionID = "proj-A"
+	srv.sessionRoot = "/tmp/A"
+
+	// Same ID in BOTH projects — fork shape. Distinct signatures so
+	// we can verify which project's row came back.
+	mustUpsertSymbols(t, store, []db.Symbol{
+		{ID: "x.go::pkg.X#Function", ProjectID: "proj-A",
+			FilePath: "x.go", Name: "X", QualifiedName: "pkg.X",
+			Kind: "Function", Language: "Go",
+			Signature: "// session-project (proj-A) row — MUST be returned"},
+		{ID: "x.go::pkg.X#Function", ProjectID: "proj-B",
+			FilePath: "x.go", Name: "X", QualifiedName: "pkg.X",
+			Kind: "Function", Language: "Go",
+			Signature: "// fork (proj-B) row — must NOT be preferred"},
+	})
+
+	res, err := srv.handleContext(context.Background(), makeReq(map[string]any{
+		"id": "x.go::pkg.X#Function",
+	}))
+	if err != nil {
+		t.Fatalf("handleContext: %v", err)
+	}
+	// Primary assertion: with the fix, the session-scoped lookup
+	// returns proj-A's row and the strict-cross-project guard
+	// (s.sessionID != sym.ProjectID) doesn't fire. Pre-fix the
+	// unscoped lookup could pick proj-B's row, then the strict
+	// guard erroneously errored with "exists only in proj-B".
+	if res.IsError {
+		body := decode(t, res)
+		t.Fatalf("session-hit must not error even when fork holds same ID; got IsError=true, body=%v", body)
+	}
+}

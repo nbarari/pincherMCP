@@ -225,3 +225,43 @@ func TestHandleSymbol_CrossProject_NoSessionMeansNoStrictGuard(t *testing.T) {
 		t.Fatalf("no-session unscoped lookup must not error; got IsError=true")
 	}
 }
+
+// TestHandleSymbol_DuplicateIDInTwoProjects_PrefersSession (#1408)
+// regression guard. Pre-fix `s.store.GetSymbol(id)` was unscoped and
+// could return the FORK's row when the same ID lived in both the
+// session project AND a fork (e.g. d:\codex\sniffer mirroring
+// pincher-repo). The strict-cross-project guard then erroneously
+// errored with "exists only in project X" — even though the symbol
+// DID also live in the session project, which is what the agent's
+// search→symbol workflow actually wanted.
+func TestHandleSymbol_DuplicateIDInTwoProjects_PrefersSession(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newTestServer(t)
+	mustUpsertProject(t, store, "proj-A", "/tmp/A", "projA")
+	mustUpsertProject(t, store, "proj-B", "/tmp/B", "projB")
+	srv.sessionID = "proj-A"
+	srv.sessionRoot = "/tmp/A"
+
+	// Same ID in BOTH projects — fork shape.
+	mustUpsertSymbols(t, store, []db.Symbol{
+		{ID: "x.go::pkg.X#Function", ProjectID: "proj-A",
+			FilePath: "x.go", Name: "X", QualifiedName: "pkg.X",
+			Kind: "Function", Language: "Go",
+			Signature: "// session-project (proj-A) row"},
+		{ID: "x.go::pkg.X#Function", ProjectID: "proj-B",
+			FilePath: "x.go", Name: "X", QualifiedName: "pkg.X",
+			Kind: "Function", Language: "Go",
+			Signature: "// fork (proj-B) row"},
+	})
+
+	res, err := srv.handleSymbol(context.Background(), makeReq(map[string]any{
+		"id": "x.go::pkg.X#Function",
+	}))
+	if err != nil {
+		t.Fatalf("handleSymbol: %v", err)
+	}
+	if res.IsError {
+		body := decode(t, res)
+		t.Fatalf("session-hit must not error even when fork holds same ID; got IsError=true, body=%v", body)
+	}
+}
