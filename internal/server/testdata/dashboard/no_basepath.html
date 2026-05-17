@@ -114,6 +114,17 @@
   <div class="entropy-card">
     <div id="entropy-body"><div class="loading">Loading…</div></div>
   </div>
+  <!-- #1263 follow-up: pincher bench history. Per user mid-v0.67 ask:
+       results from pincher bench should pop up on the http, and long
+       term keep estimated vs actual for any project pincher bench
+       ran on. Renders the most recent runs persisted via the
+       --persist flag, with per-tool savings% from the bench_runs and
+       bench_results tables (schema v29). Empty state shows the
+       onboarding hint pointing the user at the persist flag. -->
+  <p class="section-title">Bench History (last 20 runs)</p>
+  <div class="bench-history-card">
+    <div id="bench-history-body"><div class="loading">Loading…</div></div>
+  </div>
 </main>
 </div>
 

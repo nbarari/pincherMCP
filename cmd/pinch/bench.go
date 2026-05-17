@@ -51,8 +51,9 @@ func runBenchCLI(args []string) {
 	depth := fs.Int("depth", 2, "trace depth (default 2)")
 	asJSON := fs.Bool("json", false, "Emit structured JSON instead of human-readable text")
 	seed := fs.Int64("seed", 0, "Random seed for sampling (default: nondeterministic). Set for reproducible benchmark runs.")
+	persist := fs.Bool("persist", false, "Persist this run's aggregates to the bench_runs / bench_results tables so the dashboard's bench panel + /v1/bench-results endpoint can surface history (#1263 follow-up).")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: pincher bench [--project ID] [--n N] [--depth D] [--json] [--data-dir DIR] [--seed S]")
+		fmt.Fprintln(os.Stderr, "usage: pincher bench [--project ID] [--n N] [--depth D] [--json] [--persist] [--data-dir DIR] [--seed S]")
 		fmt.Fprintln(os.Stderr, "  Runs search / context / trace against the user's indexed corpus and")
 		fmt.Fprintln(os.Stderr, "  reports per-tool latency + token-savings vs a full-file Read/Grep baseline.")
 		fmt.Fprintln(os.Stderr, "  Use --json for CI pipelines or `pincher bench --project ... | jq ...`.")
@@ -108,6 +109,16 @@ func runBenchCLI(args []string) {
 
 	report := runBenchSuite(store, pid, sample, *depth)
 
+	if *persist {
+		if err := persistBenchReport(store, report); err != nil {
+			// Persistence failure shouldn't swallow the bench output —
+			// surface a warning to stderr and continue to emit the
+			// human/JSON report. Users running `--persist` care about
+			// the row landing but losing the run output is worse.
+			fmt.Fprintf(os.Stderr, "pincher bench: warning: persist failed: %v\n", err)
+		}
+	}
+
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -119,11 +130,15 @@ func runBenchCLI(args []string) {
 
 // BenchReport is the structured form `pincher bench --json` emits.
 type BenchReport struct {
-	ProjectID string      `json:"project_id"`
-	Samples   int         `json:"samples"`
-	TraceDepth int        `json:"trace_depth"`
-	StartedAt time.Time   `json:"started_at"`
-	Tools     []ToolBench `json:"tools"`
+	// RunID is populated when --persist is set; empty otherwise. UUID
+	// derived from the start time + a random suffix so re-running on
+	// the same project surfaces as a new run, not an upsert collision.
+	RunID      string      `json:"run_id,omitempty"`
+	ProjectID  string      `json:"project_id"`
+	Samples    int         `json:"samples"`
+	TraceDepth int         `json:"trace_depth"`
+	StartedAt  time.Time   `json:"started_at"`
+	Tools      []ToolBench `json:"tools"`
 }
 
 // ToolBench is the per-tool aggregate of a bench run.
@@ -232,6 +247,38 @@ type measurement struct {
 	latencyMs      float64
 	tokensActual   int64
 	tokensBaseline int64
+}
+
+// persistBenchReport writes the report to the bench_runs / bench_results
+// tables and stamps report.RunID so the JSON output downstream can
+// reference the persisted row. The RunID format is "{unix-nanos}-{rand}"
+// — sortable by creation time, unique across concurrent runs on the
+// same project (the bench is allowed to run in parallel from different
+// shells).
+func persistBenchReport(store *db.Store, report *BenchReport) error {
+	report.RunID = fmt.Sprintf("%d-%d", report.StartedAt.UnixNano(), rand.Int64N(1<<31))
+	run := db.BenchRun{
+		RunID:      report.RunID,
+		ProjectID:  report.ProjectID,
+		StartedAt:  report.StartedAt,
+		NSamples:   report.Samples,
+		TraceDepth: report.TraceDepth,
+	}
+	results := make([]db.BenchResult, 0, len(report.Tools))
+	for _, t := range report.Tools {
+		results = append(results, db.BenchResult{
+			RunID:              report.RunID,
+			ToolName:           t.Name,
+			Calls:              t.Calls,
+			P50LatencyMs:       t.P50LatencyMs,
+			P95LatencyMs:       t.P95LatencyMs,
+			MeanLatencyMs:      t.MeanLatencyMs,
+			MeanTokensActual:   t.MeanTokensActual,
+			MeanTokensBaseline: t.MeanTokensBaseline,
+			SavingsPct:         t.SavingsPct,
+		})
+	}
+	return store.RecordBenchRun(run, results)
 }
 
 // jsonTokenCount serializes v to JSON and returns the byte/4 token

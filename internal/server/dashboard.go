@@ -152,6 +152,17 @@ const dashboardTemplate = `<!DOCTYPE html>
   <div class="entropy-card">
     <div id="entropy-body"><div class="loading">Loading…</div></div>
   </div>
+  <!-- #1263 follow-up: pincher bench history. Per user mid-v0.67 ask:
+       results from pincher bench should pop up on the http, and long
+       term keep estimated vs actual for any project pincher bench
+       ran on. Renders the most recent runs persisted via the
+       --persist flag, with per-tool savings% from the bench_runs and
+       bench_results tables (schema v29). Empty state shows the
+       onboarding hint pointing the user at the persist flag. -->
+  <p class="section-title">Bench History (last 20 runs)</p>
+  <div class="bench-history-card">
+    <div id="bench-history-body"><div class="loading">Loading…</div></div>
+  </div>
 </main>
 </div>
 
@@ -1004,6 +1015,7 @@ async function load() {
   loadTierBreakdown();
   loadPayloadSize();
   loadEntropyPanel();
+  loadBenchHistory();
   loadBackendStatus();
   document.getElementById('last-refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
@@ -1317,6 +1329,58 @@ async function loadEntropyPanel() {
 // glance whether traces are flowing and metrics are exposed.
 // Compact horizontal layout — three colored chips plus the schema
 // version. POSTs to /v1/health (a tool endpoint) with an empty body.
+// #1263 follow-up: pincher bench history panel. Fetches /v1/bench-results
+// (last 20 runs across all projects, newest first, each carrying its
+// per-tool aggregate rows) and renders a compact table grouped by run.
+// Empty state points the user at the --persist flag since the table
+// only populates once at least one persisted run lands.
+async function loadBenchHistory() {
+  try {
+    const data = await fetch('/v1/bench-results?limit=20').then(r => r.json());
+    const runs = (data && data.runs) || [];
+    const body = document.getElementById('bench-history-body');
+    if (!body) return;
+    if (runs.length === 0) {
+      body.innerHTML = '<div class="empty">No persisted bench runs yet. Run <code>pincher bench --persist</code> to populate this panel — savings% per tool per project, newest first.</div>';
+      return;
+    }
+    // One row per (run, tool). The savings% column is the headline.
+    let html = '<table class="data-table"><thead><tr>' +
+      '<th>When</th><th>Project</th><th>Tool</th><th>Calls</th>' +
+      '<th>p50 ms</th><th>Actual tok</th><th>Baseline tok</th><th>Savings</th>' +
+      '</tr></thead><tbody>';
+    for (const run of runs) {
+      const ts = new Date(run.started_at).toLocaleString();
+      const proj = esc(String(run.project_id || ''));
+      const results = run.results || [];
+      if (results.length === 0) {
+        html += '<tr><td>' + esc(ts) + '</td><td>' + proj + '</td><td colspan="6" class="empty-cell">no per-tool rows</td></tr>';
+        continue;
+      }
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        const sav = (r.savings_pct >= 0 ? r.savings_pct.toFixed(1) : '—') + '%';
+        const savCls = r.savings_pct >= 80 ? 'good' : r.savings_pct >= 50 ? 'ok' : 'warn';
+        html += '<tr>' +
+          (i === 0 ? '<td rowspan="' + results.length + '">' + esc(ts) + '</td>' +
+                     '<td rowspan="' + results.length + '">' + proj + '</td>' : '') +
+          '<td>' + esc(r.tool_name) + '</td>' +
+          '<td>' + r.calls + '</td>' +
+          '<td>' + (r.p50_latency_ms || 0).toFixed(2) + '</td>' +
+          '<td>' + fmt(r.mean_tokens_actual || 0) + '</td>' +
+          '<td>' + fmt(r.mean_tokens_baseline || 0) + '</td>' +
+          '<td class="savings-' + savCls + '">' + sav + '</td>' +
+          '</tr>';
+      }
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } catch (e) {
+    const body = document.getElementById('bench-history-body');
+    if (body) body.innerHTML = '<div class="error">Failed to load bench history: ' + esc(String(e)) + '</div>';
+  }
+}
+
 async function loadBackendStatus() {
   try {
     const res = await fetch('/v1/health', {

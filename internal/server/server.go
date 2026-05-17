@@ -1670,6 +1670,47 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// GET /v1/bench-results — `pincher bench --persist` history per
+	// project (#1263 follow-up). Returns the most recent N runs joined
+	// with their per-tool aggregates. Drives the dashboard bench panel
+	// + answers the user-facing question "how have my project's
+	// savings evolved over time?" Read-only; query params:
+	//   project — optional; defaults to ALL projects, newest-first
+	//   limit   — max runs returned (default 20, max 200)
+	if path == "bench-results" && r.Method == http.MethodGet {
+		projectFilter := r.URL.Query().Get("project")
+		limit := 20
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, perr := strconv.Atoi(v); perr == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		runs, err := s.store.ListBenchRuns(projectFilter, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		// Bundle per-run results into the response so the dashboard
+		// tile renders without a second round-trip per run. N is
+		// capped at 200 so this stays bounded.
+		type runWithResults struct {
+			db.BenchRun
+			Results []db.BenchResult `json:"results"`
+		}
+		out := make([]runWithResults, 0, len(runs))
+		for _, run := range runs {
+			res, _ := s.store.GetBenchResults(run.RunID)
+			if res == nil {
+				res = []db.BenchResult{}
+			}
+			out = append(out, runWithResults{BenchRun: run, Results: res})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"limit": limit,
+			"runs":  out,
+		})
+		return
+	}
 	// GET /v1/sessions — per-session savings history for sparkline chart.
 	if path == "sessions" && r.Method == http.MethodGet {
 		// #531: ?limit= lifts the previously-hardcoded 90-session window.

@@ -551,6 +551,9 @@ var readerRoutedStoreMethods = map[string]bool{
 	// #635 v0.67 panel 3: per-tool payload-size distribution (min/avg/max
 	// response_bytes) — outlier finder. Reader-routed.
 	"ToolCallPayloadSizeByTool": true,
+	// #1263 v0.68 bench persistence: list runs + per-run results.
+	"ListBenchRuns":   true,
+	"GetBenchResults": true,
 }
 
 var writerRoutedStoreMethods = map[string]bool{
@@ -600,6 +603,10 @@ var writerRoutedStoreMethods = map[string]bool{
 	// #635 v0.64: bulk-insert per-call events into session_tool_calls.
 	// Writer-routed (mutates table).
 	"RecordToolCalls": true,
+
+	// #1263 v0.68 bench persistence: writes one bench_runs row + N
+	// bench_results rows in one transaction. Writer-routed.
+	"RecordBenchRun": true,
 }
 
 // TestStore_AllExportedMethodsClassified is the routing classification

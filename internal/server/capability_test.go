@@ -28,11 +28,11 @@ type capProbe struct {
 
 var capabilityProbes = []capProbe{
 	{
-		tag: "schema_v28",
+		tag: "schema_v29",
 		probe: func(t *testing.T, srv *Server) {
 			ver := db.CurrentSchemaVersion()
-			if ver != 28 {
-				t.Errorf("schema_v28 advertised but CurrentSchemaVersion()=%d", ver)
+			if ver != 29 {
+				t.Errorf("schema_v29 advertised but CurrentSchemaVersion()=%d", ver)
 			}
 		},
 	},
@@ -343,13 +343,13 @@ func TestCapability_PresentInMetaEnvelope(t *testing.T) {
 	}
 	found := false
 	for _, c := range caps {
-		if c == "schema_v28" {
+		if c == "schema_v29" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("_meta.capabilities missing schema_v28; got %v", caps)
+		t.Errorf("_meta.capabilities missing schema_v29; got %v", caps)
 	}
 }
 

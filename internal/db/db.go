@@ -1289,6 +1289,46 @@ END;`,
 	// symbol row even when ids collide. Schema is the structural
 	// guard; the JOIN updates are the query-time guard.
 	v28RebuildSymbolsCompositePK + ftsCorpusSplitDDL,
+
+	// v28 → v29: bench_runs + bench_results tables for `pincher bench
+	// --persist`. Persists per-run summary + per-tool aggregates so the
+	// dashboard can render "predicted vs actual" over time for any
+	// project pincher bench has ever run against (per user mid-session
+	// ask, #1263 follow-up: "having the results pop up on the http would
+	// probably be good. then long term you keep estimated results with
+	// actual result for any project that pincher bench ran on").
+	//
+	// Cascade delete: when a project is removed via `pincher project rm`,
+	// its bench history goes too — bench results are pinned to the
+	// project's index at a point in time and are meaningless after the
+	// project is gone.
+	`
+	CREATE TABLE IF NOT EXISTS bench_runs (
+		run_id          TEXT PRIMARY KEY,
+		project_id      TEXT NOT NULL,
+		started_at      DATETIME NOT NULL,
+		n_samples       INTEGER NOT NULL,
+		trace_depth     INTEGER NOT NULL,
+		binary_version  TEXT NOT NULL DEFAULT '',
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_bench_runs_project_started
+		ON bench_runs(project_id, started_at DESC);
+
+	CREATE TABLE IF NOT EXISTS bench_results (
+		run_id              TEXT NOT NULL,
+		tool_name           TEXT NOT NULL,
+		calls               INTEGER NOT NULL,
+		p50_latency_ms      REAL NOT NULL,
+		p95_latency_ms      REAL NOT NULL,
+		mean_latency_ms     REAL NOT NULL,
+		mean_tokens_actual  INTEGER NOT NULL,
+		mean_tokens_baseline INTEGER NOT NULL,
+		savings_pct         REAL NOT NULL,
+		PRIMARY KEY (run_id, tool_name),
+		FOREIGN KEY (run_id) REFERENCES bench_runs(run_id) ON DELETE CASCADE
+	);
+	`,
 }
 
 // v28RebuildSymbolsCompositePK is the SQL portion of v28 that drops
@@ -5282,4 +5322,134 @@ func FormatSize(bytes int) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// BenchRun is one persisted `pincher bench --persist` invocation.
+// Schema v29 (#1263 follow-up). One row per CLI invocation; per-tool
+// aggregates live in bench_results joined by run_id.
+type BenchRun struct {
+	RunID         string    `json:"run_id"`
+	ProjectID     string    `json:"project_id"`
+	StartedAt     time.Time `json:"started_at"`
+	NSamples      int       `json:"n_samples"`
+	TraceDepth    int       `json:"trace_depth"`
+	BinaryVersion string    `json:"binary_version,omitempty"`
+}
+
+// BenchResult is one per-tool aggregate row attached to a BenchRun.
+type BenchResult struct {
+	RunID              string  `json:"run_id"`
+	ToolName           string  `json:"tool_name"`
+	Calls              int     `json:"calls"`
+	P50LatencyMs       float64 `json:"p50_latency_ms"`
+	P95LatencyMs       float64 `json:"p95_latency_ms"`
+	MeanLatencyMs      float64 `json:"mean_latency_ms"`
+	MeanTokensActual   int64   `json:"mean_tokens_actual"`
+	MeanTokensBaseline int64   `json:"mean_tokens_baseline"`
+	SavingsPct         float64 `json:"savings_pct"`
+}
+
+// RecordBenchRun writes one summary row plus the per-tool aggregates
+// in a single transaction. Best-effort write semantics: failures
+// return an error but the bench's text/JSON output is still useful.
+// Writer-routed.
+func (s *Store) RecordBenchRun(run BenchRun, results []BenchResult) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`
+			INSERT INTO bench_runs(run_id, project_id, started_at, n_samples, trace_depth, binary_version)
+			VALUES (?,?,?,?,?,?)`,
+			run.RunID, run.ProjectID, run.StartedAt, run.NSamples, run.TraceDepth, run.BinaryVersion,
+		); err != nil {
+			return err
+		}
+		stmt, err := tx.Prepare(`
+			INSERT INTO bench_results(
+				run_id, tool_name, calls,
+				p50_latency_ms, p95_latency_ms, mean_latency_ms,
+				mean_tokens_actual, mean_tokens_baseline, savings_pct
+			) VALUES (?,?,?, ?,?,?, ?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, r := range results {
+			if _, err := stmt.Exec(
+				run.RunID, r.ToolName, r.Calls,
+				r.P50LatencyMs, r.P95LatencyMs, r.MeanLatencyMs,
+				r.MeanTokensActual, r.MeanTokensBaseline, r.SavingsPct,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListBenchRuns returns the most recent `limit` runs for projectID,
+// newest first. Empty projectID lists across all projects.
+// Reader-routed.
+func (s *Store) ListBenchRuns(projectID string, limit int) ([]BenchRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if projectID == "" {
+		rows, err = s.ro.Query(`
+			SELECT run_id, project_id, started_at, n_samples, trace_depth, binary_version
+			  FROM bench_runs
+			 ORDER BY started_at DESC
+			 LIMIT ?`, limit)
+	} else {
+		rows, err = s.ro.Query(`
+			SELECT run_id, project_id, started_at, n_samples, trace_depth, binary_version
+			  FROM bench_runs
+			 WHERE project_id = ?
+			 ORDER BY started_at DESC
+			 LIMIT ?`, projectID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchRun{}
+	for rows.Next() {
+		var r BenchRun
+		if err := rows.Scan(&r.RunID, &r.ProjectID, &r.StartedAt, &r.NSamples, &r.TraceDepth, &r.BinaryVersion); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetBenchResults returns the per-tool rows attached to runID.
+// Reader-routed.
+func (s *Store) GetBenchResults(runID string) ([]BenchResult, error) {
+	rows, err := s.ro.Query(`
+		SELECT run_id, tool_name, calls,
+		       p50_latency_ms, p95_latency_ms, mean_latency_ms,
+		       mean_tokens_actual, mean_tokens_baseline, savings_pct
+		  FROM bench_results
+		 WHERE run_id = ?
+		 ORDER BY tool_name`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchResult{}
+	for rows.Next() {
+		var r BenchResult
+		if err := rows.Scan(
+			&r.RunID, &r.ToolName, &r.Calls,
+			&r.P50LatencyMs, &r.P95LatencyMs, &r.MeanLatencyMs,
+			&r.MeanTokensActual, &r.MeanTokensBaseline, &r.SavingsPct,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

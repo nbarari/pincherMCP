@@ -7,7 +7,7 @@
   "files_blocked": 0,
   "files_indexed": 6,
   "files_seen": 6,
-  "schema_version": 28,
+  "schema_version": 29,
   "search_relevance": [
     {
       "corpus": "docs",

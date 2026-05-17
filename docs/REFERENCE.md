@@ -2,7 +2,7 @@
 
 The long-form reference. The [README](../README.md) is the pitch + quickstart; this file is the manual. For 10-minute end-to-end walkthroughs, see [`tutorials/`](tutorials/) — [Claude Code](tutorials/claude-code.md), [Cursor](tutorials/cursor.md), [HTTP dashboard](tutorials/http-dashboard.md).
 
-**Schema version:** v28 · **MCP tools:** 23 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
+**Schema version:** v29 · **MCP tools:** 23 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
 
 ## Contents
 
@@ -483,6 +483,7 @@ Responses compress ~65% with `Accept-Encoding: gzip`. Tested clients: curl, Pyth
 | `/v1/tool-tier-stats` | GET | Yes | Per-complexity-tier aggregate (lite/standard/heavy) over the trailing window (#635 v0.67 panel 2). |
 | `/v1/tool-payload-stats` | GET | Yes | Per-tool response_bytes distribution (min/avg/max/sum) over the trailing window. Sorted by max_bytes DESC — the dashboard "outlier finder" view (#635 v0.67 panel 3). |
 | `/v1/metrics` | GET | No | Prometheus exposition format (#1163 v0.67). Standard counters/histograms/gauges for tool calls, latency, index pass, db/wal size. |
+| `/v1/bench-results` | GET | Yes | `pincher bench --persist` history per project (#1263 v0.68). Returns the most recent N runs joined with per-tool aggregates. Query params: `project` (optional; defaults to ALL projects, newest-first), `limit` (default 20, max 200). Drives the dashboard Bench History panel. |
 
 CORS: all responses include `Access-Control-Allow-Origin: *` so browsers can call directly without a proxy.
 
