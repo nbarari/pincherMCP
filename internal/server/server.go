@@ -407,6 +407,12 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 	// is the streamable-HTTP transport available, or stdio-only? etc.)
 	// without scraping version strings or trial-and-error calls.
 	s.capabilities = computeCapabilities(s)
+	// #1088: opt-in short tool descriptions for heavy-traffic
+	// aggregators. Default-off keeps the dense pedagogical
+	// descriptions every consumer reading tools/list today gets.
+	// Set PINCHER_TOOL_DESCRIPTIONS=short to trim ~3 KB / ~750 tokens
+	// off every session-start handshake.
+	s.applyShortDescriptionsIfRequested()
 	// #1087: read PINCHER_META_CAPABILITIES at server start. Default-on
 	// preserves back-compat — any router consuming _meta.capabilities
 	// today keeps working. Opt-out via off|false|0|none for

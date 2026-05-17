@@ -486,6 +486,13 @@ Responses compress ~65% with `Accept-Encoding: gzip`. Tested clients: curl, Pyth
 | `/v1/bench-results` | GET | Yes | `pincher bench --persist` history per project (#1263 v0.68). Returns the most recent N runs joined with per-tool aggregates. Query params: `project` (optional; defaults to ALL projects, newest-first), `limit` (default 20, max 200). Drives the dashboard Bench History panel. |
 | `/v1/capabilities` | GET | Yes | One-shot read of the per-server capability slice (#1087 v0.69). Drop-in alternative for HTTP clients that don't want to pay the per-call `_meta.capabilities` cost — call once at session start, cache the result. Especially relevant when the operator has set `PINCHER_META_CAPABILITIES=off` to skip the per-call stamp. |
 
+### Server-side env knobs
+
+| Env var | Default | Effect |
+|---|---|---|
+| `PINCHER_META_CAPABILITIES` | `on` | Set to `off` (or `false`/`0`/`none`/`no`) at server start to drop the per-call `_meta.capabilities` stamp. Saves ~50 tokens/call (#1087). Use the `/v1/capabilities` endpoint to query the slice once. Default-on preserves back-compat. |
+| `PINCHER_TOOL_DESCRIPTIONS` | (unset) | Set to `short` at server start to swap the 5 longest tool descriptions (trace / search / neighborhood / query / changes) for one-sentence variants. Trims ~3 KB / ~750 tokens off every session-start `tools/list` handshake. Long-form pedagogical content stays available via `docs/REFERENCE.md` per-tool sections (#1088). |
+
 CORS: all responses include `Access-Control-Allow-Origin: *` so browsers can call directly without a proxy.
 
 ### Observability (#1163, #654, #628)
