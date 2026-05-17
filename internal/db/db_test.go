@@ -500,6 +500,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"ListADRs":                true,
 	"GetFileHash":             true,
 	"ListFilesForProject":     true,
+	"ListFilesWithHashesForProject": true,
 	"ListSymbolFilePaths":     true,
 	"SymbolCountsByFile":      true, // #1231 parity check (pure SELECT, reader pool)
 	"FilesWithEdgesToFile":    true,

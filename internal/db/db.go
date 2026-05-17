@@ -4326,6 +4326,40 @@ func (s *Store) ListFilesForProject(projectID string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// FileHashEntry pairs a file path with its stored content hash. Used
+// by `pincher verify` (#1399) to batch-load all files for a project
+// in one query instead of N GetFileHash round-trips.
+type FileHashEntry struct {
+	Path string
+	Hash string
+}
+
+// ListFilesWithHashesForProject returns every (path, hash) pair from
+// the files table for projectID — one bulk SELECT instead of looping
+// GetFileHash. Used by `pincher verify` (#1399) to re-hash on-disk
+// bytes and surface drift between the stored hash and current file
+// content. Drift fires when an indexed file was modified out-of-band
+// since its last index pass — the symbol-store byte offsets may point
+// at wrong content.
+//
+// Reads via the reader pool — pure SELECT, classified read.
+func (s *Store) ListFilesWithHashesForProject(projectID string) ([]FileHashEntry, error) {
+	rows, err := s.ro.Query(`SELECT path, hash FROM files WHERE project_id=? ORDER BY path`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FileHashEntry{}
+	for rows.Next() {
+		var e FileHashEntry
+		if err := rows.Scan(&e.Path, &e.Hash); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListSymbolFilePaths returns the distinct file paths that currently have
 // at least one symbol row for projectID. #756: the #326 tail-pass GC
 // iterated only the `files` table, so symbols whose `files` row was

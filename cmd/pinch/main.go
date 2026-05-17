@@ -96,6 +96,10 @@ func main() {
 		runHookStatsCLI(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		runVerifyCLI(os.Args[2:])
+		return
+	}
 
 	// #796: a first arg that isn't a flag and isn't a recognized
 	// subcommand is a typo (`pincher doctr`, `pincher stat`). Pre-fix it
@@ -344,6 +348,7 @@ func printHelpBanner(out io.Writer) {
 	fmt.Fprintln(out, "  pincher project list           List indexed projects (alias: ls)")
 	fmt.Fprintln(out, "  pincher project rm <name>      Remove an indexed project (alias: remove, delete)")
 	fmt.Fprintln(out, "  pincher project prune-stale    Drop projects indexed by an old schema and untouched for N days")
+	fmt.Fprintln(out, "  pincher verify                 Re-hash every indexed file and report drift vs stored hash (#1399)")
 	fmt.Fprintln(out, "  pincher vacuum                 Reclaim disk space after project removal (rewrites the DB file)")
 	fmt.Fprintln(out, "  pincher --version              Print version and exit")
 	fmt.Fprintln(out, "")
