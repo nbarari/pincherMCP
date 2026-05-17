@@ -203,6 +203,15 @@ type IndexResult struct {
 	ParityMissingSymbols  int
 }
 
+// #1338: pending-edge threshold above which the resolve block pre-loads
+// the full project symbol-by-QN map (one bulk SELECT). Below the
+// threshold, each resolveX runs per-call GetSymbolsByQN — cheaper
+// because the bulk-scan + map-build cost would dominate on small
+// projects. Measured crossover: ~500 pending edges on a 600-file Go
+// project. 1000 sets a conservative floor so the gate is a win, not
+// a loss, on YAML/JSON-heavy corpora where pending counts stay low.
+const qnPreloadThreshold = 1000
+
 // Index indexes a repository at the given path (incremental by default).
 // If force=true, all files are re-parsed regardless of content hash.
 func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*IndexResult, error) {
@@ -770,19 +779,40 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// the WalkDir entirely.
 		pythonRoots = ast.PythonSourceRoots(absPath)
 
+		// #1338: pre-load the project's symbol-by-QN map once before
+		// the resolve passes when the expected lookup volume justifies
+		// the bulk SELECT. Pre-fix each resolveCalls / resolveReads
+		// iteration ran one GetSymbolsByQN DB query per unique QN
+		// (~20% of cold-path allocations on a Go-heavy project).
+		//
+		// Threshold gate: only pre-load when sum(pending) > qnPreloadThreshold.
+		// On small projects (YAML-heavy K8s / sparse-edge Node) the bulk
+		// scan allocates more than the per-call queries it saves. Measured
+		// crossover lives around 500 pending edges on a 600-file project;
+		// 1000 set conservative so the heuristic stays a win, not a loss.
+		// On a LoadAllSymbolsByQN error, fall back to per-call lookups —
+		// correctness preserved; only the speedup is lost.
 		allImports := loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
-		if n := idx.resolveImports(projectID, allImports, pythonRoots); n > 0 {
-			totalEdges += n
-		}
-
 		allCalls := loadOrFallback(idx, projectID, "CALLS", pendingCalls)
-		if n := idx.resolveCalls(projectID, allCalls, pythonRoots); n > 0 {
-			totalEdges += n
-		}
-
 		allReads := loadOrFallback(idx, projectID, "READS", pendingReads)
 		allReads = append(allReads, loadOrFallback(idx, projectID, "WRITES", nil)...)
-		if n := idx.resolveReads(projectID, allReads); n > 0 {
+
+		var qnMap map[string][]db.Symbol
+		if len(allImports)+len(allCalls)+len(allReads) > qnPreloadThreshold {
+			if loaded, err := idx.store.LoadAllSymbolsByQN(projectID); err == nil {
+				qnMap = loaded
+			} else {
+				slog.Warn("pincher.resolve.qn_preload.err", "err", err)
+			}
+		}
+
+		if n := idx.resolveImports(projectID, allImports, pythonRoots, qnMap); n > 0 {
+			totalEdges += n
+		}
+		if n := idx.resolveCalls(projectID, allCalls, pythonRoots, qnMap); n > 0 {
+			totalEdges += n
+		}
+		if n := idx.resolveReads(projectID, allReads, qnMap); n > 0 {
 			totalEdges += n
 		}
 	}
@@ -1625,9 +1655,23 @@ func readGoModulePath(repoPath string) string {
 // by matching both endpoints against Module symbols in the project. Edges
 // with no matching Module on either side are dropped. Returns the number
 // of edges actually persisted.
-func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge, pythonRoots []string) int {
+func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol) int {
 	if len(pending) == 0 {
 		return 0
+	}
+
+	// #1338: optional pre-loaded QN→symbols map; nil falls back to
+	// per-call DB queries. Same wrapper pattern as resolveCalls /
+	// resolveReads.
+	lookupSyms := func(qn string) []db.Symbol {
+		if qnMap != nil {
+			return qnMap[qn]
+		}
+		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
+		if err != nil {
+			return nil
+		}
+		return syms
 	}
 
 	// Cache QN → canonical matching symbol ID so we don't repeat SELECTs
@@ -1646,8 +1690,8 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		if id, ok := cache[qn]; ok {
 			return id
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		if len(syms) == 0 {
 			cache[qn] = ""
 			return ""
 		}
@@ -1675,11 +1719,9 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 		if id, ok := codeCache[qn]; ok {
 			return id
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err == nil {
-			syms = excludeNonCodeSyms(syms)
-		}
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		syms = excludeNonCodeSyms(syms)
+		if len(syms) == 0 {
 			codeCache[qn] = ""
 			return ""
 		}
@@ -2207,9 +2249,22 @@ func resolveMethodByName(store *db.Store, projectID, name string) string {
 //
 // Only Go CALLS reach this path; non-Go regex extractors emit noisy ToName
 // values that would create false-positive cross-package edges.
-func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, pythonRoots []string) int {
+func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol) int {
 	if len(pending) == 0 {
 		return 0
+	}
+
+	// #1338: optional pre-loaded QN→symbols map; nil falls back to
+	// per-call DB queries. Wrapper closure routes either way.
+	lookupSyms := func(qn string) []db.Symbol {
+		if qnMap != nil {
+			return qnMap[qn]
+		}
+		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
+		if err != nil {
+			return nil
+		}
+		return syms
 	}
 
 	// pickCanonical returns the lexicographically smallest symbol ID,
@@ -2255,8 +2310,8 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, 
 		if id, ok := qnCache[qn]; ok {
 			return id
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		if len(syms) == 0 {
 			qnCache[qn] = ""
 			return ""
 		}
@@ -2296,8 +2351,8 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, 
 		if fromFile == "" {
 			return lookupQN(qn)
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		if len(syms) == 0 {
 			return ""
 		}
 		for _, s := range syms {
@@ -2629,9 +2684,22 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, 
 // "who modifies Cache" vs "who only observes it" by filtering on
 // edge kind. Confidence is preserved from the extracted edge (0.5 —
 // lower than CALLS at 0.7 because over-emission is expected).
-func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) int {
+func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge, qnMap map[string][]db.Symbol) int {
 	if len(pending) == 0 {
 		return 0
+	}
+
+	// #1338: optional pre-loaded QN→symbols map; nil falls back to
+	// per-call DB queries. Mirrors the resolveCalls pattern.
+	lookupSyms := func(qn string) []db.Symbol {
+		if qnMap != nil {
+			return qnMap[qn]
+		}
+		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
+		if err != nil {
+			return nil
+		}
+		return syms
 	}
 
 	// #760: struct-field index, structQN → set of field names. Used by
@@ -2718,8 +2786,8 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 		if v, ok := qnCache[qn]; ok {
 			return v
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		if len(syms) == 0 {
 			qnCache[qn] = lookup{}
 			return lookup{}
 		}
@@ -2849,8 +2917,8 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge) 
 		if base.id == "" || fromFile == "" {
 			return base
 		}
-		syms, err := idx.store.GetSymbolsByQN(projectID, qn)
-		if err != nil || len(syms) == 0 {
+		syms := lookupSyms(qn)
+		if len(syms) == 0 {
 			return base
 		}
 		for _, s := range syms {

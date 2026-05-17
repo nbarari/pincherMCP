@@ -2962,6 +2962,28 @@ func (s *Store) GetSymbolsByQN(projectID, qn string) ([]Symbol, error) {
 	return s.querySymbols(symSelectFrom+` WHERE project_id=? AND qualified_name=?`, projectID, qn)
 }
 
+// LoadAllSymbolsByQN returns every symbol in projectID grouped by
+// qualified_name. Used by the index resolve pass to avoid one DB
+// query per unique QN — pre-#1338 the indexer ran N GetSymbolsByQN
+// calls during resolveCalls/resolveReads, each a SQLite query plus
+// row scan, accounting for ~20% of cold-path allocations. One bulk
+// SELECT amortizes the cost.
+//
+// Ordering: within each value slice, symbols are sorted by id so
+// downstream pickCanonical (#428) produces the same lexicographically
+// smallest ID as the per-QN query did.
+func (s *Store) LoadAllSymbolsByQN(projectID string) (map[string][]Symbol, error) {
+	syms, err := s.querySymbols(symSelectFrom+` WHERE project_id=? ORDER BY qualified_name, id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]Symbol, len(syms)/2)
+	for _, sym := range syms {
+		out[sym.QualifiedName] = append(out[sym.QualifiedName], sym)
+	}
+	return out, nil
+}
+
 // GetSymbolsForFile returns all symbols in a file ordered by byte offset.
 func (s *Store) GetSymbolsForFile(projectID, filePath string) ([]Symbol, error) {
 	return s.querySymbols(symSelectFrom+` WHERE project_id=? AND file_path=? ORDER BY start_byte`, projectID, filePath)
