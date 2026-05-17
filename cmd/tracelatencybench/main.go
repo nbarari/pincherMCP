@@ -98,28 +98,59 @@ func run(args []string, errOut io.Writer) int {
 		return 1
 	}
 
+	// Match the trace-tool default edge-kind set (internal/index/indexer.go
+	// TraceByID — the only path agents actually hit). Pre-fix the bench
+	// passed nil here, which trips TraceViaCTE's "edgeKinds must not be
+	// empty" validation — every CTE call returned 0 ns + empty results,
+	// flooring the ratio (#1162 measurement bug caught in v0.68 run).
+	defaultKinds := []string{"CALLS", "HTTP_CALLS", "ASYNC_CALLS"}
+
 	cteLats := []time.Duration{}
 	closLats := []time.Duration{}
+	emptyCTE, emptyClos := 0, 0
+	cteErrs, closErrs := 0, 0
 	for _, sid := range sample {
 		// Warmup pair: skip first iteration timing for each path so
 		// SQLite page cache effects don't favor the second-run path.
-		_, _ = store.TraceViaCTEScoped(pid, sid, *direction, nil, *depth)
+		_, _ = store.TraceViaCTEScoped(pid, sid, *direction, defaultKinds, *depth)
 		_, _ = store.TraceViaClosure(pid, sid, *direction, *depth)
 
 		t0 := time.Now()
-		_, _ = store.TraceViaCTEScoped(pid, sid, *direction, nil, *depth)
+		cteRes, cteErr := store.TraceViaCTEScoped(pid, sid, *direction, defaultKinds, *depth)
 		cteLats = append(cteLats, time.Since(t0))
+		if cteErr != nil {
+			cteErrs++
+		}
+		if len(cteRes) == 0 {
+			emptyCTE++
+		}
 
 		t1 := time.Now()
-		_, _ = store.TraceViaClosure(pid, sid, *direction, *depth)
+		clsRes, clsErr := store.TraceViaClosure(pid, sid, *direction, *depth)
 		closLats = append(closLats, time.Since(t1))
+		if clsErr != nil {
+			closErrs++
+		}
+		if len(clsRes) == 0 {
+			emptyClos++
+		}
 	}
 
 	ctP50, ctP95, ctMax, ctMean := stats(cteLats)
 	clP50, clP95, clMax, clMean := stats(closLats)
+	// Ratio reporting: when closure p50 falls below timer resolution
+	// (Windows time.Now() floors at ~100ns; closure-table SELECTs on
+	// tight loops genuinely complete sub-microsecond) the CTE-vs-
+	// closure ratio is unmeasurable from above. Fall back to a
+	// mean-based ratio so the speedup story is still numeric — and
+	// report it as such so the reader knows which lens we're using.
 	ratio := 0.0
+	ratioBasis := "p50"
 	if clP50 > 0 {
 		ratio = float64(ctP50) / float64(clP50)
+	} else if clMean > 0 {
+		ratio = float64(ctMean) / float64(clMean)
+		ratioBasis = "mean"
 	}
 
 	if *mdRow {
@@ -135,7 +166,14 @@ func run(args []string, errOut io.Writer) int {
 	fmt.Fprintf(os.Stdout, "tracelatencybench — project=%q n=%d depth=%d direction=%s\n", pid, *n, *depth, *direction)
 	fmt.Fprintf(os.Stdout, "  CTE path     p50=%s  p95=%s  max=%s  mean=%s\n", fmtDur(ctP50), fmtDur(ctP95), fmtDur(ctMax), fmtDur(ctMean))
 	fmt.Fprintf(os.Stdout, "  Closure path p50=%s  p95=%s  max=%s  mean=%s\n", fmtDur(clP50), fmtDur(clP95), fmtDur(clMax), fmtDur(clMean))
-	fmt.Fprintf(os.Stdout, "  Ratio        %.1f× p50 improvement (closure vs CTE)\n", ratio)
+	fmt.Fprintf(os.Stdout, "  Ratio        %.1f× %s improvement (closure vs CTE)\n", ratio, ratioBasis)
+	// Surface empty / error counts so the bench output can't lie about
+	// "great latency" while every call was a no-op — pre-fix this is
+	// exactly what masked the nil-edgeKinds bug for an entire release.
+	fmt.Fprintf(os.Stdout, "  Empty results CTE=%d  Closure=%d  (of %d samples)\n", emptyCTE, emptyClos, len(sample))
+	if cteErrs > 0 || closErrs > 0 {
+		fmt.Fprintf(os.Stdout, "  Errors       CTE=%d  Closure=%d  (investigate before trusting the ratio)\n", cteErrs, closErrs)
+	}
 	fmt.Fprintf(os.Stdout, "\nAcceptance gate for #1162: p50 ratio ≥ 10× at 10k+ files.\n")
 	return 0
 }
@@ -170,22 +208,27 @@ func largestProjectID(store *db.Store) (string, error) {
 }
 
 // sampleSymbolsWithEdges returns up to n symbol IDs from the project
-// that have at least one inbound or outbound edge. Random selection
-// without replacement (a Fisher-Yates shuffle on the candidate pool).
+// that have at least `minOutboundEdges` outbound edges. Filtering on
+// minimum fan-out matters for the #1162 measurement: low-fan-out
+// leaves let both paths return in nanoseconds, burying the p50 below
+// timer resolution. Closure-table speedup only materializes when the
+// CTE has real work to do (deep + wide BFS).
+//
+// Random selection without replacement (Fisher-Yates shuffle on the
+// candidate pool); 5000-row candidate pool keeps the GROUP BY scan
+// bounded on multi-million-symbol projects.
 func sampleSymbolsWithEdges(store *db.Store, projectID string, n int) ([]string, error) {
+	const minOutboundEdges = 5
 	rows, err := store.RO().Query(`
 		SELECT s.id
 		  FROM symbols s
+		  JOIN edges e ON e.project_id = s.project_id AND e.from_id = s.id
 		 WHERE s.project_id = ?
 		   AND s.kind IN ('Function', 'Method')
-		   AND EXISTS (
-			   SELECT 1 FROM edges e
-				WHERE e.project_id = s.project_id
-				  AND (e.from_id = s.id OR e.to_id = s.id)
-				LIMIT 1
-		   )
+		 GROUP BY s.id
+		HAVING COUNT(e.id) >= ?
 		 LIMIT 5000`,
-		projectID,
+		projectID, minOutboundEdges,
 	)
 	if err != nil {
 		return nil, err
