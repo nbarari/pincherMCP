@@ -62,7 +62,9 @@ These fail when changes elsewhere don't update them in lockstep:
 - **New exported `*Store` method (`db.go`):** classify in `readerRoutedStoreMethods` or `writerRoutedStoreMethods` (`db_test.go`), or `TestStore_AllExportedMethodsClassified` fails.
 - **Schema migration changes:** bump `schema_version` in 5 corpus snapshot files. `make corpus-snapshot-update` regenerates them; on Windows where `make` may be unavailable, `sed -i 's/"schema_version": N/"schema_version": N+1/' testdata/corpus/*.snapshot.json`.
 - **Tool-contract changes (descriptions, InputSchema):** regenerate via `go test ./internal/server -run TestToolContract -update-tool-contract`.
+- **Dashboard HTML/CSS changes (`dashboard.go`):** regenerate via `go test ./internal/server -run 'TestDashboardHTMLSnapshot|TestDashboardCSS' -count=1 -update-dashboard-snapshot -update-dashboard-css-snapshot`.
 - **New language extractor:** update `ast/registry.go` self-registration AND `db/corpus.go` `ClassifyCorpus` AND the v9 SQL trigger WHERE clauses. `TestClassifyCorpus_MatchesSQLTriggerRouting` is the gate.
+- **Bounded-duplication advisories (CLI ↔ MCP doctor):** when adding a doctor advisory, ship the helper in BOTH `internal/server/admin.go` and `cmd/pinch/doctor.go` with a "mirrors X / must stay identical" comment. The CLI lives in package main and can't import the server package.
 
 ## JSON response invariants
 
@@ -179,7 +181,7 @@ All three populated in a single `ast.Extract()` call per file during indexing.
 
 - **`internal/db/corpus.go`** — `ClassifyCorpus(language, kind)` returns `code` / `config` / `docs`. **PARITY INVARIANT:** Go function and v9 SQL trigger WHERE clauses encode the same routing. `TestClassifyCorpus_MatchesSQLTriggerRouting` is the gate.
 
-- **`internal/ast/extractor.go`** — Multi-language symbol extraction. Parser-backed (1.0): Go, YAML/JSON, HCL/Terraform, TOML, Bash, Markdown, Jinja2. Stable regex (0.85): Python, JS/TS/JSX/TSX, Rust, Java. Approximate regex (0.70): Ruby, PHP, C/C++, C#, Kotlin, Swift. Stub (0.0): Scala, Lua, Zig, Elixir, Haskell, Dart, R.
+- **`internal/ast/extractor.go`** — Multi-language symbol extraction. Parser-backed AST (1.0): Go, YAML/JSON, HCL/Terraform, TOML, Bash, Markdown, Jinja2, Python (dispatcher upgrades from 0.85 → 1.0 when `python` is on PATH). Stable regex (0.85): JS/TS/JSX/TSX, Rust, Java. Approximate regex (0.70): Ruby, PHP, C/C++, C#, Kotlin, Swift, Scala, Lua, Zig, Elixir, Dart, R (the last six promoted from stub in v0.63 per #1161/#1186/#1187). Stub (0.0): Haskell (indentation-sensitive layout requires harder regex representation; tracked separately). The shared `regexExtractor` framework supports `scopeRE` — a syntactic-grouping container that scopes inner symbols' Parent without emitting its own Class symbol (Rust `impl` / Swift `extension`, v0.67 #1183 partial).
 
 - **`internal/ast/registry.go`** — `Extractor` interface + per-language registry. Each extractor self-registers in `init()`.
 
