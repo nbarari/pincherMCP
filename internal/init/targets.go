@@ -74,6 +74,7 @@ var AllTargets = []Target{
 	WarpTarget,
 	VSCodeTarget,
 	VSCodeMCPTarget,
+	JetBrainsTarget,
 }
 
 // FindTarget looks up a target by its --target value.
@@ -519,4 +520,52 @@ func continueJSONWriter(existing, policy string) (string, string) {
 		return existing, "error"
 	}
 	return string(out) + "\n", action
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// jetbrains (.idea/.junie/guidelines.md — JetBrains AI Assistant project rules)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// JetBrains AI Assistant (the AI feature shipped in 2024+ IDE builds —
+// IntelliJ IDEA, PyCharm, GoLand, WebStorm, etc.) reads project-level
+// instructions from `.idea/.junie/guidelines.md` (the "Junie" code-
+// generation companion's per-project conventions file). #1335 v0.76
+// parity wave 2.
+//
+// Detection: the `.idea/` directory is the canonical JetBrains project
+// marker — every JetBrains IDE creates it on first open. The presence
+// of `.idea/` alone is enough to identify the user as a JetBrains
+// user; we don't require `.junie/` to pre-exist because part of this
+// target's value is bootstrapping the directory for new adopters.
+//
+// Path: project-local only. JetBrains AI Assistant's global-rules
+// path varies per IDE (preferences UI rather than a stable filesystem
+// path), so SupportsGlobal stays false — pincher init --global
+// against this target is an error, matching the cursor / windsurf /
+// aider pattern. Users who want global JetBrains rules add them via
+// the IDE's Preferences > Tools > AI Assistant settings.
+//
+// Writer: MergePolicyBlockBare (no front-matter header — the file is
+// plain markdown that AI Assistant inlines into its system prompt
+// when the file exists).
+
+var JetBrainsTarget = Target{
+	Name:     "jetbrains",
+	Describe: "JetBrains AI Assistant: ./.idea/.junie/guidelines.md (IntelliJ IDEA, PyCharm, GoLand, WebStorm, etc.)",
+	PathFn: func(cwd string, global bool) (string, error) {
+		if global {
+			return "", fmt.Errorf("jetbrains target is project-only — global rules are configured via the IDE's Preferences > Tools > AI Assistant UI, not a stable filesystem path")
+		}
+		return filepath.Join(cwd, ".idea", ".junie", "guidelines.md"), nil
+	},
+	DetectFn: func(cwd string) bool {
+		// `.idea/` is the JetBrains project marker — every JetBrains
+		// IDE creates it on first open of a project. Presence alone
+		// confirms a JetBrains user; .junie/ subdir may or may not
+		// exist yet (writing the target bootstraps it).
+		_, err := os.Stat(filepath.Join(cwd, ".idea"))
+		return err == nil
+	},
+	WriteFn: MergePolicyBlockBare,
 }

@@ -100,6 +100,7 @@ pincher init --target=cursor             # .cursor/rules/pincher.mdc
 pincher init --target=codex              # ~/.codex/config.toml (writes MCP server block)
 pincher init --target=vscode             # .github/copilot-instructions.md (Copilot rules)
 pincher init --target=vscode-mcp         # .vscode/mcp.json (Copilot Chat MCP server)
+pincher init --target=jetbrains          # .idea/.junie/guidelines.md (IntelliJ IDEA, PyCharm, GoLand, WebStorm)
 pincher init --target=detect             # auto-detect from marker files in cwd
 
 # 3. Index your project

@@ -35,7 +35,7 @@ func withHome(t *testing.T, dir string) {
 }
 
 func TestInitTargets_RegistryShape(t *testing.T) {
-	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex", "zed", "gemini", "warp", "vscode", "vscode-mcp"}
+	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex", "zed", "gemini", "warp", "vscode", "vscode-mcp", "jetbrains"}
 	if len(AllTargets) != len(want) {
 		t.Fatalf("registry has %d targets, want %d", len(AllTargets), len(want))
 	}
@@ -385,5 +385,73 @@ func TestPlan_ProducesPlanWithoutWriting(t *testing.T) {
 func TestPolicyMarkdown_NotEmpty(t *testing.T) {
 	if len(strings.TrimSpace(PolicyMarkdown)) == 0 {
 		t.Fatal("embedded PolicyMarkdown is empty; init() should have panicked at package load")
+	}
+}
+
+// ─── jetbrains (.idea/.junie/guidelines.md) ──────────────────────────────────
+// #1335 v0.76 parity wave 2.
+
+// Positive: PathFn produces the expected project-relative path.
+func TestJetBrainsTarget_PathFn_ProjectLocal(t *testing.T) {
+	cwd := "/proj/myrepo"
+	got, err := JetBrainsTarget.PathFn(cwd, false)
+	if err != nil {
+		t.Fatalf("PathFn: %v", err)
+	}
+	want := filepath.Join(cwd, ".idea", ".junie", "guidelines.md")
+	if got != want {
+		t.Errorf("PathFn = %q, want %q", got, want)
+	}
+}
+
+// Negative: --global is rejected loudly. Pre-fix a silent fallback
+// to ./.idea/... would mask a misconfigured invocation; an error
+// surfaces the constraint.
+func TestJetBrainsTarget_PathFn_GlobalRejected(t *testing.T) {
+	_, err := JetBrainsTarget.PathFn("/proj/x", true)
+	if err == nil {
+		t.Fatal("expected error for --global, got nil")
+	}
+	if !strings.Contains(err.Error(), "project-only") {
+		t.Errorf("error should explain the constraint; got: %v", err)
+	}
+}
+
+// Positive: detection fires on a directory containing .idea/, which
+// is the universal JetBrains project marker.
+func TestJetBrainsTarget_DetectFn_FiresOnIdeaDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".idea"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if !JetBrainsTarget.DetectFn(dir) {
+		t.Error("DetectFn returned false despite .idea/ being present")
+	}
+}
+
+// Negative: no .idea/ means not a JetBrains project.
+func TestJetBrainsTarget_DetectFn_FalseOnNonJetBrainsDir(t *testing.T) {
+	dir := t.TempDir()
+	if JetBrainsTarget.DetectFn(dir) {
+		t.Error("DetectFn returned true on a directory without .idea/")
+	}
+}
+
+// Cross-check: writer is MergePolicyBlockBare (same as zed/gemini —
+// plain markdown, no front-matter). Two writes don't duplicate.
+func TestJetBrainsTarget_WriteIdempotent(t *testing.T) {
+	out1, action1 := JetBrainsTarget.WriteFn("", "test policy body")
+	if action1 != "wrote" {
+		t.Errorf("first action = %q, want wrote", action1)
+	}
+	if !strings.Contains(out1, "test policy body") {
+		t.Error("first write missing policy body")
+	}
+	out2, action2 := JetBrainsTarget.WriteFn(out1, "test policy body")
+	if action2 == "wrote" {
+		t.Errorf("second action = %q, expected update/replace not wrote", action2)
+	}
+	if strings.Count(out2, MarkerStart) != 1 {
+		t.Errorf("second write created %d marker blocks, want exactly 1 (idempotent replace)", strings.Count(out2, MarkerStart))
 	}
 }
