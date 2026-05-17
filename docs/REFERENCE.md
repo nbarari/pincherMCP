@@ -11,7 +11,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
   - [Three-layer storage](#three-layer-storage)
   - [pinchQL query routing](#pinchql-query-routing)
   - [Data flow: index to query](#data-flow-index-to-query)
-- [The 22 MCP tools](#the-22-mcp-tools)
+- [The 23 MCP tools](#the-23-mcp-tools)
   - [Stable symbol IDs](#stable-symbol-ids)
   - [Field projection](#field-projection)
   - [Extraction confidence](#extraction-confidence)
@@ -56,7 +56,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
 ┌───────────────────────┐          ┌───────────────────────────┐
 │  pincher (MCP process)│          │  pincher --http :8080     │
 │                       │          │  (dashboard / REST)       │
-│  • 22 MCP tools       │          │                           │
+│  • 23 MCP tools       │          │                           │
 │  • idx.Watch()        │          │  • POST /v1/{tool}        │
 │  • SessionFlusher     │          │  • GET /v1/dashboard      │
 │    (flush every 10 s) │          │  • GET /v1/openapi.json   │
@@ -173,7 +173,7 @@ Project-scoped paths — `search`, `symbol`/`symbols` when `project=` is passed,
 
 ---
 
-## The 22 MCP tools
+## The 23 MCP tools
 
 All latencies measured on this codebase. Token counts use cl100k_base BPE — the same tokenizer family as Claude.
 
@@ -424,7 +424,7 @@ Multiple pincher processes can safely share one data directory. Each `Index()` r
 
 ## HTTP REST API
 
-All 22 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
+All 23 tools are available via `POST /v1/{tool}` with a JSON body. Run alongside MCP stdio — no either/or.
 
 ```bash
 # Start with both transports
@@ -467,7 +467,7 @@ Responses compress ~65% with `Accept-Encoding: gzip`. Tested clients: curl, Pyth
 | `/v1/dashboard` | GET | No | Self-contained HTML dashboard (stats, search, project cards, sparkline). No external deps. |
 | `/v1/dashboard.css` | GET | No | Dashboard stylesheet. Served separately so CSP can drop `'unsafe-inline'`. |
 | `/v1/dashboard.js` | GET | No | Dashboard JavaScript. Same CSP rationale. |
-| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 22 tool endpoints + the GET routes. Import into Postman or Cursor. |
+| `/v1/openapi.json` | GET | No | OpenAPI 3.1 spec covering all 23 tool endpoints + the GET routes. Import into Postman or Cursor. |
 | `/v1/stats` | GET | Yes | Current session + all-time savings as JSON. |
 | `/v1/sessions` | GET | Yes | Per-session history, last 90 sessions, sorted by recency. |
 | `/v1/projects` | GET | Yes | All indexed projects with file/symbol/edge counts. |
@@ -776,7 +776,7 @@ pincherMCP/
 │   │   ├── bloat_trap.go         # IsBloatTrap: refuse filesystem root + $HOME;
 │   │   │                         # hook mode also requires a project marker
 │   │   └── lockfile.go           # Cross-process project lockfile w/ stale reclaim
-│   └── server/server.go          # 22 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
+│   └── server/server.go          # 23 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
 │                                 # basepath / reverse-proxy support, sessions persistence
 └── go.mod
 ```
@@ -832,7 +832,7 @@ The README's [Roadmap section](../README.md#roadmap) is the single source of tru
 
 ### v1.0 — Stable API
 
-- Tool schemas frozen — no breaking changes to the 22 tool I/O shapes after this.
+- Tool schemas frozen — no breaking changes to the 23 tool I/O shapes after this.
 - Symbol-ID format frozen — `{file_path}::{qualified_name}#{kind}` is the contract.
 - HTTP REST surface frozen — `POST /v1/{tool}`, basepath/trust-proxy/rate-limit/SSRF behaviours all locked.
 - `SECURITY.md` — documented threat model.

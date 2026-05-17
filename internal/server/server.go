@@ -1,4 +1,4 @@
-// Package server implements the pincherMCP MCP server with all 22 tools.
+// Package server implements the pincherMCP MCP server with all 23 tools.
 //
 // Every tool response includes a "_meta" envelope:
 //
@@ -345,7 +345,7 @@ type projectIDCacheEntry struct {
 
 const projectIDCacheTTL = 60 * time.Second
 
-// New creates and registers all 22 MCP tools.
+// New creates and registers all 23 MCP tools.
 func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 	now := time.Now()
 	s := &Server{
@@ -3011,7 +3011,7 @@ func computeCapabilities(s *Server) []string {
 		"supervised",
 
 		// All operator/admin tools agent-callable via MCP (v0.52,
-		// reverses #624). Routers can call any of the 22 tools
+		// reverses #624). Routers can call any of the 23 tools
 		// through MCP without falling back to HTTP.
 		"operator_tools_on_mcp",
 
