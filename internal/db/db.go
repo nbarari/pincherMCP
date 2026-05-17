@@ -2242,7 +2242,17 @@ type Project struct {
 	// falls back to a short commit SHA. Doctor uses this to surface a
 	// stale-index advisory when the user's checked-out branch has
 	// drifted from the last-indexed branch.
-	CurrentBranch string `json:"current_branch,omitempty"`
+	//
+	// JSON tag is `last_indexed_branch` (renamed from `current_branch`
+	// in #1388 — pre-1.0 surface clean-up). The Go field name stays
+	// `CurrentBranch` for internal source-compat with the dozens of
+	// call sites that read it; only the wire format changes. The DB
+	// column also stays `current_branch` (internal-only, never
+	// surfaces to MCP / HTTP consumers). The original name read like
+	// "what branch IS the project on right now" but actually meant
+	// "what branch was the project last indexed on" — every new
+	// integrator would misread it.
+	CurrentBranch string `json:"last_indexed_branch,omitempty"`
 }
 
 // SearchResult is a FTS5 match returned by SearchSymbols.

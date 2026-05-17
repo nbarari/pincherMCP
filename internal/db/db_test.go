@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3578,5 +3579,46 @@ func TestRebuildFTS_EmptyDB(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("empty rebuild rows = %d, want 0", rows)
+	}
+}
+
+// TestProject_JSONShape_LastIndexedBranch (#1388) pins the JSON wire
+// shape of the Project struct: the Go field `CurrentBranch` MUST
+// marshal as `last_indexed_branch`, NOT the old `current_branch`. The
+// rename closes the misreading that "current_branch" looks like "what
+// branch IS the project on now" when it actually means "what branch
+// was the project last indexed against." The DB column name and Go
+// field name are deliberately left as-is — only the wire JSON tag
+// changes.
+//
+// When the branch string is empty (non-git tree), `omitempty` drops
+// the field entirely. When set, the field is named
+// `last_indexed_branch` and the old name MUST NOT appear.
+func TestProject_JSONShape_LastIndexedBranch(t *testing.T) {
+	p := Project{
+		ID: "p1", Path: "/p", Name: "demo",
+		IndexedAt:     time.Unix(0, 0),
+		CurrentBranch: "feat/foo",
+	}
+	blob, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := string(blob)
+	if !strings.Contains(got, `"last_indexed_branch":"feat/foo"`) {
+		t.Errorf("Project JSON missing last_indexed_branch=feat/foo:\n%s", got)
+	}
+	if strings.Contains(got, `"current_branch"`) {
+		t.Errorf("Project JSON still emits the old current_branch tag (#1388 rename incomplete):\n%s", got)
+	}
+
+	// omitempty: empty branch drops the field entirely.
+	pEmpty := Project{ID: "p1", Path: "/p", Name: "demo", IndexedAt: time.Unix(0, 0)}
+	blobEmpty, err := json.Marshal(pEmpty)
+	if err != nil {
+		t.Fatalf("Marshal empty: %v", err)
+	}
+	if strings.Contains(string(blobEmpty), "last_indexed_branch") {
+		t.Errorf("empty-branch Project emitted last_indexed_branch (should omitempty):\n%s", blobEmpty)
 	}
 }
