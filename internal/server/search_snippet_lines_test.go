@@ -57,9 +57,37 @@ func TestSearch_SnippetLinesZero_ReturnsEmptySnippet(t *testing.T) {
 	}
 }
 
-// Positive: snippet_lines default (omitted) keeps the historical
-// shape — back-compat for callers that depend on snippet presence.
-func TestSearch_SnippetLinesDefault_KeepsHistoricalShape(t *testing.T) {
+// Positive: explicit snippet_lines=5 returns a snippet field even on
+// an exact-identifier query (override of the new query-aware default).
+// Pins the explicit-override path.
+func TestSearch_SnippetLinesExplicitOverridesQueryAwareDefault(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	seedSearchTestSymbol(t, store)
+
+	res, err := srv.handleSearch(context.Background(), &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "search", Arguments: []byte(
+			`{"query":"handleSearch","project":"p","snippet_lines":5}`)},
+	})
+	if err != nil {
+		t.Fatalf("handleSearch: %v", err)
+	}
+	body := textOf(t, res)
+	if !strings.Contains(body, `"snippet"`) {
+		t.Errorf("snippet field missing with explicit snippet_lines=5; got body: %s", body)
+	}
+	if strings.Contains(body, "snippet_lines=") {
+		t.Errorf("snippet_lines=5 should not clamp; got body: %s", body)
+	}
+}
+
+// Cross-check: query-aware default for the exact-identifier branch.
+// Single-token, no-wildcards, no-spaces, no-quotes query defaults to
+// snippet_lines=0. Same heuristic as min_confidence's query-aware
+// default per #247. The multi-word/phrase/wildcard branch (default
+// 5) is verified by the existing explicit-override test paired
+// with the clamp tests — there's no FTS5 hit on a test corpus
+// without source bodies to assert against directly.
+func TestSearch_SnippetLinesQueryAwareDefault_ExactIdentifier(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	seedSearchTestSymbol(t, store)
 
@@ -68,11 +96,10 @@ func TestSearch_SnippetLinesDefault_KeepsHistoricalShape(t *testing.T) {
 			`{"query":"handleSearch","project":"p"}`)},
 	})
 	if err != nil {
-		t.Fatalf("handleSearch: %v", err)
+		t.Fatalf("handleSearch (exact-id): %v", err)
 	}
-	body := textOf(t, res)
-	if !strings.Contains(body, `"snippet"`) {
-		t.Errorf("snippet field missing on default call; got body: %s", body)
+	if body := textOf(t, res); !strings.Contains(body, `"snippet":""`) {
+		t.Errorf("exact-identifier query should default snippet_lines=0; got body: %s", body)
 	}
 }
 

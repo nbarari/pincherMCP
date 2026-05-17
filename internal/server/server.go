@@ -3417,7 +3417,7 @@ func (s *Server) registerTools() {
 				"fields":{"type":"string","description":"Comma-separated fields to include in each result, e.g. 'id,name,file_path'. Omit for all fields. Use to reduce token usage when you only need IDs or signatures."},
 				"min_confidence":{"type":"number","description":"Minimum extraction_confidence (0.0-1.0). Default is query-aware (#247 #5): exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0.0; phrase / wildcard / multi-word queries default to 0.71. corpus='docs' also defaults to 0.0 regardless of query shape — Markdown section symbols are the intentional target on docs searches, not noise to filter out. Rationale for 0.71 on phrase/wildcard code queries: filters bottom-floor doc-section symbols that can BM25-match wide queries when they cross the corpus boundary; an exact-identifier query can't legitimately match doc-section noise so the floor isn't needed. Set explicitly to override either default. Inclusive: a symbol scored at or above the threshold IS returned."},
 				"compact":{"type":"boolean","description":"#1226: thin-client envelope. Drops per-hit extraction_confidence + language + snippet plus the top-level confidence_distribution. Default false preserves the current shape for dashboard / dogfood / quality-aware consumers. Compact also skips the per-hit snippet disk read entirely — the real perf win on bulk searches. The thin-client minimum shape is {id, name, qualified_name, kind, file_path, start_line, end_line, signature, score} per hit — enough to drive a follow-up symbol/context/trace call. Mirrors #1225's trace compact naming."},
-				"snippet_lines":{"type":"integer","description":"#1091: max source lines included in each result's snippet. Default 5. Pass 0 to skip the per-result disk read entirely when the agent already knows what it's looking for (exact-identifier queries where the snippet is dead weight) — saves ~75-100 tokens per result. Pass up to 20 for triage queries that need more context. Clamped to [0, 20] with a warning when out of range. The fields= projection's snippet-suppression still pays the read cost; snippet_lines=0 is the cleaner skip."}
+				"snippet_lines":{"type":"integer","description":"#1091: max source lines included in each result's snippet. Default is QUERY-AWARE: exact-identifier queries (single token, no wildcards/spaces/quotes) default to 0 (snippet is dead weight when the agent knows the target name); phrase / wildcard / multi-word queries default to 5 (triage needs context). Same heuristic as min_confidence's query-aware default (#247). Pass explicitly to override either default. Pass up to 20 for deep triage. Clamped to [0, 20] with a warning when out of range. The fields= projection's snippet-suppression still pays the read cost; snippet_lines=0 is the cleaner skip."}
 			}
 		}`),
 	}, s.handleSearch)
@@ -4982,10 +4982,19 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// #1091 v0.67: snippet_lines knob. Lets callers skip the per-result
 	// disk read entirely (snippet_lines=0) when the agent already knows
 	// what it's looking for, or extend the snippet up to 20 lines for
-	// triage queries. Default 5 preserves the historical behaviour.
+	// triage queries. Default is QUERY-AWARE (Option B per #1091): an
+	// exact-identifier query (single token, no wildcards/spaces/quotes)
+	// defaults to 0 because the agent already knows the target name and
+	// the snippet is dead weight; phrase / wildcard / multi-word queries
+	// keep the historical 5-line default for triage. The same heuristic
+	// drives the existing min_confidence query-aware default (#247).
 	// Clamped to [0, 20] silently — out-of-range values surface a
 	// warning rather than erroring (same shape as other clamps).
-	snippetLinesReq := intArg(args, "snippet_lines", 5)
+	snippetLinesDefault := 5
+	if isExactIdentifierQuery(query) {
+		snippetLinesDefault = 0
+	}
+	snippetLinesReq := intArg(args, "snippet_lines", snippetLinesDefault)
 	if snippetLinesReq < 0 {
 		searchClampWarnings = append(searchClampWarnings,
 			fmt.Sprintf("snippet_lines=%d clamped to 0 (must be >= 0)", snippetLinesReq))
