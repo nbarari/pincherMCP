@@ -514,6 +514,94 @@ func (s *Server) StartSessionFlusher(ctx context.Context) {
 	}()
 }
 
+// StartSchemaDriftWatcher launches a background goroutine that
+// periodically compares the DB's stored schema_version against the
+// running binary's compiled-in db.CurrentSchemaVersion(). If the DB
+// has been migrated past what this binary understands — typically
+// because a sibling pincher process (or a `pincher index` CLI built
+// from a newer source tree) ran a migration the running MCP isn't
+// aware of — the watcher logs loudly and exits the process so
+// supervised mode brings up a fresh instance that either understands
+// the new schema or fails informatively at startup via the existing
+// db.migrate() guard. #1374.
+//
+// Why this matters: the binary's _meta.capabilities tag
+// `schema_v$(db.CurrentSchemaVersion())` is computed once at boot
+// from the compiled-in schemaMigrations slice. If the DB schema
+// advances under the running process, capabilities still advertises
+// the binary's compile-time head (now stale relative to what's on
+// disk). The migrate-on-open guard at db.go:1488 catches this only
+// at the next startup; without periodic re-check, a long-running
+// process serves requests against a DB it doesn't fully understand
+// indefinitely.
+//
+// Period: 60s. The drift event is rare (only happens when out-of-
+// process tooling migrates the DB under a running server) and the
+// remediation (exit + supervised respawn) is heavy, so a slow poll
+// is the right shape. A SELECT against the single-row schema_version
+// table is microseconds.
+//
+// Cancelled via ctx (same lifecycle as StartSessionFlusher). On exit
+// from the watcher, the process exits with code 1 — supervised mode
+// treats that as a crash and respawns; bare CLI runs surface the
+// error to the operator.
+func (s *Server) StartSchemaDriftWatcher(ctx context.Context) {
+	s.startSchemaDriftWatcher(ctx, 60*time.Second, func() {
+		// Exit cleanly so the supervisor's auto-respawn picks us up.
+		// The next process opens the DB, hits the migrate guard, and
+		// either succeeds (new binary understands the new schema) or
+		// surfaces the "newer than this binary understands — upgrade
+		// pincher" error.
+		os.Exit(1)
+	})
+}
+
+// startSchemaDriftWatcher is the testable inner form: exposes the poll
+// interval and the drift-action callback so tests can drive the
+// goroutine without triggering os.Exit. Live callers go through
+// StartSchemaDriftWatcher which hard-codes the 60s interval and the
+// os.Exit(1) action.
+func (s *Server) startSchemaDriftWatcher(ctx context.Context, interval time.Duration, onDrift func()) {
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		expected := db.CurrentSchemaVersion()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if s.detectSchemaDrift(expected) {
+					onDrift()
+					return // caller decides whether to exit; either way, stop polling
+				}
+			}
+		}
+	}()
+}
+
+// detectSchemaDrift returns true when the DB's stored schema_version
+// exceeds expected (the binary's compile-time head). Factored out of
+// StartSchemaDriftWatcher so the comparison logic can be unit-tested
+// without invoking os.Exit. A read error is NOT drift — return false
+// so a transient DB hiccup doesn't trigger a respawn loop. The next
+// poll tick (60s later) retries; a persistent read failure surfaces
+// via the /v1/health probe instead.
+func (s *Server) detectSchemaDrift(expected int) bool {
+	var stored int
+	if err := s.store.DB().QueryRow(`SELECT version FROM schema_version`).Scan(&stored); err != nil {
+		return false
+	}
+	if stored > expected {
+		slog.Error("pincher.schema_drift.detected",
+			"binary_schema_version", expected,
+			"db_schema_version", stored,
+			"action", "exiting so supervised mode can respawn against the migrated DB")
+		return true
+	}
+	return false
+}
+
 // hasHTTPPeer reports whether another pincher process has flushed an
 // http_url-bearing sessions row within httpPeerStaleAfter. Used by the
 // adaptive session flusher (#204) to drop to sub-second cadence when a

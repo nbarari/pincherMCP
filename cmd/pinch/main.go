@@ -249,6 +249,13 @@ func main() {
 	// Start background file watcher and session persistence flusher
 	go idx.Watch(ctx)
 	srv.StartSessionFlusher(ctx)
+	// #1374: detect out-of-process schema migrations under a running
+	// MCP server and exit so supervised mode respawns against the
+	// migrated DB. Without this, a long-running process can advertise
+	// `schema_v$(binary)` while the DB has been migrated past it by a
+	// sibling tool — capabilities lie, and write paths run against
+	// shape the binary doesn't fully understand.
+	srv.StartSchemaDriftWatcher(ctx)
 
 	// Optionally run HTTP server for platform-agnostic access.
 	if *httpAddr != "" {
