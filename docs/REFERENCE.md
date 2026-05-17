@@ -32,6 +32,8 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
   - [`pincher web`](#pincher-web)
   - [`pincher init`](#pincher-init)
   - [`pincher project`](#pincher-project)
+  - [`pincher vacuum`](#pincher-vacuum)
+  - [`pincher bench`](#pincher-bench)
 - [CLI flags](#cli-flags)
 - [Environment variables](#environment-variables)
 - [Data directory](#data-directory)
@@ -677,6 +679,24 @@ pincher vacuum --json                     # JSON receipt: bytes_before / bytes_a
 ```
 
 SQLite does not shrink the database file when rows are deleted — `pincher project rm` / `prune-stale` free pages internally but the file stays large. `pincher vacuum` rewrites the file to reclaim that space. It is a deliberate, explicit CLI step (VACUUM holds an exclusive lock for the duration) kept out of the hot MCP path; run it after a prune, when no agent is mid-query.
+
+### `pincher bench`
+
+```bash
+pincher bench                             # bench largest project, 20 samples, text output
+pincher bench --project ID                # bench a specific project
+pincher bench --n 50 --depth 3            # more samples, deeper trace
+pincher bench --json                      # CI-friendly structured output
+pincher bench --seed 42                   # reproducible sample set
+```
+
+Falsifiable token-savings measurement against the user's own indexed corpus (#1263 §1). Runs three tool shapes (search / context / trace) against a random sample of edge-bearing Function/Method symbols, computes a full-file Read baseline for each touched file (what an agent without pincher would have paid), and reports per-tool p50/p95 latency plus actual-vs-baseline tokens plus a savings percentage.
+
+Distinct from `make bench` / `make corpus-bench` (internal perf gates) and from the session-stats box (which reports cumulative `tokens_saved` against an assumed baseline). `pincher bench` is the artifact you can run on YOUR codebase to answer "does pincher actually save me tokens on my project?" — the synthetic pincher-repo numbers in [Why it matters](https://kwad77.github.io/pincher/#why-it-matters) are easy to dismiss; this is the local proof.
+
+Baseline model: search baseline = sum of unique file sizes across every result file (Grep + N×Read); context baseline = full file bytes of the symbol's file (cat); trace baseline = sum of unique file sizes across every touched symbol (N×Read while walking callers). Actual = JSON-serialized response bytes/4 — the same heuristic pincher's `tokens_used` envelope uses on every MCP response, so bench savings line up with the session-stats box.
+
+Per #1263 §2 (canonical workflow corpus + comparator implementations vs Sourcegraph CLI etc.) rolls forward to v0.69+; this v0.68 cut is the runs-on-your-own-project minimum.
 
 ---
 
