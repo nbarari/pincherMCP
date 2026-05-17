@@ -1,7 +1,7 @@
 [
   {
     "name": "adr",
-    "description": "**Use to record decisions/conventions/gotchas** that should survive across sessions. Persistent project knowledge store. Actions: `set` (store), `get` (retrieve), `list` (all entries), `delete`. Examples: `adr set PURPOSE 'payment processing service'`; `adr set STACK 'Go+SQLite+Redis'`; `adr list` to recall everything stored. Call `adr list` early in unfamiliar work — prior agents' notes often save a `search` chain.",
+    "description": "**Use to record decisions/conventions/gotchas** that should survive across sessions. Persistent project knowledge store. Actions: `set` (store), `get` (retrieve), `list` (all entries), `delete`, `export` (render as Markdown for piping into docs/adr/). Examples: `adr set PURPOSE 'payment processing service'`; `adr set STACK 'Go+SQLite+Redis'`; `adr list` to recall everything stored; `adr action=export` to dump the project's runtime ADRs as one Markdown document (one H2 per key, deterministic order). Call `adr list` early in unfamiliar work — prior agents' notes often save a `search` chain.",
     "input_schema": {
       "properties": {
         "action": {
@@ -9,7 +9,8 @@
             "get",
             "set",
             "list",
-            "delete"
+            "delete",
+            "export"
           ],
           "type": "string"
         },

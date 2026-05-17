@@ -3627,10 +3627,10 @@ func (s *Server) registerTools() {
 	// only access defeated that workflow. HTTP route preserved.
 	s.addTool(&mcp.Tool{
 		Name:        "adr",
-		Description: "**Use to record decisions/conventions/gotchas** that should survive across sessions. Persistent project knowledge store. Actions: `set` (store), `get` (retrieve), `list` (all entries), `delete`. Examples: `adr set PURPOSE 'payment processing service'`; `adr set STACK 'Go+SQLite+Redis'`; `adr list` to recall everything stored. Call `adr list` early in unfamiliar work — prior agents' notes often save a `search` chain.",
+		Description: "**Use to record decisions/conventions/gotchas** that should survive across sessions. Persistent project knowledge store. Actions: `set` (store), `get` (retrieve), `list` (all entries), `delete`, `export` (render as Markdown for piping into docs/adr/). Examples: `adr set PURPOSE 'payment processing service'`; `adr set STACK 'Go+SQLite+Redis'`; `adr list` to recall everything stored; `adr action=export` to dump the project's runtime ADRs as one Markdown document (one H2 per key, deterministic order). Call `adr list` early in unfamiliar work — prior agents' notes often save a `search` chain.",
 		InputSchema: json.RawMessage(`{
 			"type":"object","required":["action"],"properties":{
-				"action":{"type":"string","enum":["get","set","list","delete"]},
+				"action":{"type":"string","enum":["get","set","list","delete","export"]},
 				"project":{"type":"string"},
 				"key":{"type":"string","description":"ADR key (e.g. 'PURPOSE', 'STACK', 'PATTERNS')"},
 				"value":{"type":"string","description":"ADR value (required for action=set)"}
@@ -9092,6 +9092,29 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		}
 		data = map[string]any{"entries": entries}
 
+	case "export":
+		// #1331 v0.72 slice 1: export the project's ADRs as a single
+		// Markdown document, one H2 section per key. Bridges runtime
+		// ADR storage (the SQLite adrs table — captures per-session
+		// decisions via the adr tool) and the cross-release ADR
+		// pattern at docs/adr/ established by ADR-0001 (#1260 §2).
+		//
+		// The maintainer pipes this through > docs/adr/runtime.md (or
+		// similar) when runtime decisions accumulate to the point of
+		// warranting a checked-in artifact. We deliberately don't
+		// write files server-side — that would create a tool-can-
+		// modify-the-repo footgun that's worse than letting the user
+		// pipe the result themselves.
+		entries, err := s.store.ListADRs(projectID)
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		data = map[string]any{
+			"format":   "markdown",
+			"markdown": renderADRsAsMarkdown(projectID, entries),
+			"count":    len(entries),
+		}
+
 	case "delete":
 		if key == "" {
 			return s.errResultRich("key is required for action=delete", adrUsageSteps), nil
@@ -9118,11 +9141,45 @@ func (s *Server) handleADR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 	default:
 		return s.errResultRich(
-			fmt.Sprintf("unknown action %q — valid actions: get, set, list, delete", action),
+			fmt.Sprintf("unknown action %q — valid actions: get, set, list, delete, export", action),
 			adrUsageSteps), nil
 	}
 
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
+}
+
+// renderADRsAsMarkdown renders the project's ADR map as a single
+// Markdown document, one H2 section per key. Keys sorted
+// lexicographically so re-runs produce identical output (avoids
+// useless diff churn if the user checks the export in). #1331 v0.72.
+func renderADRsAsMarkdown(projectID string, entries map[string]string) string {
+	var out []byte
+	out = append(out, fmt.Sprintf("# ADRs — project `%s`\n\n", projectID)...)
+	out = append(out, fmt.Sprintf("_Exported from the SQLite `adrs` table via `adr action=export`. %d entr%s._\n\n",
+		len(entries), pluralEntry(len(entries)))...)
+	if len(entries) == 0 {
+		out = append(out, "_No ADRs recorded yet. Use `adr action=set key=… value=…` to record decisions worth surfacing across sessions._\n"...)
+		return string(out)
+	}
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		out = append(out, fmt.Sprintf("## %s\n\n%s\n", k, entries[k])...)
+		if i < len(keys)-1 {
+			out = append(out, "\n---\n\n"...)
+		}
+	}
+	return string(out)
+}
+
+func pluralEntry(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 func (s *Server) handleHealth(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
