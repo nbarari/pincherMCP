@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -245,8 +246,51 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int) (*Do
 			r.Advisories = append(r.Advisories, a)
 		}
 	}
+	// #635 v0.67 follow-up: tool-mix entropy advisory. Mirrors the
+	// MCP doctor's logic in internal/server/admin.go.
+	if tallyRows, err := store.ToolCallStatsByTool(7*24*60*60, 200); err == nil {
+		if a := toolMixStuckAdvisory(tallyRows); a != "" {
+			r.Advisories = append(r.Advisories, a)
+		}
+	}
 
 	return r, nil
+}
+
+// toolMixStuckAdvisory mirrors internal/server/admin.go's copy.
+// Bounded-duplication convention documented on largeDBAdvisory.
+func toolMixStuckAdvisory(rows []db.ToolCallTallyRow) string {
+	const (
+		minCalls     = int64(100)
+		maxEntropy   = 1.0
+		minTop1Share = 0.80
+	)
+	var total int64
+	for _, r := range rows {
+		total += r.CallCount
+	}
+	if total < minCalls || len(rows) == 0 {
+		return ""
+	}
+	var entropy float64
+	for _, r := range rows {
+		p := float64(r.CallCount) / float64(total)
+		if p > 0 {
+			entropy += -p * (math.Log(p) / math.Ln2)
+		}
+	}
+	top1Share := float64(rows[0].CallCount) / float64(total)
+	if entropy >= maxEntropy || top1Share < minTop1Share {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Tool-mix entropy is %.2f bits over %d calls — the agent is essentially repeating one tool "+
+			"(%q at %.0f%% of all calls). Usually means a query that is not converging: the agent keeps "+
+			"re-issuing the same shape rather than triangulating. Inspect via the dashboard's "+
+			"Tool-Mix Health panel; consider whether the agent needs a wider initial probe "+
+			"(architecture / search) before drilling.",
+		entropy, total, rows[0].Tool, top1Share*100,
+	)
 }
 
 // payloadOutlierAdvisory mirrors internal/server/admin.go's copy.

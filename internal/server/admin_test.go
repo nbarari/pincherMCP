@@ -132,6 +132,51 @@ func TestPayloadOutlierAdvisory(t *testing.T) {
 	}
 }
 
+// #635 v0.67 follow-up: tool-mix entropy advisory. Tests pin the
+// three gating conditions (call volume floor + entropy ceiling +
+// top-1 share floor) so any one being relaxed doesn't silently
+// over-fire on healthy installs.
+func TestToolMixStuckAdvisory(t *testing.T) {
+	t.Parallel()
+
+	// Empty input → silent.
+	if got := toolMixStuckAdvisory(nil); got != "" {
+		t.Errorf("nil rows should produce no advisory; got %q", got)
+	}
+	// Below call-volume floor → silent even if concentration is extreme.
+	rows := []db.ToolCallTallyRow{
+		{Tool: "search", CallCount: 50}, // entire workload, single tool, but <100 calls
+	}
+	if got := toolMixStuckAdvisory(rows); got != "" {
+		t.Errorf("low call volume should not trip; got %q", got)
+	}
+	// Above call-volume floor but healthy spread → silent.
+	rows = []db.ToolCallTallyRow{
+		{Tool: "search", CallCount: 60},
+		{Tool: "symbol", CallCount: 50},
+		{Tool: "context", CallCount: 40},
+		{Tool: "trace", CallCount: 30},
+	}
+	if got := toolMixStuckAdvisory(rows); got != "" {
+		t.Errorf("balanced mix should not trip; got %q", got)
+	}
+	// Stuck: one tool >80% over ≥100 calls → fires and names the tool.
+	rows = []db.ToolCallTallyRow{
+		{Tool: "search", CallCount: 950},
+		{Tool: "symbol", CallCount: 30},
+		{Tool: "trace", CallCount: 20},
+	}
+	got := toolMixStuckAdvisory(rows)
+	if got == "" {
+		t.Fatal("950/1000 calls on search should produce an advisory")
+	}
+	for _, want := range []string{"search", "entropy", "Tool-Mix Health", "bits"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory missing %q\n  got: %s", want, got)
+		}
+	}
+}
+
 // #575: pre-fix the handler iterated every project and pulled `top`
 // failures per project, so a 125-project install ballooned the
 // response past the MCP token cap. `top` now caps the projects

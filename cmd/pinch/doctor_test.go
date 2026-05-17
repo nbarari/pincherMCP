@@ -325,6 +325,31 @@ func TestPayloadOutlierAdvisory_CLI(t *testing.T) {
 	}
 }
 
+// #635 v0.67 follow-up: tool-mix entropy advisory mirror for the CLI.
+func TestToolMixStuckAdvisory_CLI(t *testing.T) {
+	if got := toolMixStuckAdvisory(nil); got != "" {
+		t.Errorf("nil rows should produce no advisory; got %q", got)
+	}
+	// Volume floor: 50 calls < 100 floor.
+	if got := toolMixStuckAdvisory([]db.ToolCallTallyRow{
+		{Tool: "search", CallCount: 50},
+	}); got != "" {
+		t.Errorf("low call volume should not trip; got %q", got)
+	}
+	// Stuck scenario fires.
+	got := toolMixStuckAdvisory([]db.ToolCallTallyRow{
+		{Tool: "search", CallCount: 950},
+		{Tool: "symbol", CallCount: 30},
+		{Tool: "trace", CallCount: 20},
+	})
+	if got == "" {
+		t.Fatal("950/1000 calls on search should produce an advisory")
+	}
+	if !strings.Contains(got, "search") || !strings.Contains(got, "bits") {
+		t.Errorf("advisory must name the tool + bits unit; got: %s", got)
+	}
+}
+
 // TestSummarizeByReason_DescCountAlphaTie pins the rollup ordering: the
 // most common reason wins, ties break alphabetically so output is stable
 // across runs (map iteration order would otherwise jitter).

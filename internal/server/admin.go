@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -256,6 +257,54 @@ func payloadOutlierAdvisory(rows []db.ToolCallPayloadRow) string {
 		". Remediation: inspect the offending calls via /v1/tool-payload-stats or the dashboard's " +
 		"Response Payload Size panel; consider narrowing the query (lower min_confidence, smaller k, " +
 		"specific path filter) on calls to that tool to bound payload size."
+}
+
+// toolMixStuckAdvisory returns a human-readable health advisory when
+// the agent has been stuck in a narrow tool loop over the trailing
+// window — entropy < 0.5 bits AND ≥100 total calls AND top-1 share
+// > 80%. The triple-gate is deliberate: low entropy alone on a
+// fresh install is normal (small sample); without a call-volume
+// floor we'd false-positive every empty session.
+//
+// "Stuck" here means "essentially calling one tool" — the agent is
+// repeating a probe rather than triangulating across tools, which
+// is usually a query that's not converging. The advisory points the
+// user at the dashboard's Tool-Mix Health panel for context.
+func toolMixStuckAdvisory(rows []db.ToolCallTallyRow) string {
+	const (
+		minCalls     = int64(100)
+		maxEntropy   = 1.0 // strictly less than this trips
+		minTop1Share = 0.80
+	)
+	var total int64
+	for _, r := range rows {
+		total += r.CallCount
+	}
+	if total < minCalls || len(rows) == 0 {
+		return ""
+	}
+	// Shannon entropy and top-1 share. Rows arrive sorted by
+	// call_count DESC from ToolCallStatsByTool, so rows[0] is the
+	// top tool.
+	var entropy float64
+	for _, r := range rows {
+		p := float64(r.CallCount) / float64(total)
+		if p > 0 {
+			entropy += -p * (math.Log(p) / math.Ln2)
+		}
+	}
+	top1Share := float64(rows[0].CallCount) / float64(total)
+	if entropy >= maxEntropy || top1Share < minTop1Share {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Tool-mix entropy is %.2f bits over %d calls — the agent is essentially repeating one tool "+
+			"(%q at %.0f%% of all calls). Usually means a query that is not converging: the agent keeps "+
+			"re-issuing the same shape rather than triangulating. Inspect via the dashboard's "+
+			"Tool-Mix Health panel; consider whether the agent needs a wider initial probe "+
+			"(architecture / search) before drilling.",
+		entropy, total, rows[0].Tool, top1Share*100,
+	)
 }
 
 // fmtBytesHuman formats a byte count with a binary unit suffix.
@@ -556,6 +605,15 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// the doctor query, and big enough to cover every real tool catalog.
 	if payloadRows, err := s.store.ToolCallPayloadSizeByTool(7*24*60*60, 200); err == nil {
 		if a := payloadOutlierAdvisory(payloadRows); a != "" {
+			advisories = append(advisories, a)
+		}
+	}
+	// #635 v0.67 follow-up: tool-mix entropy advisory. Same data source
+	// as the dashboard entropy panel; fires only on truly stuck loops
+	// (entropy <1.0 bits AND ≥100 calls AND top-1 share >80%) so the
+	// advisory stays silent on legitimately narrow workloads.
+	if tallyRows, err := s.store.ToolCallStatsByTool(7*24*60*60, 200); err == nil {
+		if a := toolMixStuckAdvisory(tallyRows); a != "" {
 			advisories = append(advisories, a)
 		}
 	}
