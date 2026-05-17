@@ -1,0 +1,33 @@
+# openapi-generator config for the TypeScript SDK.
+# Run via scripts/generate-sdks.sh typescript.
+#
+# Generator choice: `typescript-fetch` — produces a fetch-based client
+# that runs in Node 18+ and modern browsers without an extra HTTP
+# library dependency. Alternatives considered:
+#
+#   - typescript-axios: pulls axios as runtime dep; not worth it when
+#     fetch is universal now.
+#   - typescript-node: emits CommonJS by default and dates the API;
+#     skipped in favour of typescript-fetch for ESM-native shape.
+#
+# packageName / npmName / npmVersion are populated from /v1/openapi.json's
+# info.title + info.version at generation time by the wrapper script —
+# the SDK version always tracks the running pincher's release tag.
+
+generatorName: typescript-fetch
+outputDir: sdks/typescript/generated
+
+additionalProperties:
+  npmName: '@pincher/sdk'
+  npmRepository: 'https://www.npmjs.com/package/@pincher/sdk'
+  supportsES6: true
+  withInterfaces: true
+  modelPropertyNaming: original
+  # Disable strict type-checking on response payloads so OpenAPI 3.1's
+  # nullable types don't require every caller to thread `| null`
+  # through their own types; the runtime checks the field anyway.
+  withoutRuntimeChecks: false
+  # Pin to typescript >= 5.0 for satisfies-narrowing in the example
+  # files. Older TypeScripts get a runtime type-error at the example
+  # but the SDK itself compiles back to ES2017 fine.
+  typescriptThreePlus: true

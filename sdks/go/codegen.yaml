@@ -1,0 +1,29 @@
+# openapi-generator config for the Go SDK.
+# Run via scripts/generate-sdks.sh go.
+#
+# Generator choice: `go` (the canonical OpenAPI-Generator Go template).
+# Produces an http.Client-based client; no third-party HTTP deps. The
+# generated module's go.mod targets Go 1.21 — broad enough for any
+# realistic adopter while still allowing generic-aware response types.
+#
+# packageName + module are populated from /v1/openapi.json's info.title
+# at generation time so the SDK version always tracks the running
+# pincher's release tag.
+
+generatorName: go
+outputDir: sdks/go/generated
+
+additionalProperties:
+  packageName: pinchersdk
+  packageVersion: 0.71.0
+  # The published module path. Users `go get` against this URL once the
+  # publish workflow (#1262) is wired. Until then, local consumption
+  # uses a `replace` directive against ./sdks/go/generated.
+  goImportAlias: pincher
+  isGoSubmodule: false
+  enumClassPrefix: true
+  hideGenerationTimestamp: true
+  # withGoCodegenComment leaves a "DO NOT EDIT" header on every file
+  # so a future contributor doesn't hand-patch the generated tree
+  # without first updating the codegen config (regen would clobber).
+  withGoCodegenComment: true

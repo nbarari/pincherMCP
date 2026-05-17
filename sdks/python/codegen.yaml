@@ -1,0 +1,28 @@
+# openapi-generator config for the Python SDK.
+# Run via scripts/generate-sdks.sh python.
+#
+# Generator choice: `python` (the official Python generator, not the
+# legacy `python-flask` or `python-experimental`). Produces a
+# urllib3-based client with pydantic v2 models — the de-facto modern
+# Python typing setup. Pydantic v2 is fast enough that the SDK
+# shouldn't add meaningful overhead to a pincher call.
+#
+# packageName / packageVersion come from /v1/openapi.json's
+# info.title + info.version at generation time.
+
+generatorName: python
+outputDir: sdks/python/generated
+
+additionalProperties:
+  packageName: pincher_sdk
+  projectName: pincher-sdk
+  packageUrl: 'https://pypi.org/project/pincher-sdk/'
+  # Pydantic v2 emits typed models that play well with FastAPI / mypy.
+  # The legacy attrs-style models are a worse default.
+  library: urllib3
+  generateSourceCodeOnly: false
+  # Keep the generated package's docstrings — codegen-generated
+  # docstrings mirror the OpenAPI summaries from the tool descriptions,
+  # which are themselves curated for agent consumption (see the v0.65
+  # description-honesty audit). Useful at the SDK call site too.
+  hideGenerationTimestamp: true

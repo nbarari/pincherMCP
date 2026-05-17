@@ -1,0 +1,10 @@
+# Generated SDK trees are regenerated from openapi.json on demand
+# via scripts/generate-sdks.sh — never commit them. The codegen
+# config under each language directory IS committed (it's the
+# canonical input to the generator).
+generated/
+*/generated/
+
+# openapi-generator default cache + lockfiles
+.openapi-generator/
+.openapi-generator-ignore

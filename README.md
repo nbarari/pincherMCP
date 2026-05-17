@@ -74,7 +74,7 @@ pincher is a **bedrock backend** — a reliable, local-first source of code-inte
 - **`_meta.capabilities`** advertises what this binary can actually do (e.g. `closure_tables`, `streamable_http`, `hook_check`) so a router doesn't have to parse version strings or guess from feature flags.
 - **`_meta.complexity_tier`** (`lite` / `standard` / `heavy`) per response lets a router pick the right model for the agent step that *consumes* the response — a 200-token `symbol` lookup is a different model assignment than a 50k-token `architecture` survey.
 - **`X-Request-ID`** correlation is threaded across HTTP / streamable-HTTP / stdio `_meta` / logs so distributed traces walk through pincher end-to-end.
-- **OpenAPI 3.1 at `/v1/openapi.json`** with per-tool `x-pincher-tier` typings; any MCP- or REST-shaped consumer can codegen against it.
+- **OpenAPI 3.1 at `/v1/openapi.json`** with per-tool `x-pincher-tier` typings; any MCP- or REST-shaped consumer can codegen against it. Codegen config + a `scripts/generate-sdks.sh` wrapper for TypeScript / Python / Go SDKs lives under [`sdks/`](sdks/) ([#1262](https://github.com/kwad77/pincher/issues/1262) — local-generation today, registry publishing pending the credentials wire-up).
 
 The bet is that *correctness* is the bedrock virtue. If pincher returns silently-wrong results — empty graphs that look populated, sorted rows that aren't, audit queries that don't address what was asked — every layer above has to wrap pincher in fallback paths or escape hatches, and the integration contract erodes. The roadmap below is mostly about closing those gaps so a router can hand work to pincher and trust the response shape.
 
