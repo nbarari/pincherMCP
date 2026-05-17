@@ -1175,6 +1175,45 @@ fun describe(x: Int): String {
 	}
 }
 
+// #1183 v0.67: `fun Type.method()` is Kotlin's extension-function
+// syntax. Pre-fix the regex captured `Type` as the function name
+// (since Type was the first identifier after `fun`), emitting fake
+// "String" / "List" / "Map" symbols and silently dropping the real
+// method name. Triple-shape test pins all three forms.
+func TestExtractKotlin_ExtensionFunctionCapturesRealName(t *testing.T) {
+	src := []byte(`fun String.toSlug(): String {
+    return this.lowercase()
+}
+
+fun List<Int>.firstOrDefault(default: Int): Int {
+    return if (isEmpty()) default else this[0]
+}
+
+fun regularFun(x: Int): Int = x + 1
+`)
+	result := Extract(src, "Kotlin", "m/Ext.kt")
+	byName := map[string]ExtractedSymbol{}
+	for _, s := range result.Symbols {
+		byName[s.Name] = s
+	}
+	// Collect names for error messages.
+	allNames := make([]string, 0, len(byName))
+	for k := range byName {
+		allNames = append(allNames, k)
+	}
+	for _, n := range []string{"toSlug", "firstOrDefault", "regularFun"} {
+		if _, ok := byName[n]; !ok {
+			t.Errorf("expected function %q to be extracted; got names %v", n, allNames)
+		}
+	}
+	// Negative: receiver type names must NOT be extracted as functions.
+	for _, n := range []string{"String", "List"} {
+		if sym, ok := byName[n]; ok && sym.Kind == "Function" {
+			t.Errorf("receiver type %q was mis-extracted as a Function (pre-fix bug)", n)
+		}
+	}
+}
+
 // #809: a declaration whose `{` sits on a continuation line — still
 // inside the parameter parens — must span the full braced body, not
 // stop at the first newline.

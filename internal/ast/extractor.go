@@ -2741,7 +2741,16 @@ func extractCSharp(source []byte, relPath string) *FileResult {
 }
 
 var kotlinRE = &regexExtractor{
-	funcRE:  regexp.MustCompile(`(?m)^\s*(?:public|private|internal|protected)?\s*(?:suspend\s+)?fun\s+(?P<name>[a-zA-Z][a-zA-Z0-9_]*)`),
+	// #1183 v0.67 (Kotlin parallel to Rust impl): `fun Type.method()`
+	// is Kotlin's extension-function syntax. Pre-fix the regex captured
+	// `Type` as the function name (since `Type` is the first identifier
+	// after `fun`), emitting fake "String" / "List" / "Map" / etc
+	// symbols and silently dropping the real method name. The optional
+	// `(?:[A-Z][A-Za-z0-9_]*(?:<[^>]*>)?\.)?` segment skips the
+	// receiver-type prefix (lowercase first char excluded to avoid
+	// false-eating valid lowercase method names that happen to be
+	// preceded by `fun `). Generics on the receiver tolerated.
+	funcRE: regexp.MustCompile(`(?m)^\s*(?:public|private|internal|protected)?\s*(?:suspend\s+)?fun\s+(?:[A-Z][A-Za-z0-9_]*(?:<[^>]*>)?\.)?(?P<name>[a-zA-Z][a-zA-Z0-9_]*)`),
 	classRE: regexp.MustCompile(`(?m)^(?:open\s+)?(?:data\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\(|:|\s)`),
 }
 
