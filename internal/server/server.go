@@ -3384,17 +3384,33 @@ func (s *Server) toolArgKeysFor(tool string) map[string]bool {
 	return s.toolArgKeys[tool]
 }
 
-// unknownArgs returns warning strings for any args key NOT declared in
+// unknownArgWarning is one structured-warning's worth of data about an
+// arg key the caller passed that isn't declared in the tool's
+// InputSchema (#499 / #1098 v0.71). Carries both the string form (for
+// the back-compat `_meta.warnings` slice) and the fields the structured
+// `_meta.warnings_v2` shape needs.
+type unknownArgWarning struct {
+	Message  string
+	Tool     string
+	UnknownK string
+	Accepted []string
+}
+
+// unknownArgs returns warning records for any args key NOT declared in
 // the tool's InputSchema.properties (#499). The same failure-as-pedagogy
 // pattern as #473's pinchQL warnings: silent ignore is the bug; surfacing
 // the typo is the fix. Returns nil when the tool's schema can't be
 // resolved (don't false-positive on schema parse errors).
-func (s *Server) unknownArgs(tool string, args map[string]any) []string {
+//
+// #1098 v0.71: returns []unknownArgWarning rather than []string so the
+// call site can emit BOTH the legacy string form and the new
+// structured warnings_v2 entry without re-parsing the message text.
+func (s *Server) unknownArgs(tool string, args map[string]any) []unknownArgWarning {
 	allowed := s.toolArgKeysFor(tool)
 	if allowed == nil || len(args) == 0 {
 		return nil
 	}
-	var warnings []string
+	var warnings []unknownArgWarning
 	for k := range args {
 		// #622: `verbose` is a universal meta-arg accepted by every tool
 		// — it controls _meta envelope shape (drops pedagogy-only
@@ -3420,13 +3436,15 @@ func (s *Server) unknownArgs(tool string, args map[string]any) []string {
 				accepted = append(accepted, a)
 			}
 			sort.Strings(accepted)
-			warnings = append(warnings, fmt.Sprintf(
-				"unknown arg %q for tool %q — accepted: %s",
-				k, tool, strings.Join(accepted, ", "),
-			))
+			warnings = append(warnings, unknownArgWarning{
+				Message:  fmt.Sprintf("unknown arg %q for tool %q — accepted: %s", k, tool, strings.Join(accepted, ", ")),
+				Tool:     tool,
+				UnknownK: k,
+				Accepted: accepted,
+			})
 		}
 	}
-	sort.Strings(warnings) // deterministic order for tests
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Message < warnings[j].Message })
 	return warnings
 }
 
@@ -11329,9 +11347,30 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 	// (the same failure-as-pedagogy pattern as #473's pinchQL warnings).
 	// Merge with any pre-existing warnings (the cypher engine puts its
 	// own here) — never overwrite.
-	if w := s.unknownArgs(tool, args); len(w) > 0 {
+	//
+	// #1098 v0.71: emit BOTH the legacy string form (back-compat) AND
+	// the new structured warnings_v2 entry side-by-side. The structured
+	// form carries `code="unknown_arg"`, a typed `data` payload with
+	// the unknown key + accepted list, so clients can auto-suggest
+	// corrections instead of regex-matching the prose.
+	if warns := s.unknownArgs(tool, args); len(warns) > 0 {
 		existing, _ := meta["warnings"].([]string)
-		meta["warnings"] = append(existing, w...)
+		v2, _ := meta["warnings_v2"].([]map[string]any)
+		for _, w := range warns {
+			existing = append(existing, w.Message)
+			v2 = append(v2, map[string]any{
+				"code":     "unknown_arg",
+				"severity": WarningSeverityWarning,
+				"message":  w.Message,
+				"data": map[string]any{
+					"tool":     w.Tool,
+					"unknown":  w.UnknownK,
+					"accepted": w.Accepted,
+				},
+			})
+		}
+		meta["warnings"] = existing
+		meta["warnings_v2"] = v2
 	}
 	// #1227: prune dogfood-only fields when the caller requested
 	// the lite envelope (env or per-call arg). Applied last so the
@@ -11952,6 +11991,13 @@ func projectableKeys(m map[string]any) []string {
 // attachWarning appends a non-fatal advisory to data["_meta"].warnings,
 // creating the _meta map / warnings slice as needed. Mirrors the
 // _meta.warnings convention used by search/list/trace clamp warnings.
+//
+// String-form back-compat: this remains the single-string entry point
+// and continues to populate `_meta.warnings: []string`. Callers that
+// want structured emit also call attachWarningStructured (#1098 v0.71;
+// side-by-side back-compat path the maintainer chose). The structured
+// form lives at `_meta.warnings_v2: []object` for one release cycle,
+// after which `warnings` deprecates and v2 is the wire shape.
 func attachWarning(data map[string]any, msg string) {
 	meta, _ := data["_meta"].(map[string]any)
 	if meta == nil {
@@ -11960,6 +12006,73 @@ func attachWarning(data map[string]any, msg string) {
 	}
 	warnings, _ := meta["warnings"].([]string)
 	meta["warnings"] = append(warnings, msg)
+}
+
+// WarningSeverity vocabulary for the structured warnings_v2 channel
+// (#1098 v0.71). Subset of MCP 2025-11-25 notifications/message
+// severities — same family so the two surfaces stay aligned if/when
+// #1085 lands the push channel.
+const (
+	WarningSeverityInfo    = "info"
+	WarningSeverityWarning = "warning"
+	WarningSeverityError   = "error"
+)
+
+// attachWarningStructured appends a structured advisory to
+// data["_meta"].warnings_v2 (#1098 v0.71). The structured entry carries
+// a stable machine-actionable `code`, a `severity` from the WarningSeverity
+// vocabulary, the human-readable `message`, and optional `data` payload
+// that clients can render or filter on.
+//
+// For back-compat during the v0.71 release cycle, the caller should ALSO
+// call attachWarning(data, message) — both fields are populated until
+// the string-form deprecation lands. The two helpers are deliberately
+// separate so a caller that doesn't yet have a structured shape worked
+// out can still emit the string and incrementally upgrade.
+//
+// Example:
+//
+//	attachWarning(data, "indexer mid-pass (12/55 files); results may be incomplete")
+//	attachWarningStructured(data,
+//	    "index_mid_pass", WarningSeverityWarning,
+//	    "indexer mid-pass (12/55 files); results may be incomplete",
+//	    map[string]any{"files_done": 12, "files_total": 55})
+//
+// `extra` may be nil; the field is omitted from the entry when nil.
+func attachWarningStructured(data map[string]any, code, severity, message string, extra map[string]any) {
+	meta, _ := data["_meta"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+		data["_meta"] = meta
+	}
+	entry := map[string]any{
+		"code":     code,
+		"severity": severity,
+		"message":  message,
+	}
+	if extra != nil {
+		entry["data"] = extra
+	}
+	v2, _ := meta["warnings_v2"].([]map[string]any)
+	meta["warnings_v2"] = append(v2, entry)
+}
+
+// setDiagnosisStructured sets data["diagnosis_v2"] — the structured
+// counterpart of the existing string `diagnosis` field (#1098 v0.71).
+// Mirrors the warnings_v2 shape: `code` + `message` + optional `data`.
+// Side-by-side with the existing string field for one release cycle.
+//
+// Callers continue to set `data["diagnosis"]` as a string for back-
+// compat; this helper attaches the structured form on top.
+func setDiagnosisStructured(data map[string]any, code, message string, extra map[string]any) {
+	entry := map[string]any{
+		"code":    code,
+		"message": message,
+	}
+	if extra != nil {
+		entry["data"] = extra
+	}
+	data["diagnosis_v2"] = entry
 }
 
 func intArg(args map[string]any, key string, def int) int {

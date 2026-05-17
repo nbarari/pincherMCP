@@ -22,15 +22,15 @@ func TestUnknownArgs_NeighborhoodDepthArg_Warns(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("expected warning for unknown arg 'depth' on neighborhood; got none")
 	}
-	if !strings.Contains(got[0], "depth") {
+	if !strings.Contains(got[0].Message,"depth") {
 		t.Errorf("warning should name the offending arg; got %q", got[0])
 	}
-	if !strings.Contains(got[0], "neighborhood") {
+	if !strings.Contains(got[0].Message,"neighborhood") {
 		t.Errorf("warning should name the tool; got %q", got[0])
 	}
 	// The hint should list at least one accepted key so the agent can
 	// self-correct.
-	if !strings.Contains(got[0], "accepted") {
+	if !strings.Contains(got[0].Message,"accepted") {
 		t.Errorf("warning should include 'accepted' key list; got %q", got[0])
 	}
 }
@@ -57,7 +57,7 @@ func TestUnknownArgs_SchemaToolWithToolArg_Warns(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("schema tool only accepts 'project'; 'tool' arg should warn")
 	}
-	if !strings.Contains(got[0], "tool") {
+	if !strings.Contains(got[0].Message,"tool") {
 		t.Errorf("warning should name 'tool' arg; got %q", got[0])
 	}
 }
