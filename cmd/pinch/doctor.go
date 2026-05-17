@@ -131,6 +131,16 @@ type DoctorFailureRow struct {
 	Reason     string `json:"reason"`
 	Details    string `json:"details"`
 	LastSeenAt string `json:"last_seen_at"`
+	// IsStale fires when last_seen_at predates the project's current
+	// indexed_at — meaning the row was recorded in a prior pass but the
+	// most-recent re-extraction of the same (project, file, reason) did
+	// NOT re-record it. PruneExtractionFailuresForFile (#1319) handles
+	// that case for files the indexer touched, but a project whose
+	// binary was upgraded and never re-indexed since still surfaces
+	// pre-upgrade rows here. Pre-fix the user couldn't distinguish
+	// \"happening now\" from \"awaiting re-index to clear\" — high
+	// alarm-fatigue surface in the doctor display. #1382.
+	IsStale bool `json:"is_stale,omitempty"`
 }
 
 type DoctorSlowQueryRow struct {
@@ -215,6 +225,7 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int) (*Do
 				Reason:     f.Reason,
 				Details:    f.Details,
 				LastSeenAt: f.LastSeenAt.Format(time.RFC3339),
+				IsStale:    isStaleFailure(f.LastSeenAt, p.IndexedAt),
 			})
 		}
 	}

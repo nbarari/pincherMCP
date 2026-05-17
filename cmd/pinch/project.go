@@ -146,6 +146,24 @@ func staleness(at *int, current int) (bool, string) {
 	return false, ""
 }
 
+// isStaleFailure reports whether an extraction_failures row was recorded
+// in a pre-current-indexed-at pass and is awaiting a fresh re-extraction
+// to either re-record or implicitly clear (via PruneExtractionFailuresForFile,
+// #1319). Cleared-but-not-re-indexed projects accumulate rows whose
+// last_seen_at predates the project's most-recent indexed_at — these are
+// what we surface with this tag (#1382). When indexedAt is the zero time
+// (project record missing the column for some reason), conservatively
+// return false so we don't false-positive.
+//
+// Mirrors `internal/server/admin.go::isStaleFailure` per the
+// bounded-duplication convention; the two must stay byte-identical.
+func isStaleFailure(failureLastSeen, indexedAt time.Time) bool {
+	if indexedAt.IsZero() {
+		return false
+	}
+	return failureLastSeen.Before(indexedAt)
+}
+
 // formatProjectList renders the table form used by `pincher project list`.
 // Stale projects (schema_version_at_index < current, or NULL) get a `[stale]`
 // suffix appended to their name so the gap nbarari hit (#236) is visible

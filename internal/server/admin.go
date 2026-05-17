@@ -744,6 +744,21 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 		Reason     string `json:"reason"`
 		Details    string `json:"details"`
 		LastSeenAt string `json:"last_seen_at"`
+		// IsStale fires when last_seen_at predates the project's
+		// current indexed_at — the row was recorded in a prior pass
+		// but the most-recent re-extraction did NOT re-record it.
+		// PruneExtractionFailuresForFile (#1319) handles that case
+		// for files the indexer touched, but a project whose binary
+		// was upgraded and never re-indexed since still surfaces
+		// pre-upgrade rows here. Distinguishes "happening now" from
+		// "awaiting re-index to clear" — #1382.
+		IsStale bool `json:"is_stale,omitempty"`
+	}
+	// Pre-build project indexed_at lookup so staleness comparison is O(1)
+	// per failure row instead of O(plist).
+	indexedAtByID := make(map[string]time.Time, len(plist))
+	for _, p := range plist {
+		indexedAtByID[p.ID] = p.IndexedAt
 	}
 	failures := []failureRow{}
 	cutoff := time.Now().Add(-time.Duration(lookbackHours) * time.Hour)
@@ -770,6 +785,7 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 				Reason:     f.Reason,
 				Details:    f.Details,
 				LastSeenAt: f.LastSeenAt.Format(time.RFC3339),
+				IsStale:    isStaleFailure(f.LastSeenAt, indexedAtByID[f.ProjectID]),
 			})
 		}
 	}
@@ -812,6 +828,24 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	data["slow_queries"] = slow
 
 	return s.jsonResultWithMeta(data, start, tool, args, 0), nil
+}
+
+// isStaleFailure reports whether an extraction_failures row was recorded
+// in a pre-current-indexed-at pass and is awaiting a fresh re-extraction
+// to either re-record or implicitly clear (via PruneExtractionFailuresForFile,
+// #1319). Cleared-but-not-re-indexed projects accumulate rows whose
+// last_seen_at predates the project's most-recent indexed_at — these are
+// what we surface with the IsStale tag in doctor output (#1382). When
+// indexedAt is the zero time (project record missing the column for some
+// reason), conservatively return false so we don't false-positive.
+//
+// Mirrors `cmd/pinch/project.go::isStaleFailure` per the
+// bounded-duplication convention; the two must stay byte-identical.
+func isStaleFailure(failureLastSeen, indexedAt time.Time) bool {
+	if indexedAt.IsZero() {
+		return false
+	}
+	return failureLastSeen.Before(indexedAt)
 }
 
 // handleRebuildFTS rebuilds every FTS5 index from the canonical symbols
