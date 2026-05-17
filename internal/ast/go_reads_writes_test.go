@@ -147,6 +147,62 @@ func F() {
 	}
 }
 
+// #1134 v0.67: `for _, x := range receiver.Field` must populate
+// the loop variable's BaseType from the file-level struct field map,
+// so dotted-name READS on the loop variable carry the right type and
+// the binding pass's isStructFieldRead suppression activates.
+//
+// Repro shape: a field access on a range element shares a name with
+// a project Method on a different type. Pre-fix the bare-name READS
+// edge had BaseType="" and false-bound to the method.
+func TestExtractGo_ReadsWrites_RangeOverSelectorFieldType(t *testing.T) {
+	src := []byte(`package p
+
+type pattern struct {
+	minHops int
+	maxHops int
+}
+
+type queryAST struct {
+	patterns []pattern
+}
+
+func (q *queryAST) minHops() int { return 1 }
+
+func collectWarnings(q *queryAST) []string {
+	var out []string
+	for _, pat := range q.patterns {
+		if pat.minHops <= 1 && pat.maxHops <= 1 {
+			out = append(out, "x")
+		}
+	}
+	return out
+}
+`)
+	edges := extractGoEdges(t, src)
+	// The READS edge for "minHops" inside collectWarnings should carry
+	// BaseType="pattern" (or "p.pattern") — i.e. extractor knows pat
+	// is a struct of type pattern. Without that, the binding pass
+	// false-binds to queryAST.minHops.
+	var minHopsRead *ExtractedEdge
+	for i := range edges {
+		e := &edges[i]
+		if e.FromQN == "p.collectWarnings" && e.ToName == "minHops" && e.Kind == "READS" {
+			minHopsRead = e
+			break
+		}
+	}
+	if minHopsRead == nil {
+		t.Fatal("expected READS edge for minHops; missing")
+	}
+	if minHopsRead.BaseType == "" {
+		t.Errorf("minHops READS BaseType is empty — range-over-SelectorExpr type inference didn't fire (#1134)")
+	}
+	if !strings.Contains(minHopsRead.BaseType, "pattern") {
+		t.Errorf("minHops READS BaseType = %q; want to contain \"pattern\" (the element type of q.patterns)", minHopsRead.BaseType)
+	}
+}
+
 func TestExtractGo_ReadsWrites_SwitchStmt(t *testing.T) {
 	src := []byte(`package p
 

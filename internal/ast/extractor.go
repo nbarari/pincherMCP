@@ -585,6 +585,47 @@ func extractGo(source []byte, relPath, modulePath string) *FileResult {
 		}
 	}
 
+	// #1134 v0.67: pre-pass over the file collecting `struct T { Field
+	// X }` → fieldType maps so the in-body type-inference can resolve
+	// `for _, x := range receiver.Field` patterns. Without this, an
+	// element variable iterated from a struct-field slice has no known
+	// type, BaseType="" on its later dotted-name READS, and the binding
+	// pass false-binds the bare name to any project Method with the
+	// same name (the #1134 repro). Per-file scope is sufficient — same-
+	// file struct types resolve immediately; cross-file structs stay
+	// unknown (a follow-up if real-world data shows it's worth the
+	// added cross-file probe).
+	fileStructFields := map[string]map[string]string{}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				continue
+			}
+			fm := map[string]string{}
+			for _, f := range st.Fields.List {
+				typeStr := goTypeToString(f.Type)
+				if typeStr == "" {
+					continue
+				}
+				for _, name := range f.Names {
+					fm[name.Name] = typeStr
+				}
+			}
+			if len(fm) > 0 {
+				fileStructFields[ts.Name.Name] = fm
+			}
+		}
+	}
+
 	// Walk top-level declarations
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -606,7 +647,7 @@ func extractGo(source []byte, relPath, modulePath string) *FileResult {
 				// #247 #3: identifier references for READS edges. Walks
 				// the same body — costs an extra ast.Inspect pass per
 				// function, dwarfed by the parser cost itself.
-				reads := extractGoReads(d, sym.QualifiedName, importPkgs)
+				reads := extractGoReads(d, sym.QualifiedName, importPkgs, fileStructFields)
 				result.Edges = append(result.Edges, reads...)
 			}
 
@@ -887,7 +928,7 @@ func extractGoFileLevelReads(d *ast.GenDecl, callerQN string, importPkgs map[str
 	return edges
 }
 
-func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool) []ExtractedEdge {
+func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool, fileStructFields map[string]map[string]string) []ExtractedEdge {
 	if d == nil || d.Body == nil {
 		return nil
 	}
@@ -959,9 +1000,30 @@ func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool
 		case *ast.RangeStmt:
 			if s.Tok == token.DEFINE && s.Value != nil {
 				if vid, ok := s.Value.(*ast.Ident); ok {
-					if xid, ok := s.X.(*ast.Ident); ok {
-						if elem := sliceElem(varTypes[xid.Name]); elem != "" {
+					switch xe := s.X.(type) {
+					case *ast.Ident:
+						if elem := sliceElem(varTypes[xe.Name]); elem != "" {
 							noteVarType(vid.Name, elem)
+						}
+					case *ast.SelectorExpr:
+						// #1134 v0.67: `for _, x := range receiver.Field`.
+						// Resolve `receiver`'s type via varTypes (set
+						// from parameter/receiver lists at function
+						// entry), look up `Field`'s declared type in
+						// the file-level struct table, then derive the
+						// element type. Without this, the element var
+						// has no known type and bare-name READS on its
+						// fields false-bind to project Methods of the
+						// same name.
+						if base, ok := xe.X.(*ast.Ident); ok {
+							baseType := structBase(varTypes[base.Name])
+							if fm := fileStructFields[baseType]; fm != nil {
+								if fieldType := fm[xe.Sel.Name]; fieldType != "" {
+									if elem := sliceElem(fieldType); elem != "" {
+										noteVarType(vid.Name, elem)
+									}
+								}
+							}
 						}
 					}
 				}
