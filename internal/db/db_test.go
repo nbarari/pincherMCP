@@ -483,6 +483,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"GetSymbolsByIDs":         true,
 	"GetSymbolsByName":        true,
 	"GetSymbolsByQN":          true,
+	"LoadAllSymbolsByQN":      true, // #1338: bulk pre-load for cold-path resolve. Pure SELECT, reader-routed.
 	"GetSymbolsForFile":       true,
 	"GetHotspots":             true,
 	"GetDeadCode":             true,
