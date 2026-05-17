@@ -1554,6 +1554,25 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 	var currentClass string
 	var currentClassEnd int
 
+	// #1375: track the most-recent top-level function so Variable
+	// declarations inside its body get a scoped QN
+	// (`<func_qn>.<var_name>`) instead of colliding at the module
+	// level. Pre-fix, every `const res = await fetch(...)` inside
+	// any sibling function in a Next.js App Router page.tsx file
+	// produced the same QN (`app.<route>.page.res`) → the dedup
+	// guard dropped all but one → real symbols silently disappeared
+	// from the index. Same shape applies to TypeScript / JavaScript
+	// regex extraction — any language sharing the regexExtractor.
+	//
+	// Tracked separately from currentClass because:
+	//   - A Method already gets its enclosing-class QN via the
+	//     classRE path above; Variables inside class methods would
+	//     be doubly nested if we conflated the two.
+	//   - Functions don't nest (we don't descend into them), so
+	//     this single most-recent-function tracker is enough.
+	var currentFuncQN string
+	var currentFuncEnd int
+
 	for lineIdx, line := range lines {
 		lineNum := lineIdx + 1
 		lineStart := 0
@@ -1698,6 +1717,19 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 						Complexity:    estimateComplexity(source[lineStart:min(endByte, len(source))]),
 					})
 					funcMatched = true
+					// #1375: remember this function's scope so any
+					// Variables (`const x = ...`) the varRE finds
+					// inside its body get a properly scoped QN
+					// instead of colliding at the module level.
+					// Functions in this regex tier don't nest
+					// (we don't descend into them), so the most-
+					// recent-function tracker is sufficient — a
+					// later function on a later line simply
+					// overwrites it.
+					if currentClass == "" {
+						currentFuncQN = qn
+						currentFuncEnd = endLine
+					}
 					// #858: per-file CALLS pass. Scan this function's body
 					// for C-family call sites so non-Go corpora get an
 					// edge graph instead of zero edges.
@@ -1728,7 +1760,24 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 					if len(sig) > 200 {
 						sig = sig[:200]
 					}
+					// #1375: scope Variables declared inside a
+					// function body to that function's QN so sibling
+					// functions each declaring `const res = ...` get
+					// distinct QNs (`<module>.GET.res` vs
+					// `<module>.POST.res`) instead of colliding at the
+					// module level (`<module>.res` × N → all but one
+					// silently dropped by the qualified_name_collision
+					// guard).
+					//
+					// Parent stamping mirrors the Method case above —
+					// callers consuming `parent` can drill from the
+					// containing function to its locals.
+					parent := ""
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
+					if currentFuncQN != "" && lineNum <= currentFuncEnd {
+						parent = currentFuncQN
+						qn = currentFuncQN + opts.modSep + name
+					}
 					exported := strings.Contains(line, "export")
 					result.Symbols = append(result.Symbols, ExtractedSymbol{
 						Name:          name,
@@ -1739,6 +1788,7 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 						StartLine:     lineNum,
 						EndLine:       endLine,
 						Signature:     sig,
+						Parent:        parent,
 						IsExported:    exported,
 					})
 				}
