@@ -87,6 +87,51 @@ func TestLargeDBAdvisory(t *testing.T) {
 	}
 }
 
+// #635 v0.67 follow-up: payload-outlier advisory. Tests pin the two
+// gating conditions (ratio + absolute max) so a future tweak doesn't
+// silently neuter the advisory by relaxing one but not the other.
+func TestPayloadOutlierAdvisory(t *testing.T) {
+	t.Parallel()
+
+	// Empty input → silent.
+	if got := payloadOutlierAdvisory(nil); got != "" {
+		t.Errorf("nil rows should produce no advisory; got %q", got)
+	}
+	// All rows below ratio threshold → silent even if some are large.
+	rows := []db.ToolCallPayloadRow{
+		{Tool: "search", AvgBytes: 80_000, MaxBytes: 160_000}, // ratio 2× — below 10× cutoff
+	}
+	if got := payloadOutlierAdvisory(rows); got != "" {
+		t.Errorf("2× spread should not trip; got %q", got)
+	}
+	// All rows below absolute-max threshold → silent even with big ratio.
+	rows = []db.ToolCallPayloadRow{
+		{Tool: "search", AvgBytes: 1_000, MaxBytes: 50_000}, // ratio 50× but max < 100 KB
+	}
+	if got := payloadOutlierAdvisory(rows); got != "" {
+		t.Errorf("max <100 KB should not trip; got %q", got)
+	}
+	// Both conditions crossed → advisory names the tool, prints
+	// spread × ratio, and includes remediation pointer.
+	rows = []db.ToolCallPayloadRow{
+		{Tool: "guide", AvgBytes: 5_000, MaxBytes: 250_000}, // ratio 50×, max 250 KB
+		{Tool: "search", AvgBytes: 500, MaxBytes: 25_000},   // ratio 50× but max < 100 KB
+	}
+	got := payloadOutlierAdvisory(rows)
+	if got == "" {
+		t.Fatal("guide max=250KB / avg=5KB should produce an advisory")
+	}
+	for _, want := range []string{"guide", "spread", "Payload outliers", "/v1/tool-payload-stats", "min_confidence"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory missing %q\n  got: %s", want, got)
+		}
+	}
+	// search should NOT appear — it failed the max threshold.
+	if strings.Contains(got, "search") {
+		t.Errorf("advisory must skip rows below the max threshold; got: %s", got)
+	}
+}
+
 // #575: pre-fix the handler iterated every project and pulled `top`
 // failures per project, so a 125-project install ballooned the
 // response past the MCP token cap. `top` now caps the projects

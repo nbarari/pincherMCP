@@ -298,6 +298,33 @@ func TestLargeDBAdvisory_CLI(t *testing.T) {
 	}
 }
 
+// #635 v0.67 follow-up: payload-outlier advisory mirror for the CLI.
+// Pins the same dual-condition (ratio + absolute max) so the two
+// copies stay behaviourally identical.
+func TestPayloadOutlierAdvisory_CLI(t *testing.T) {
+	if got := payloadOutlierAdvisory(nil); got != "" {
+		t.Errorf("nil rows should produce no advisory; got %q", got)
+	}
+	// Wide ratio but tiny max → silent.
+	if got := payloadOutlierAdvisory([]db.ToolCallPayloadRow{
+		{Tool: "search", AvgBytes: 500, MaxBytes: 25_000},
+	}); got != "" {
+		t.Errorf("max <100 KB should not trip; got %q", got)
+	}
+	// Wide ratio + ≥100 KB max → fires.
+	got := payloadOutlierAdvisory([]db.ToolCallPayloadRow{
+		{Tool: "guide", AvgBytes: 5_000, MaxBytes: 250_000},
+	})
+	if got == "" {
+		t.Fatal("guide max=250KB / avg=5KB should produce an advisory")
+	}
+	for _, want := range []string{"guide", "spread", "/v1/tool-payload-stats"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory missing %q\n  got: %s", want, got)
+		}
+	}
+}
+
 // TestSummarizeByReason_DescCountAlphaTie pins the rollup ordering: the
 // most common reason wins, ties break alphabetically so output is stable
 // across runs (map iteration order would otherwise jitter).

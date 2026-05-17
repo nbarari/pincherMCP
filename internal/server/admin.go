@@ -201,6 +201,77 @@ func largeDBAdvisory(dbSizeBytes int64, projects []doctorProjectSummary) string 
 	return msg
 }
 
+// payloadOutlierAdvisory returns a human-readable health advisory when
+// a tool's max response_bytes over the trailing 7d window is many
+// multiples of its average AND the absolute max is large enough to
+// matter (≥100 KB). Same pattern as largeDBAdvisory: a single big
+// response per week is invisible in averages but is the calls that
+// occasionally blow up token bills — surfacing it lets the user
+// decide if `guide` (or whichever tool) needs a per-call cap.
+//
+// Thresholds chosen for typical agent workloads:
+//   ratio ≥ 10×   "loud outlier" relative to that tool's normal payload
+//   max  ≥ 100 KB the absolute floor for "this would meaningfully
+//                  consume an agent's context window"
+//
+// Returns "" when nothing crosses both bars — silent on healthy data.
+func payloadOutlierAdvisory(rows []db.ToolCallPayloadRow) string {
+	const (
+		minRatio = 10.0
+		minMax   = int64(100 * 1024)
+	)
+	type hit struct {
+		tool  string
+		ratio float64
+		max   int64
+		avg   float64
+	}
+	hits := []hit{}
+	for _, r := range rows {
+		if r.MaxBytes < minMax || r.AvgBytes <= 0 {
+			continue
+		}
+		ratio := float64(r.MaxBytes) / r.AvgBytes
+		if ratio < minRatio {
+			continue
+		}
+		hits = append(hits, hit{tool: r.Tool, ratio: ratio, max: r.MaxBytes, avg: r.AvgBytes})
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	// Top 3 by ratio so the advisory stays scannable.
+	sort.Slice(hits, func(i, j int) bool { return hits[i].ratio > hits[j].ratio })
+	if len(hits) > 3 {
+		hits = hits[:3]
+	}
+	parts := make([]string, 0, len(hits))
+	for _, h := range hits {
+		parts = append(parts, fmt.Sprintf("%s (max %s, avg %s, %.1f× spread)",
+			h.tool, fmtBytesHuman(h.max), fmtBytesHuman(int64(h.avg)), h.ratio))
+	}
+	return "Payload outliers in the last 7 days — one or more tools occasionally returned a much larger " +
+		"response than their average. These are the calls that blow up agent context windows: " +
+		strings.Join(parts, "; ") +
+		". Remediation: inspect the offending calls via /v1/tool-payload-stats or the dashboard's " +
+		"Response Payload Size panel; consider narrowing the query (lower min_confidence, smaller k, " +
+		"specific path filter) on calls to that tool to bound payload size."
+}
+
+// fmtBytesHuman formats a byte count with a binary unit suffix.
+// Mirrors the dashboard's fmtBytes JS helper so the CLI/MCP doctor
+// output reads the same as the dashboard surface.
+func fmtBytesHuman(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024.0)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024.0*1024.0))
+	}
+}
+
 // nestedProjectAdvisory returns a human-readable advisory when one
 // indexed project's path is a strict subdirectory of another's. Same
 // source files end up indexed under two different project IDs, which
@@ -475,6 +546,16 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 			advisories = append(advisories, a)
 		}
 		if a := nestedProjectAdvisory(all); a != "" {
+			advisories = append(advisories, a)
+		}
+	}
+	// #635 v0.67 follow-up: payload-outlier advisory. Surfaces tools
+	// whose worst-case response is many multiples of their average AND
+	// large enough to meaningfully consume an agent context window.
+	// Pull at most 200 rows — bounded so a noisy install doesn't slow
+	// the doctor query, and big enough to cover every real tool catalog.
+	if payloadRows, err := s.store.ToolCallPayloadSizeByTool(7*24*60*60, 200); err == nil {
+		if a := payloadOutlierAdvisory(payloadRows); a != "" {
 			advisories = append(advisories, a)
 		}
 	}

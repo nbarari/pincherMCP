@@ -237,8 +237,63 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int) (*Do
 	if a := largeDBAdvisory(r.DBSizeBytes, r.Projects); a != "" {
 		r.Advisories = append(r.Advisories, a)
 	}
+	// #635 v0.67 follow-up: payload-outlier advisory. Mirrors the
+	// MCP doctor's logic in internal/server/admin.go — the two copies
+	// must stay behaviourally identical.
+	if payloadRows, err := store.ToolCallPayloadSizeByTool(7*24*60*60, 200); err == nil {
+		if a := payloadOutlierAdvisory(payloadRows); a != "" {
+			r.Advisories = append(r.Advisories, a)
+		}
+	}
 
 	return r, nil
+}
+
+// payloadOutlierAdvisory mirrors internal/server/admin.go's copy.
+// The bounded-duplication convention is documented on largeDBAdvisory
+// above: the CLI lives in package main and can't import the server
+// package, so each shared advisory exists in both copies and must
+// stay behaviourally identical.
+func payloadOutlierAdvisory(rows []db.ToolCallPayloadRow) string {
+	const (
+		minRatio = 10.0
+		minMax   = int64(100 * 1024)
+	)
+	type hit struct {
+		tool  string
+		ratio float64
+		max   int64
+		avg   float64
+	}
+	hits := []hit{}
+	for _, r := range rows {
+		if r.MaxBytes < minMax || r.AvgBytes <= 0 {
+			continue
+		}
+		ratio := float64(r.MaxBytes) / r.AvgBytes
+		if ratio < minRatio {
+			continue
+		}
+		hits = append(hits, hit{tool: r.Tool, ratio: ratio, max: r.MaxBytes, avg: r.AvgBytes})
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].ratio > hits[j].ratio })
+	if len(hits) > 3 {
+		hits = hits[:3]
+	}
+	parts := make([]string, 0, len(hits))
+	for _, h := range hits {
+		parts = append(parts, fmt.Sprintf("%s (max %s, avg %s, %.1f× spread)",
+			h.tool, humanBytes(h.max), humanBytes(int64(h.avg)), h.ratio))
+	}
+	return "Payload outliers in the last 7 days — one or more tools occasionally returned a much larger " +
+		"response than their average. These are the calls that blow up agent context windows: " +
+		strings.Join(parts, "; ") +
+		". Remediation: inspect the offending calls via /v1/tool-payload-stats or the dashboard's " +
+		"Response Payload Size panel; consider narrowing the query (lower min_confidence, smaller k, " +
+		"specific path filter) on calls to that tool to bound payload size."
 }
 
 // largeDBAdvisory returns a health advisory when the pincher DB is
