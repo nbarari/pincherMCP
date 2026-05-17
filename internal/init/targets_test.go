@@ -35,7 +35,7 @@ func withHome(t *testing.T, dir string) {
 }
 
 func TestInitTargets_RegistryShape(t *testing.T) {
-	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex", "zed", "gemini", "warp", "vscode", "vscode-mcp", "jetbrains"}
+	want := []string{"claude", "cursor", "cursor-legacy", "windsurf", "aider", "continue", "codex", "zed", "gemini", "warp", "vscode", "vscode-mcp", "jetbrains", "antigravity"}
 	if len(AllTargets) != len(want) {
 		t.Fatalf("registry has %d targets, want %d", len(AllTargets), len(want))
 	}
@@ -448,6 +448,72 @@ func TestJetBrainsTarget_WriteIdempotent(t *testing.T) {
 		t.Error("first write missing policy body")
 	}
 	out2, action2 := JetBrainsTarget.WriteFn(out1, "test policy body")
+	if action2 == "wrote" {
+		t.Errorf("second action = %q, expected update/replace not wrote", action2)
+	}
+	if strings.Count(out2, MarkerStart) != 1 {
+		t.Errorf("second write created %d marker blocks, want exactly 1 (idempotent replace)", strings.Count(out2, MarkerStart))
+	}
+}
+
+// ─── antigravity (.antigravity/rules.md) ─────────────────────────────────────
+// #1368.
+
+// Positive: PathFn produces the expected project-relative path.
+func TestAntigravityTarget_PathFn_ProjectLocal(t *testing.T) {
+	cwd := "/proj/myrepo"
+	got, err := AntigravityTarget.PathFn(cwd, false)
+	if err != nil {
+		t.Fatalf("PathFn: %v", err)
+	}
+	want := filepath.Join(cwd, ".antigravity", "rules.md")
+	if got != want {
+		t.Errorf("PathFn = %q, want %q", got, want)
+	}
+}
+
+// Negative: --global is rejected loudly with a message that routes
+// users to the IDE's preferences UI.
+func TestAntigravityTarget_PathFn_GlobalRejected(t *testing.T) {
+	_, err := AntigravityTarget.PathFn("/proj/x", true)
+	if err == nil {
+		t.Fatal("expected error for --global, got nil")
+	}
+	if !strings.Contains(err.Error(), "project-only") {
+		t.Errorf("error should explain the constraint; got: %v", err)
+	}
+}
+
+// Positive: detection fires on .antigravity/.
+func TestAntigravityTarget_DetectFn_FiresOnAntigravityDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".antigravity"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if !AntigravityTarget.DetectFn(dir) {
+		t.Error("DetectFn returned false despite .antigravity/ being present")
+	}
+}
+
+// Negative: no .antigravity/ means not an Antigravity project.
+func TestAntigravityTarget_DetectFn_FalseOnNonAntigravityDir(t *testing.T) {
+	dir := t.TempDir()
+	if AntigravityTarget.DetectFn(dir) {
+		t.Error("DetectFn returned true on a directory without .antigravity/")
+	}
+}
+
+// Cross-check: writer is MergePolicyBlockBare so re-runs replace the
+// pincher block in place rather than appending duplicates.
+func TestAntigravityTarget_WriteIdempotent(t *testing.T) {
+	out1, action1 := AntigravityTarget.WriteFn("", "test policy body")
+	if action1 != "wrote" {
+		t.Errorf("first action = %q, want wrote", action1)
+	}
+	if !strings.Contains(out1, "test policy body") {
+		t.Error("first write missing policy body")
+	}
+	out2, action2 := AntigravityTarget.WriteFn(out1, "test policy body")
 	if action2 == "wrote" {
 		t.Errorf("second action = %q, expected update/replace not wrote", action2)
 	}

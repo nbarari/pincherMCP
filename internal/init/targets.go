@@ -75,6 +75,7 @@ var AllTargets = []Target{
 	VSCodeTarget,
 	VSCodeMCPTarget,
 	JetBrainsTarget,
+	AntigravityTarget,
 }
 
 // FindTarget looks up a target by its --target value.
@@ -565,6 +566,48 @@ var JetBrainsTarget = Target{
 		// confirms a JetBrains user; .junie/ subdir may or may not
 		// exist yet (writing the target bootstraps it).
 		_, err := os.Stat(filepath.Join(cwd, ".idea"))
+		return err == nil
+	},
+	WriteFn: MergePolicyBlockBare,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// antigravity (./.antigravity/rules.md — Google Antigravity IDE project rules)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Google Antigravity (Gemini-3 IDE, announced late 2025) follows the
+// `.<tool>/rules.md` project-rules convention common across the agent-IDE
+// ecosystem (mirrors `.cursor/rules` / `.windsurf/rules.md` shapes).
+// Adding it surfaces pincher to a fresh user base without requiring
+// hand-crafted MCP host configuration. #1368.
+//
+// Detection: the `.antigravity/` directory at the project root is the
+// canonical marker. Presence alone confirms an Antigravity user;
+// `rules.md` may or may not exist yet (writing the target bootstraps it).
+//
+// Path: project-local only. Antigravity's global-rules surface — if it
+// exposes one — lives in the IDE's preferences UI rather than a stable
+// filesystem path; SupportsGlobal stays false to match the
+// cursor / windsurf / jetbrains pattern. The error message routes users
+// to the IDE's settings explicitly so they don't silently get a no-op.
+//
+// Writer: MergePolicyBlockBare (no front-matter header — the file is
+// plain markdown the agent inlines into its system prompt). Mirrors
+// the cursor / windsurf / zed / jetbrains shape so re-runs replace the
+// marker block in place (idempotent), and `--force` overrides the
+// existing block wholesale.
+
+var AntigravityTarget = Target{
+	Name:     "antigravity",
+	Describe: "Google Antigravity: ./.antigravity/rules.md (Gemini-3 agent IDE)",
+	PathFn: func(cwd string, global bool) (string, error) {
+		if global {
+			return "", fmt.Errorf("antigravity target is project-only — global rules are configured via Antigravity's preferences UI, not a stable filesystem path")
+		}
+		return filepath.Join(cwd, ".antigravity", "rules.md"), nil
+	},
+	DetectFn: func(cwd string) bool {
+		_, err := os.Stat(filepath.Join(cwd, ".antigravity"))
 		return err == nil
 	},
 	WriteFn: MergePolicyBlockBare,
