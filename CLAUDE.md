@@ -53,7 +53,7 @@ After tag pushes, the auto-bump workflow handles the Homebrew formula and Docker
 
 ## CI conventions
 
-- **Required gates:** `Test (mac/ubuntu/windows)`, `Coverage`, `Corpus snapshot`, `Benchmark smoke`, `Release channel rule`, `Workflow isolation lint`, `CHANGELOG stub check`. Merge requires all green (the stub check is skipped on doc-only PRs).
+- **Required gates:** `Test (mac/ubuntu/windows)`, `Coverage`, `Corpus snapshot`, `Benchmark smoke`, `Release channel rule`, `Workflow isolation lint`, `CHANGELOG stub check`, `PR title/body issue refs`. Merge requires all green (the stub check is skipped on doc-only PRs; the PR title/body check runs on pull_request only and validates that any `(#N)` in the title matches the body's `Closes #M` / `Refs #M` references via `scripts/pr-issue-consistency.sh`).
 - **Removed in v0.55:** `Benchmark regression (advisory)` (#692) — failed on most PRs from runner variance and signal-to-noise hit zero. `make corpus-bench` survives for local perf validation.
 - **Wakeup timing:** Windows test queues 4–7 min behind ubuntu/mac. When polling CI, schedule a 270s wakeup (not 60s) — fits inside the 5-min cache TTL twice.
 - **Stub-file convention for CHANGELOG (#694):** instead of editing `CHANGELOG.md` `[Unreleased]` directly, drop a `CHANGELOG.d/<num>.<type>.md` file with one bullet (no leading dash; assembler adds it). `<type>` ∈ {added, changed, fixed, removed}. Eliminates the rebase-conflict source that bit every concurrent-PR pair pre-v0.55.
