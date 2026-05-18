@@ -5,7 +5,7 @@ sidecar deployments in coding agent containers, local docker-compose
 stacks, or as the base layer for the [Helm chart](./helm.md).
 
 Image: `ghcr.io/kwad77/pinchermcp:latest` (tracks master) or
-`ghcr.io/kwad77/pinchermcp:v0.74.0` (pinned). Built from
+`ghcr.io/kwad77/pinchermcp:v0.75.0` (pinned). Built from
 [`Dockerfile`](../../Dockerfile) at the repo root; pure-Go binary on
 `gcr.io/distroless/static-debian12:nonroot` (~15 MB image).
 
