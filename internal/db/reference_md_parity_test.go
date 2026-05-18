@@ -83,3 +83,48 @@ func TestReferenceMD_SchemaVersionParity(t *testing.T) {
 		t.Error("REFERENCE.md migration table missing v1 baseline row")
 	}
 }
+
+// TestClaudeMD_SchemaVersionParity (#1418) pins the CLAUDE.md
+// "Current schema: vN" claim against the runtime CurrentSchemaVersion.
+// The line itself warned about prior drift ("was 7 versions stale
+// before #998/#999 caught it") yet drifted AGAIN — same shape that
+// motivated #1416's REFERENCE.md parity test. Adding the parallel
+// guard so this can't recur silently in CLAUDE.md either.
+func TestClaudeMD_SchemaVersionParity(t *testing.T) {
+	t.Parallel()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	root := wd
+	for {
+		if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatal("CLAUDE.md not found by walking up from test cwd")
+		}
+		root = parent
+	}
+	claudePath := filepath.Join(root, "CLAUDE.md")
+	body, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	text := string(body)
+	current := CurrentSchemaVersion()
+
+	// CLAUDE.md uses "Current schema: **vN**" — distinct from
+	// REFERENCE.md's "Current version: **vN**" wording.
+	claudeRE := regexp.MustCompile(`Current schema: \*\*v(\d+)\*\*`)
+	m := claudeRE.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf(`CLAUDE.md missing "Current schema: **vN**" wording — fix the regex or restore the line`)
+	}
+	if got := m[1]; got != fmt.Sprintf("%d", current) {
+		t.Errorf(`CLAUDE.md "Current schema" = v%s, want v%d (runtime CurrentSchemaVersion). Update the line in the db.go bullet.`,
+			got, current)
+	}
+}
