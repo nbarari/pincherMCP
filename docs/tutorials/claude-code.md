@@ -23,7 +23,7 @@ Confirm it's on your `PATH`:
 
 ```bash
 pincher --version
-# pincherMCP v0.77.0
+# pincherMCP v0.78.0
 ```
 
 ## 2. Index your project

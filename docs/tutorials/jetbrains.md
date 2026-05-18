@@ -24,7 +24,7 @@ For the long-form manual see [`docs/REFERENCE.md`](../REFERENCE.md).
 ```bash
 go install github.com/kwad77/pincher/cmd/pinch@latest
 pincher --version
-# pincherMCP v0.77.0
+# pincherMCP v0.78.0
 ```
 
 ## 2. Index your project

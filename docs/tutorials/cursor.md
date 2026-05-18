@@ -15,7 +15,7 @@ This walkthrough assumes nothing about pincher's internals. For the long-form ma
 ```bash
 go install github.com/kwad77/pincher/cmd/pinch@latest
 pincher --version
-# pincherMCP v0.77.0
+# pincherMCP v0.78.0
 ```
 
 ## 2. Index your project
