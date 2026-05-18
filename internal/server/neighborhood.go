@@ -304,8 +304,24 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	}
 	page := filtered[offset:end]
 
+	// #1442 part 2: token-aware truncation. limit clamps to 500
+	// and Part 1 fields projection trims the per-entry shape, but
+	// neither prevents the response from blowing the MCP per-call
+	// budget when (a) include_source=true on a file with even a
+	// few dozen substantial functions, or (b) the file has 200+
+	// metadata-only entries and the caller didn't project. Track
+	// running approximate byte cost while building entries; stop
+	// when the next entry would push past the safe budget. Surface
+	// the truncation in _meta.warnings + next_steps with the
+	// offset to continue paging from. Same shape as search's
+	// `has_more` pagination — the agent gets a non-error response
+	// and a continuation hint rather than a hard "exceeds maximum
+	// allowed tokens" error.
+	const neighborhoodPayloadBudgetBytes = 18 * 1024
+	bytesUsed := 0
+	truncatedAtOffset := -1
 	neighbors := make([]map[string]any, 0, len(page))
-	for _, sym := range page {
+	for i, sym := range page {
 		allFields := map[string]any{
 			"id":                    sym.ID,
 			"name":                  sym.Name,
@@ -342,7 +358,30 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 				}
 			}
 		}
+		// #1442 part 2: estimate this entry's serialized cost
+		// before committing it. Skip the cheap fixed-cost fields
+		// (id/kind/name) since their JSON-key overhead dominates;
+		// signature and source are the variable-size contributors.
+		entryCost := neighborhoodEntryCostBytes(entry)
+		if len(neighbors) > 0 && bytesUsed+entryCost > neighborhoodPayloadBudgetBytes {
+			truncatedAtOffset = offset + i
+			break
+		}
 		neighbors = append(neighbors, entry)
+		bytesUsed += entryCost
+	}
+	// If truncation fired, treat the response as a partial window
+	// so the pagination next_steps below points at the right offset.
+	// Also surface a clamp warning so the caller learns recall
+	// dropped below the limit they requested (vs the pre-fix shape
+	// where they'd get the hard MCP token-cap error with no
+	// recovery path).
+	if truncatedAtOffset >= 0 {
+		clampWarnings = append(clampWarnings, fmt.Sprintf(
+			"neighborhood: response truncated at %d of %d requested neighbors (~%dKB payload budget reached). Use fields= to drop the heavy default shape, or page from offset=%d to see the rest.",
+			len(neighbors), end-offset, neighborhoodPayloadBudgetBytes/1024, truncatedAtOffset,
+		))
+		end = truncatedAtOffset
 	}
 
 	// Tokens saved estimate: the alternative is a Read of the whole
@@ -476,6 +515,42 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 // neighborhood handler doesn't have to reach into the index package for
 // it. Mirrors handleSymbol's path; failure is silent (caller falls back
 // to omitting the source field, not failing the whole call).
+// neighborhoodEntryCostBytes estimates the JSON-serialized byte
+// cost of a per-neighbor entry. Used by the #1442 part 2
+// token-aware truncation loop to stop adding entries before the
+// response blows the MCP per-call budget. Fixed-cost fields
+// (id/name/kind/qualified_name) and the JSON key/quote/comma
+// overhead are approximated as a per-entry baseline; signature
+// and source are the variable-size contributors and are added
+// to the baseline by their string length.
+//
+// The estimate is intentionally coarse — it doesn't have to be
+// exact, it just has to be a safe upper bound for a fixed
+// per-entry shape. Underestimating risks a hard error from the
+// MCP truncation guard; overestimating yields a smaller-than-
+// strictly-necessary page (the caller pages, no correctness
+// risk).
+func neighborhoodEntryCostBytes(entry map[string]any) int {
+	const baseline = 200 // id+name+kind+QN+line-range+JSON overhead
+	cost := baseline
+	if v, ok := entry["id"].(string); ok {
+		cost += len(v)
+	}
+	if v, ok := entry["qualified_name"].(string); ok {
+		cost += len(v)
+	}
+	if v, ok := entry["name"].(string); ok {
+		cost += len(v)
+	}
+	if v, ok := entry["signature"].(string); ok {
+		cost += len(v)
+	}
+	if v, ok := entry["source"].(string); ok {
+		cost += len(v)
+	}
+	return cost
+}
+
 func readSymbolSourceForNeighbor(root string, sym db.Symbol) (string, error) {
 	abs := filepath.Join(root, filepath.FromSlash(sym.FilePath))
 	f, err := os.Open(abs)
