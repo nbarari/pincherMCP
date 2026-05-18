@@ -816,7 +816,7 @@ Measured on this codebase (13 files, 618 symbols, 5,785 edges, Windows 11, SQLit
 
 ## Schema
 
-Schema is versioned via the `schema_version` table. Current version: **v26**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
+Schema is versioned via the `schema_version` table. Current version: **v32**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
 
 Migration history:
 
@@ -848,6 +848,12 @@ Migration history:
 | v23→v24 | `hook_invocations` telemetry (#626) |
 | v24→v25 | Closure table — materialized transitive closure of the call graph |
 | v25→v26 | `pending_edges.base_type` — Go READS candidate disambiguation |
+| v26→v27 | `session_tool_calls` — per-call event log feeding the dashboard's per-tool panels (#1191) |
+| v27→v28 | Composite PRIMARY KEY `(project_id, id)` on `symbols` — prep for cross-project ID collision safety |
+| v28→v29 | `bench_runs` + `bench_results` tables — persistence for `pincher bench --persist` (#1263) |
+| v29→v30 | `closure.via_kind` — record the last-hop edge kind to support kind-aware closure traversals (#685 phase 2) |
+| v30→v31 | `branch` column on `symbols` / `edges` / `files` / `pending_edges` — multi-branch coexistence foundation (#1303 Phase 1) |
+| v31→v32 | `projects.current_branch` — git branch the project was last indexed against (#1303 Phase 2a). Doctor surfaces a branch-drift advisory when the on-disk branch differs. Wire format JSON tag is `last_indexed_branch` (#1388). |
 
 ---
 
