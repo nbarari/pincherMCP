@@ -25,7 +25,10 @@
 //   - Java:       regex patterns (class/interface/method)
 //   - Swift:      regex patterns (func/init/subscript with @attr prefix, class/struct/actor, enum, protocol, extension)
 //   - Kotlin:     regex patterns (fun + extension-function with @attr prefix, class/data class/sealed class/object/companion object, interface/fun interface, enum class)
-//   - Ruby, PHP, C, C++, C#: regex fallback
+//   - C#:         regex patterns (class/record/record class/record struct/struct, interface/partial interface, enum, [Attribute] prefix, file modifier)
+//   - PHP:        regex patterns (function + #[Attribute] prefix, class/interface/trait/enum, final/readonly/abstract modifiers)
+//   - C/C++:      regex patterns (function + class/struct/union, enum/enum class scoped enums, inheritance lists)
+//   - Ruby: regex fallback
 //
 // Regex extractors cover ~80% of real-world symbols accurately. The plan for
 // lifting them to confidence 1.0 favours per-language pure-Go AST libraries
@@ -66,8 +69,8 @@ type ExtractedSymbol struct {
 	IsEntryPoint  bool
 	Complexity    int
 	// ExtractionConfidence is set by Extract() based on the parser used.
-	// 1.0 = AST-exact (Go). 0.85 = stable regex (Python, TS, Rust, Java, Swift, Kotlin).
-	// 0.70 = approximate regex (Ruby, PHP, C, C++, C#).
+	// 1.0 = AST-exact (Go). 0.85 = stable regex (Python, TS, Rust, Java, Swift, Kotlin, C#, PHP, C, C++).
+	// 0.70 = approximate regex (Ruby).
 	ExtractionConfidence float64
 	// Fields is populated for struct (Class) symbols: map of
 	// field name → field type expression as a Go-syntax string
@@ -368,7 +371,12 @@ func init() {
 			".cpp": "C++", ".cxx": "C++", ".cc": "C++",
 			".hpp": "C++", ".hh": "C++",
 		},
-		confidence: 0.70,
+		// #1463 v0.73: promoted 0.70 → 0.85 (stable-regex tier).
+		// Adds C++ class/struct/union/enum + C++11+ scoped enum
+		// class. C-style struct/enum + C++ class inheritance lists.
+		// Functions / methods / macros + Linux-kernel macro rewrite
+		// stay unchanged.
+		confidence: 0.85,
 		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
 			return extractC(s, p)
 		},
@@ -2689,8 +2697,43 @@ func extractPHP(source []byte, relPath string) *FileResult {
 	return phpRE.extract(source, relPath, "PHP", opts)
 }
 
+// C / C++ regex-tier extractor. #1463 v0.73 promotes from 0.70 →
+// 0.85 (stable-regex tier). Adds:
+//   - C++ `class Name : public Base { ... }` declarations
+//   - C `struct Name { ... }` and C++ `struct Name : Base` declarations
+//   - C `union Name { ... }` (less common, modeled as Class)
+//   - C `enum Name { ... }` (anonymous + named)
+//   - C++11+ `enum class Name { ... }` (scoped enums) modeled as Enum
+//
+// The existing funcRE shape stays unchanged — it matches function /
+// method definitions with at least one return-type token before the
+// name. The cMacroRE post-processor (Linux-kernel SCREAM_CASE_MACRO
+// rewrite, #69/#73/#324) also stays intact. classRE precedes funcRE
+// in the framework's per-line iteration; combined with the #1459
+// classMatchedThisLine gate, a C++ `class Foo {` line emits a single
+// Class symbol, not a duplicate Function.
+//
+// What's still out of scope (regex-tier limits):
+//   - C++ namespaces (would need scope tracking across multiple
+//     blocks; substantial framework work)
+//   - C++ templates (`template<typename T> class Foo`) — the
+//     template prefix on its own line breaks single-line matching
+//   - C++ operator overloads (`operator+`, `operator[]`) — would
+//     need name capture beyond `[A-Za-z_]` start char
+//   - extern "C" linkage blocks (not a symbol, just a wrapper)
+//   - typedef as a separate symbol kind
+//
+// AST-tier (1.0) for C/C++ would need libclang-equivalent via
+// modernc.org/cc or similar pure-Go parser; tracked separately.
 var cRE = &regexExtractor{
-	funcRE: regexp.MustCompile(`(?m)^(?:static\s+)?(?:inline\s+)?(?:\w+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(`),
+	funcRE:      regexp.MustCompile(`(?m)^(?:static\s+)?(?:inline\s+)?(?:\w+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(`),
+	// Name pattern allows lowercase first char — C struct/enum
+	// convention frequently uses snake_case (`file_operations`,
+	// `list_head`, `log_level`). C++ uses PascalCase by convention
+	// but both flow through the same extractor via the C/C++ shared
+	// dispatch.
+	classRE:     regexp.MustCompile(`(?m)^\s*(?:class|struct|union)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*(?:(?:public|private|protected|virtual)\s+)*(?P<parent>[A-Za-z_][A-Za-z0-9_:]*))?`),
+	enumRE:      regexp.MustCompile(`(?m)^\s*enum(?:\s+(?:class|struct))?\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)`),
 }
 
 // cMacroRE matches Linux-kernel-style declaration macros where the real
