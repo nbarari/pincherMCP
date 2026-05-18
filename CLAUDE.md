@@ -45,6 +45,8 @@ The release-prep PR (the one before tagging) MUST touch all six below. CHANGELOG
 5. **`docs/REFERENCE.md` — leading metadata line** (`**Schema version:** vN · **MCP tools:** N · **Languages detected:** ~N`). Bump every release that moves any of those numbers. Per #688: the leading line is what users see first when they click into the reference doc from README; stale numbers there make every subsequent claim look distrust-by-default. Drift was 12 schema versions before #698 caught it.
 6. **`docs/` (GitHub Pages site)** — audit `docs/index.html`, `docs/release-channels.md`, `docs/streamable-http.md`, `docs/troubleshooting.md`, `docs/deployment/*.md`, `docs/tutorials/*.md` for version-sensitive claims. The grep that catches drift: `grep -rnE "v0\.[0-9]+|pincher-v0\.[0-9]+|[0-9]+ MCP tools|schema.{0,15}v[0-9]+" docs/` against the previous release version. Pages renders polished landing copy from `docs/` — install tarball filenames, savings-stat parentheticals, badge value ranges, forward-looking copy about features that did/didn't ship — all higher-visibility than README to search-engine traffic. v0.67 release-prep missed `docs/index.html` "v0.66" parenthetical + `pincher-v0.66.0-linux-amd64.tar.gz` install snippet; caught next morning in a catch-up PR. Don't repeat.
 
+7. **Bench baseline decision** — decide whether the release refreshes `testdata/bench/{index,server}.bench.txt`. **Default: skip** for patch releases and feature releases that don't intentionally change perf shape. **Refresh** for `.x9` hardening releases (workstream 2 of the hardening umbrella — see `#672` shape) and for any release that ships a deliberate perf-affecting refactor whose new numbers ARE the rationale. Mechanism: trigger `.github/workflows/bench-baseline.yml` via `workflow_dispatch` on the Actions UI; download the artifact; copy `*.bench.txt` files into `testdata/bench/`; commit. Wrong call: refreshing on every release silently absorbs regressions and defeats the gate's purpose (per the v0.79 prep audit, the committed baseline drifted 8 minors with no enforcement because every release auto-refreshed without justification).
+
 If a release ships without README touched, the user's first reaction is "the README didn't say anything about it" and follow-up cleanup PRs read as forgetting, not catching up. Do it inline.
 
 After tag pushes, the auto-bump workflow handles the Homebrew formula and Docker image — those don't go in the release-prep PR itself.
@@ -150,6 +152,16 @@ Two redundant gates: `make corpus-test` (jq) and `TestCorpusSnapshot_*` (pure Go
 ### Bench gating (#50)
 
 `testdata/bench/<package>.bench.txt` holds committed `go test -bench` output captured at `-benchtime=2s -benchmem`. Comparator (`cmd/benchcmp/`) gates on `ns/op +20%` and `allocs/op +30%`. Phase 1: `continue-on-error: true` — see CI conventions above.
+
+### Bench baseline refresh (#672 v0.79 workstream 2)
+
+The committed baseline lives in `testdata/bench/{index,server}.bench.txt` and is pinned to **CI hardware** (Linux AMD EPYC 7763, `-4` GOMAXPROCS). Running `make corpus-bench` locally on different hardware (Windows i9, macOS arm64, etc.) produces meaningless deltas and false-positive "regressions" — the gate is only valid against the CI runner pool that produced the baseline.
+
+To refresh the baseline on current CI hardware: trigger `.github/workflows/bench-baseline.yml` via the Actions UI `workflow_dispatch` button. Pick the tag or branch you want to baseline (typically the most recent release tag). The workflow runs `go test -bench` at `-benchtime=10s` against `internal/index` + `internal/server`, uploads the regenerated `*.bench.txt` files as an artifact, and prints a diff against the committed baseline for visibility. Download the artifact, sanity-check the deltas, copy into the repo, commit. The next `make corpus-bench` run gates against the fresh numbers.
+
+When to refresh: (a) the v0.79 / v0.89 / v0.99 hardening releases as part of #672-shape workstream 2, (b) after a deliberate perf-affecting refactor whose new numbers ARE the rationale (then `make corpus-bench-update` locally on CI-matching hardware is also valid), (c) when CI runner pool changes (rare; rolls a new EPYC SKU or similar).
+
+When NOT to refresh: any PR that doesn't intentionally change perf shape — re-baselining absorbs regressions silently and defeats the gate's whole purpose.
 
 ## Architecture
 

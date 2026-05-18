@@ -1,0 +1,90 @@
+name: Bench baseline refresh
+
+# Manual-only. Captures a fresh perf baseline against the current
+# master tag and uploads the regenerated testdata/bench/*.bench.txt
+# files as an artifact for the operator to commit.
+#
+# Why this exists (#672 v0.79 workstream 2): the committed baseline
+# in testdata/bench/ was captured at PR #173 era (pre-v0.71). Eight
+# feature releases of extractor + indexer changes have shifted the
+# perf shape without anyone re-baselining on representative CI
+# hardware, so the `make corpus-bench` gate (local-only since #692)
+# has no current ground truth to compare against. v0.79's perf
+# regression workstream needs an enforceable baseline before any
+# claim of "no regression >5%" is defensible.
+#
+# Triggered manually via the Actions UI workflow_dispatch button.
+# Pick the tag or branch you want to baseline (typically the most
+# recent release tag, e.g. v0.78.1) as the workflow's ref. The
+# uploaded artifact contains:
+#   - testdata/bench/index.bench.txt   (new baseline for internal/index)
+#   - testdata/bench/server.bench.txt  (new baseline for internal/server)
+#   - bench-raw.txt                    (raw go test -bench output for review)
+# Download, sanity-check the numbers vs the prior baseline, copy into
+# the repo, commit. The next `make corpus-bench` run then gates
+# against the fresh numbers.
+#
+# Per-iteration cost: ~10 minutes at -benchtime=10s across both
+# packages. Total runtime ~12-15 min including setup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchtime:
+        description: "Per-benchmark -benchtime (default 10s — higher = more b.N iterations = tighter median ns/op)"
+        required: false
+        default: "10s"
+
+jobs:
+  baseline:
+    name: Capture bench baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Capture index baseline
+        env:
+          BENCHTIME: ${{ inputs.benchtime }}
+        run: |
+          mkdir -p bench-out
+          # Use the same flags the existing `make corpus-bench-update`
+          # target uses so the output format matches what benchcmp
+          # expects when reading testdata/bench/*.bench.txt as
+          # a baseline.
+          go test ./internal/index/ -run='^$' -bench=. -benchtime="${BENCHTIME}" -benchmem \
+            | tee bench-out/index.bench.txt
+
+      - name: Capture server baseline
+        env:
+          BENCHTIME: ${{ inputs.benchtime }}
+        run: |
+          go test ./internal/server/ -run='^$' -bench=. -benchtime="${BENCHTIME}" -benchmem \
+            | tee bench-out/server.bench.txt
+
+      - name: Diff against current committed baseline
+        # Best-effort visibility — the diff is not a gate. Operator
+        # downloads the artifact and decides whether the deltas are
+        # intentional before committing. A `make corpus-bench` run
+        # post-commit then enforces the new baseline.
+        run: |
+          echo "=== index.bench.txt diff (committed → fresh) ==="
+          diff testdata/bench/index.bench.txt bench-out/index.bench.txt || true
+          echo ""
+          echo "=== server.bench.txt diff (committed → fresh) ==="
+          diff testdata/bench/server.bench.txt bench-out/server.bench.txt || true
+
+      - name: Upload baseline artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-${{ github.run_id }}
+          path: |
+            bench-out/index.bench.txt
+            bench-out/server.bench.txt
+          retention-days: 30
