@@ -1674,23 +1674,46 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 	// any sibling function in a Next.js App Router page.tsx file
 	// produced the same QN (`app.<route>.page.res`) → the dedup
 	// guard dropped all but one → real symbols silently disappeared
-	// from the index. Same shape applies to TypeScript / JavaScript
-	// regex extraction — any language sharing the regexExtractor.
+	// from the index.
+	//
+	// #1422 v0.72: extended to a STACK so nested functions work.
+	// React components routinely nest `async function fetchX()`
+	// inside `function Page()`; the pre-fix single-slot tracker
+	// got overwritten by the inner function, then after the inner
+	// ended ALL of the outer's remaining Variables fell back to
+	// module scope because the slot still pointed at the
+	// already-ended inner. With a stack we push on every funcRE
+	// match, pop entries whose endLine is past the current line,
+	// and scope Variables to stack.top — the innermost active
+	// function at that line.
 	//
 	// Tracked separately from currentClass because:
 	//   - A Method already gets its enclosing-class QN via the
 	//     classRE path above; Variables inside class methods would
 	//     be doubly nested if we conflated the two.
-	//   - Functions don't nest (we don't descend into them), so
-	//     this single most-recent-function tracker is enough.
-	var currentFuncQN string
-	var currentFuncEnd int
+	//   - Function bodies CAN nest (#1422 — confirmed via doctor
+	//     extraction_failures on real page.tsx files).
+	type funcScope struct {
+		qn      string
+		endLine int
+	}
+	var funcStack []funcScope
 
 	for lineIdx, line := range lines {
 		lineNum := lineIdx + 1
 		lineStart := 0
 		if lineIdx < len(lineOffsets) {
 			lineStart = lineOffsets[lineIdx]
+		}
+
+		// #1422 v0.72: pop function-scope entries whose body the
+		// current line has moved past. Popping at the top of each
+		// iteration means Variables on `lineNum` always see the
+		// correct innermost-active function as the top of the
+		// stack. Iterate from the top so a deeply-nested set of
+		// expired scopes collapses in one pass.
+		for len(funcStack) > 0 && lineNum > funcStack[len(funcStack)-1].endLine {
+			funcStack = funcStack[:len(funcStack)-1]
 		}
 
 		// Track class scope for method qualified names
@@ -1813,6 +1836,17 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 						kind = "Method"
 						parent = moduleQN(relPath, opts.modSep) + opts.modSep + currentClass
 						qn = parent + opts.modSep + name
+					} else if len(funcStack) > 0 {
+						// #1422: nested function — scope to the
+						// enclosing function's QN so the inner's
+						// children (Variables, sub-nested functions)
+						// inherit the full chain. Without this, two
+						// sibling inner functions in the same outer
+						// each just attach to module scope and their
+						// child Variables collide one level up.
+						top := funcStack[len(funcStack)-1]
+						parent = top.qn
+						qn = top.qn + opts.modSep + name
 					}
 
 					result.Symbols = append(result.Symbols, ExtractedSymbol{
@@ -1830,18 +1864,17 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 						Complexity:    estimateComplexity(source[lineStart:min(endByte, len(source))]),
 					})
 					funcMatched = true
-					// #1375: remember this function's scope so any
-					// Variables (`const x = ...`) the varRE finds
-					// inside its body get a properly scoped QN
-					// instead of colliding at the module level.
-					// Functions in this regex tier don't nest
-					// (we don't descend into them), so the most-
-					// recent-function tracker is sufficient — a
-					// later function on a later line simply
-					// overwrites it.
+					// #1375 + #1422: push this function's scope onto
+					// the stack so any Variables (`const x = ...`) the
+					// varRE finds inside its body get a properly
+					// scoped QN. The pop logic at the top of the loop
+					// removes expired entries, so stack.top is always
+					// the innermost active function. Methods inside a
+					// class are scoped via currentClass; don't push
+					// them onto the function stack or class-method-
+					// local vars would get a triple-nested QN.
 					if currentClass == "" {
-						currentFuncQN = qn
-						currentFuncEnd = endLine
+						funcStack = append(funcStack, funcScope{qn: qn, endLine: endLine})
 					}
 					// #858: per-file CALLS pass. Scan this function's body
 					// for C-family call sites so non-Go corpora get an
@@ -1885,23 +1918,36 @@ func (rx *regexExtractor) extract(source []byte, relPath, language string, opts 
 					if len(sig) > 200 {
 						sig = sig[:200]
 					}
-					// #1375: scope Variables declared inside a
-					// function body to that function's QN so sibling
-					// functions each declaring `const res = ...` get
-					// distinct QNs (`<module>.GET.res` vs
-					// `<module>.POST.res`) instead of colliding at the
-					// module level (`<module>.res` × N → all but one
-					// silently dropped by the qualified_name_collision
-					// guard).
+					// #1375 + #1422: scope Variables declared inside a
+					// function body to the INNERMOST active function's
+					// QN (stack.top). React component shapes nest
+					// functions like
+					//   function Page() {
+					//     async function fetchRuns() {
+					//       const res = await fetch(...)  // → Page.fetchRuns.res
+					//     }
+					//     async function fetchWorkflows() {
+					//       const res = await fetch(...)  // → Page.fetchWorkflows.res
+					//     }
+					//     const state = useState();        // → Page.state
+					//                                        (after fetchRuns POPPED)
+					//   }
+					// Pre-#1422 the single-slot tracker got overwritten
+					// by each inner function and never restored the
+					// outer's scope, so the outer's later Variables
+					// fell back to module level and the inner functions'
+					// `res` Variables all collided at the module level
+					// once they popped past the stale slot.
 					//
 					// Parent stamping mirrors the Method case above —
 					// callers consuming `parent` can drill from the
 					// containing function to its locals.
 					parent := ""
 					qn := moduleQN(relPath, opts.modSep) + opts.modSep + name
-					if currentFuncQN != "" && lineNum <= currentFuncEnd {
-						parent = currentFuncQN
-						qn = currentFuncQN + opts.modSep + name
+					if len(funcStack) > 0 {
+						top := funcStack[len(funcStack)-1]
+						parent = top.qn
+						qn = top.qn + opts.modSep + name
 					}
 					exported := strings.Contains(line, "export")
 					result.Symbols = append(result.Symbols, ExtractedSymbol{
