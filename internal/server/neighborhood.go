@@ -119,11 +119,32 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 		}
 	}
 
+	// #1425: scope-to-session-first when projectArg is empty (mirrors
+	// the handleSymbol fix from #1409 and the handleContext fix from
+	// the same PR). Pre-fix the no-project path went straight to
+	// unscoped GetSymbol — when the ID existed in BOTH the session
+	// project and a fork (e.g. d:\codex\sniffer mirror of pincher-
+	// repo), GetSymbol returned whichever row the schema-driven ORDER
+	// hit first (typically the older project). The #1232 strict guard
+	// then fired with "symbol exists only in project X" — pointing
+	// the agent AWAY from the session project where the symbol DOES
+	// also live. Identical shape to #1408 / #1409; neighborhood was
+	// missed because its lookup path is in a separate file from
+	// handleSymbol's switch.
 	var seed *db.Symbol
 	var err error
-	if resolvedProjectID != "" {
+	switch {
+	case resolvedProjectID != "":
 		seed, err = s.store.GetSymbolScoped(resolvedProjectID, id)
-	} else {
+	case projectArg == "" && s.sessionID != "":
+		seed, err = s.store.GetSymbolScoped(s.sessionID, id)
+		if err == nil && seed == nil {
+			// Genuinely not in the session project — fall back to
+			// unscoped so the strict-cross-project guard below can
+			// surface the actual project where the symbol lives.
+			seed, err = s.store.GetSymbol(id)
+		}
+	default:
 		seed, err = s.store.GetSymbol(id)
 	}
 	if err != nil {
