@@ -3259,7 +3259,8 @@ var toolComplexityTiers = map[string]string{
 
 	// heavy — synthesis-style output requiring frontier parsing
 	"guide":            "heavy",
-	"context_for_task": "heavy", // #1259: composite of search + N×(context + trace) + changes
+	"context_for_task":     "heavy", // #1259: composite of search + N×(context + trace) + changes
+	"investigate_failure":  "heavy", // #1391 v0.81: composite of search × frames + trace × suspects + changes
 }
 
 // toolComplexityTier returns the registered tier for a tool, or the
@@ -3290,8 +3291,9 @@ var toolIdempotent = map[string]bool{
 	"symbol":       true,
 	"symbols":      true,
 	"context":          true,
-	"context_for_task": true, // #1259
-	"trace":            true,
+	"context_for_task":    true, // #1259
+	"investigate_failure": true, // #1391 v0.81 — read-only composite
+	"trace":               true,
 	"query":            true,
 	"guide":            true,
 	"changes":          true,
@@ -3609,7 +3611,8 @@ var toolMetadata = map[string]toolMetadataEntry{
 	"neighborhood": {Title: "Same-file symbols", Annotations: annotationsReadOnly},
 	"dead_code":    {Title: "Unreachable symbols", Annotations: annotationsReadOnly},
 	"guide":            {Annotations: annotationsReadOnly},
-	"context_for_task": {Title: "Composite context for an investigation", Annotations: annotationsReadOnly}, // #1259
+	"context_for_task":    {Title: "Composite context for an investigation", Annotations: annotationsReadOnly}, // #1259
+	"investigate_failure": {Title: "Bug-hunt composite from a stack trace", Annotations: annotationsReadOnly}, // #1391 v0.81
 
 	// Diagnostics (read-only, idempotent).
 	"health":  {Annotations: annotationsReadOnly},
@@ -4009,6 +4012,28 @@ func (s *Server) registerTools() {
 			}
 		}`),
 	}, s.handleContextForTask)
+
+	// 16c. investigate_failure (#1391 Phase 4 composite #1, v0.81). The
+	// bug-hunt composite: takes an error_text (stack trace, panic dump,
+	// exception with traceback), parses identifier-shaped frame tokens,
+	// BM25-searches each across the code corpus, ranks suspects by a
+	// weighted sum of (frame-match × multi-frame × stack-file-match ×
+	// recent-change × caller-fan-in), then unions inbound callers and
+	// intersects recent diff with implicated files. One call replaces
+	// ~5 atomic calls (search → search → search → trace × N → changes →
+	// context). Read-only; no internal MCP round-trips.
+	s.addTool(&mcp.Tool{
+		Name:        "investigate_failure",
+		Description: "**Use when triaging a stack trace or crash report.** Takes `error_text` (raw stack trace / panic / exception), parses identifier-shaped frame tokens, ranks suspects by (frame-match + stack-file-match + recent-change + caller fan-in). Replaces the typical 5-call bug-hunt loop (search × N → trace × N → changes overlap → context). Returns `{implicated_symbols, callers, recent_changes, rank}` with per-suspect `evidence` enumerating which signals fired so the agent can trust or pivot. Stamps `_meta.empty_reason` when no frames parse or no suspects resolve.",
+		InputSchema: json.RawMessage(`{
+			"type":"object","required":["error_text"],"properties":{
+				"error_text":{"type":"string","description":"The raw stack trace, panic dump, or exception text. Multi-line strings are fine; the parser extracts identifier-shaped tokens (Go-style pkg.Func, Python/JS-style obj.method, bare names) and file:line patterns. Common stopwords (panic / runtime / Error / Exception / Traceback / nil / true / false) are filtered."},
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project."},
+				"max_suspects":{"type":"integer","description":"Cap on ranked suspect count returned (default 5, max 20). Each suspect costs one depth-2 inbound TraceViaCTE call, so response cost is roughly linear."},
+				"trace_depth":{"type":"integer","description":"BFS depth for inbound caller traversal per suspect (default 2, max 4). Deeper traversals are correct but expand quickly."}
+			}
+		}`),
+	}, s.handleInvestigateFailure)
 
 	// 17. neighborhood — graph view around a symbol. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
@@ -12055,7 +12080,8 @@ var baselineMethodForTool = map[string]string{
 	"symbol":       baselineMethodFullFileRead,
 	"symbols":      baselineMethodFullFileRead,
 	"context":          baselineMethodFullFileRead,
-	"context_for_task": baselineMethodFullFileRead, // #1259: composite replaces N atomic file reads
+	"context_for_task":    baselineMethodFullFileRead, // #1259: composite replaces N atomic file reads
+	"investigate_failure": baselineMethodFullFileRead, // #1391 v0.81: composite replaces N atomic search/trace/changes reads
 	"search":       baselineMethodFullFileRead,
 	"query":        baselineMethodFullFileRead,
 	"trace":        baselineMethodFullFileRead,

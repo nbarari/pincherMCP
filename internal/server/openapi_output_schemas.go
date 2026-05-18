@@ -420,6 +420,63 @@ var outputSchemas = map[string]string{
 		}
 	}`,
 
+	// 16c. investigate_failure — #1391 Phase 4 composite #1 (v0.81).
+	// Bug-hunt composite: parses stack trace, ranks suspects, unions
+	// callers, intersects recent changes.
+	"investigate_failure": `{
+		"type":"object",
+		"required":["implicated_symbols","callers","recent_changes","rank","frames_parsed","_meta"],
+		"properties":{
+			"error_text":{"type":"string"},
+			"implicated_symbols":{"type":"array","items":{
+				"type":"object",
+				"properties":{
+					"symbol_id":{"type":"string"},
+					"name":{"type":"string"},
+					"qualified_name":{"type":"string"},
+					"kind":{"type":"string"},
+					"file_path":{"type":"string"},
+					"start_line":{"type":"integer"},
+					"end_line":{"type":"integer"},
+					"signature":{"type":"string"},
+					"score":{"type":"number"},
+					"evidence":{"type":"array","items":{"type":"string"}},
+					"stack_frame_match":{"type":"string"},
+					"caller_fan_in":{"type":"integer"},
+					"recent_change_file":{"type":"boolean"}
+				}
+			}},
+			"callers":{"type":"array","items":{
+				"type":"object",
+				"properties":{
+					"via_suspect":{"type":"string"},
+					"id":{"type":"string"},
+					"name":{"type":"string"},
+					"qualified_name":{"type":"string"},
+					"kind":{"type":"string"},
+					"file_path":{"type":"string"},
+					"depth":{"type":"integer"},
+					"via_kind":{"type":"string"}
+				}
+			}},
+			"recent_changes":{"type":"array","items":{
+				"type":"object",
+				"properties":{
+					"file_path":{"type":"string"}
+				}
+			}},
+			"rank":{"type":"array","items":{"type":"object"}},
+			"frames_parsed":{
+				"type":"object",
+				"properties":{
+					"names":{"type":"array","items":{"type":"string"}},
+					"files":{"type":"array","items":{"type":"string"}}
+				}
+			},
+			"_meta":` + metaRef + `
+		}
+	}`,
+
 	// 19. init — inject pincher policy into editor rules.
 	"init": `{
 		"type":"object",

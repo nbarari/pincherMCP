@@ -107,7 +107,7 @@ pincher stats
 
 ## What to read next
 
-- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-23-mcp-tools)** — full tool catalogue
+- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-24-mcp-tools)** — full tool catalogue
 - **[REFERENCE.md → `pincher init`](../REFERENCE.md#pincher-init)** — every supported target (Claude Code, Cursor, Windsurf, Aider, Continue, …) and how the marker-block contract works
 - **[Tutorial: Claude Code](claude-code.md)** — same flow with `~/.claude/CLAUDE.md`
 - **[Tutorial: HTTP dashboard](http-dashboard.md)** — point any browser-friendly client at pincher's REST API

@@ -25,7 +25,8 @@ var expectedMCPTools = map[string]bool{
 	"symbol":           true,
 	"symbols":          true,
 	"context":          true,
-	"context_for_task": true, // #1259 v0.67 composite-context tool
+	"context_for_task":    true, // #1259 v0.67 composite-context tool
+	"investigate_failure": true, // #1391 v0.81 Phase 4 composite — bug-hunt from stack trace
 	"trace":            true,
 	"query":   true,
 	"guide":   true,

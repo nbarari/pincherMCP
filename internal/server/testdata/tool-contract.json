@@ -282,6 +282,34 @@
     }
   },
   {
+    "name": "investigate_failure",
+    "description": "**Use when triaging a stack trace or crash report.** Takes `error_text` (raw stack trace / panic / exception), parses identifier-shaped frame tokens, ranks suspects by (frame-match + stack-file-match + recent-change + caller fan-in). Replaces the typical 5-call bug-hunt loop (search × N → trace × N → changes overlap → context). Returns `{implicated_symbols, callers, recent_changes, rank}` with per-suspect `evidence` enumerating which signals fired so the agent can trust or pivot. Stamps `_meta.empty_reason` when no frames parse or no suspects resolve.",
+    "input_schema": {
+      "properties": {
+        "error_text": {
+          "description": "The raw stack trace, panic dump, or exception text. Multi-line strings are fine; the parser extracts identifier-shaped tokens (Go-style pkg.Func, Python/JS-style obj.method, bare names) and file:line patterns. Common stopwords (panic / runtime / Error / Exception / Traceback / nil / true / false) are filtered.",
+          "type": "string"
+        },
+        "max_suspects": {
+          "description": "Cap on ranked suspect count returned (default 5, max 20). Each suspect costs one depth-2 inbound TraceViaCTE call, so response cost is roughly linear.",
+          "type": "integer"
+        },
+        "project": {
+          "description": "Project name or ID. Defaults to session project.",
+          "type": "string"
+        },
+        "trace_depth": {
+          "description": "BFS depth for inbound caller traversal per suspect (default 2, max 4). Deeper traversals are correct but expand quickly.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "error_text"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "list",
     "description": "**Use to confirm which projects are indexed** before scoping a query with `project=`. Returns `[{name, path, files, symbols, edges, indexed_at}, ...]` for active projects. Paginated: defaults to 50 entries per call (limit/offset), with the next page surfaced in `_meta.next_steps` when more remain. Defaults filter out projects whose on-disk path no longer exists, whose last index is older than `active_within_days` (14 by default), or that have zero edges (typically empty worktrees). Pass `active=false`/`include_dead=true`/`min_edges=0` to widen the filter, `limit=0` for the legacy unbounded dump, `prune_dead=true` to physically remove dead-on-disk projects from the store.",
     "input_schema": {
