@@ -208,6 +208,23 @@ var capabilityProbes = []capProbe{
 		},
 	},
 	{
+		// #1085 v0.78: server-initiated notifications/message. The probe
+		// asserts the notifyLog helper is reachable on the server and
+		// that it no-ops cleanly when no MCP session has been captured
+		// (the dashboard/HTTP-only process shape). The wire-level
+		// behavior — that ServerSession.Log actually emits to a
+		// subscribed client — is covered by notify_log_test.go's
+		// session-attached cases.
+		tag: "mcp_logging",
+		probe: func(t *testing.T, srv *Server) {
+			// nil-session no-op: must not panic, must not error.
+			srv.mcpSessionMu.Lock()
+			srv.mcpSession = nil
+			srv.mcpSessionMu.Unlock()
+			srv.notifyLog(context.Background(), mcp.LoggingLevel("error"), "probe")
+		},
+	},
+	{
 		tag: "metrics_prometheus",
 		probe: func(t *testing.T, srv *Server) {
 			// GET /v1/metrics must answer 200 with text/plain content-type

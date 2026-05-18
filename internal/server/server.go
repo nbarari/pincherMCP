@@ -255,6 +255,18 @@ type Server struct {
 	// calls (POST /v1/architecture etc.) as fake MCP sessions in the DB.
 	mcpConnected int32
 
+	// #1085 v0.78: live MCP session captured at onInit for server-
+	// initiated notifications (notifications/message via Log,
+	// notifications/progress via NotifyProgress). Guarded by
+	// mcpSessionMu because the drift watcher (background goroutine)
+	// reads it concurrently with onInit's writer. Nil when no MCP
+	// client is connected (e.g. HTTP-only dashboard process); the
+	// notify helpers no-op in that case. ServerSession.Log itself
+	// no-ops until the client subscribes via logging/setLevel, so
+	// emission is always opportunistic.
+	mcpSessionMu sync.Mutex
+	mcpSession   *mcp.ServerSession
+
 	// binaryPath + binaryStartMTime support the stale-binary detector
 	// (#278). Captured once at New(). On every health call we re-stat
 	// the binary path; if its mtime moved forward, a newer binary
@@ -557,12 +569,22 @@ func (s *Server) StartSessionFlusher(ctx context.Context) {
 // error to the operator.
 func (s *Server) StartSchemaDriftWatcher(ctx context.Context) {
 	s.startSchemaDriftWatcher(ctx, 60*time.Second, func() {
+		// #1085 v0.78: surface the drift to the MCP client BEFORE
+		// exiting so a connected host (Claude Code, Cursor, Zed)
+		// can render the reason for the upcoming respawn in its UI.
+		// notifyLog no-ops when no client is subscribed; opportunistic
+		// emission is the right shape (the supervisor respawn happens
+		// regardless of whether the client saw the message).
+		s.notifyLog(ctx, "error",
+			"pincher: schema drift detected — the on-disk DB schema is newer than this binary understands. Respawning to pick up the migration; the next process will fail informatively if its binary can't handle the new schema.")
 		// Exit cleanly so the supervisor's auto-respawn picks us up.
 		// The next process opens the DB, hits the migrate guard, and
 		// either succeeds (new binary understands the new schema) or
 		// surfaces the "newer than this binary understands — upgrade
-		// pincher" error.
-		os.Exit(1)
+		// pincher" error. Goes through s.exitFn (plumbed since #352)
+		// so tests can observe the notify-then-exit ordering without
+		// the test process dying.
+		s.exitFn(1)
 	})
 }
 
@@ -1172,8 +1194,43 @@ func (s *Server) MCPServer() *mcp.Server { return s.mcp }
 
 func (s *Server) onInit(ctx context.Context, req *mcp.InitializedRequest) {
 	atomic.StoreInt32(&s.mcpConnected, 1)
+	// #1085 v0.78: capture the session so background goroutines (drift
+	// watcher, future extraction-failure notifier) can fire
+	// notifications/message + notifications/progress without
+	// threading a session arg through every call site.
+	s.mcpSessionMu.Lock()
+	s.mcpSession = req.Session
+	s.mcpSessionMu.Unlock()
 	s.sessionOnce.Do(func() {
 		s.detectRoot(ctx, req.Session)
+	})
+}
+
+// notifyLog fires an MCP notifications/message at the given level if
+// (a) an MCP client is connected and (b) the client has subscribed via
+// logging/setLevel. Otherwise it no-ops silently. Server-internal
+// helper for #1085 — used by the drift watcher and (future) the
+// extraction-failure path to surface signal-to-noise judgment calls to
+// the client UI without spamming hosts that haven't opted in.
+//
+// `level` follows the MCP LoggingLevel enum (debug / info / notice /
+// warning / error / critical / alert / emergency). Pincher emits at
+// warning / error today.
+func (s *Server) notifyLog(ctx context.Context, level mcp.LoggingLevel, message string) {
+	s.mcpSessionMu.Lock()
+	sess := s.mcpSession
+	s.mcpSessionMu.Unlock()
+	if sess == nil {
+		return
+	}
+	// Best-effort: ServerSession.Log returns nil silently if the
+	// client hasn't called logging/setLevel — that's the same
+	// no-subscriber default the SDK enforces. Errors here are not
+	// actionable (the client may have just disconnected).
+	_ = sess.Log(ctx, &mcp.LoggingMessageParams{
+		Level:  level,
+		Logger: "pincher",
+		Data:   message,
 	})
 }
 
@@ -3366,6 +3423,15 @@ func computeCapabilities(s *Server) []string {
 		// so router/aggregator retry logic can act on a machine-readable
 		// declaration rather than assuming "not idempotent" conservatively.
 		"idempotency_declared",
+
+		// Server-initiated MCP notifications/message (#1085, v0.78).
+		// Pincher fires LoggingMessageParams via ServerSession.Log for
+		// background-event surfacing the request/response envelope can't
+		// reach — currently the schema-drift respawn warning, eventually
+		// extraction-failure spikes and async indexing progress. Hosts
+		// must subscribe via logging/setLevel to receive them; pincher
+		// emits opportunistically and never blocks on delivery.
+		"mcp_logging",
 	}
 
 	// Conditional capability — present when the operator has wired
