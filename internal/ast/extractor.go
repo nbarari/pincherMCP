@@ -351,7 +351,12 @@ func init() {
 	Register(&langAdapter{
 		primary: "PHP",
 		exts:    map[string]string{".php": "PHP"},
-		confidence: 0.70,
+		// #1461 v0.73: promoted 0.70 → 0.85 (stable-regex tier).
+		// Adds interface / trait / enum (PHP 8.1+); #[Attribute]
+		// prefix tolerance (PHP 8+ syntax); final / readonly
+		// modifiers (PHP 8.2+); abstract on funcRE; flexible
+		// modifier ordering (modifiers before or after access).
+		confidence: 0.85,
 		fn: func(s []byte, _, p string, _ ExtractOptions) *FileResult {
 			return extractPHP(s, p)
 		},
@@ -2622,13 +2627,36 @@ func extractRuby(source []byte, relPath string) *FileResult {
 	return rubyRE.extract(source, relPath, "Ruby", opts)
 }
 
+// PHP regex-tier extractor. #1461 v0.73 promotes from 0.70 → 0.85
+// (stable-regex tier). Adds:
+//   - `interface` (was completely missing)
+//   - `trait` (PHP code-reuse mechanism, completely missing)
+//   - `enum` (PHP 8.1+ — pure and backed enums)
+//   - `#[Attribute]` and `#[Attribute(args)]` prefix tolerance (PHP
+//     8+ syntax — `#[Route]`, `#[ORM\Entity]`, `#[Test]`, etc.)
+//   - `final` / `readonly` modifiers (PHP 8.2+ readonly classes)
+//   - `abstract` on funcRE (was only on classRE)
+//   - Flexible modifier ordering: PHP grammar allows access and
+//     class-level modifiers in any combination
+//     (`abstract public function`, `public abstract function`,
+//     `static final public`, etc.) — captured by a single
+//     order-independent modifier alternation.
+//
 // phpRE patterns lead with `^\s*` so indented class methods match —
 // the regex extractor feeds these one line at a time, so `\s` cannot
 // span newlines here. Without it, every method inside a PHP class was
 // silently dropped (#813).
 var phpRE = &regexExtractor{
-	funcRE:  regexp.MustCompile(`(?m)^\s*(?:public|private|protected)?\s*(?:static\s+)?function\s+(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)`),
-	classRE: regexp.MustCompile(`(?m)^\s*(?:abstract\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
+	funcRE:      regexp.MustCompile(`(?m)^\s*(?:#\[[^\]]+\]\s*)*(?:(?:public|private|protected|static|final|abstract|readonly)\s+)*function\s+(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)`),
+	classRE:     regexp.MustCompile(`(?m)^\s*(?:#\[[^\]]+\]\s*)*(?:(?:abstract|final|readonly)\s+)*class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_\\]*))?`),
+	interfaceRE: regexp.MustCompile(`(?m)^\s*(?:#\[[^\]]+\]\s*)*interface\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
+	enumRE:      regexp.MustCompile(`(?m)^\s*(?:#\[[^\]]+\]\s*)*enum\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
+	// trait: PHP-specific code-reuse mechanism, declared with the
+	// `trait` keyword. Modeled via scopeRE (sets currentClass so
+	// inner methods scope as Method/Parent=Trait, but emits no
+	// separate Class symbol — the trait isn't a type, just a
+	// mixin container).
+	scopeRE: regexp.MustCompile(`(?m)^\s*(?:#\[[^\]]+\]\s*)*trait\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
 }
 
 func extractPHP(source []byte, relPath string) *FileResult {

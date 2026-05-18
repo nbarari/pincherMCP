@@ -287,9 +287,9 @@ Every symbol carries an `extraction_confidence` score surfaced in search results
 |---|---|---|
 | `1.0` | `go/ast` / `yaml.v3` / `mvdan.cc/sh/v3` / `hashicorp/hcl/v2/hclsyntax` / `BurntSushi/toml` / `yuin/goldmark` / `nikolalohinski/gonja` / `python/ast` (#856) | Go, YAML, JSON, Bash, HCL/Terraform, TOML, Markdown, Jinja2, Python |
 | `~0.92–0.98` | AST/regex blends | HTML (Section, 0.917), JavaScript/TypeScript (Regex, ~0.96–0.98 typical) |
-| `0.85` | Stable regex | JSX, TSX, Rust, Java, Swift, Kotlin, Makefile, SQL |
+| `0.85` | Stable regex | JSX, TSX, Rust, Java, Swift, Kotlin, PHP, Makefile, SQL |
 | `~0.9` | Approximate regex (#1107 Ruby tuning) | Ruby |
-| `0.70` | Approximate regex | PHP, C, C++, C# |
+| `0.70` | Approximate regex | C, C++, C# |
 
 ---
 
