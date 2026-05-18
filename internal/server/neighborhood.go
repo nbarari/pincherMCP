@@ -40,6 +40,24 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 	projectArg := str(args, "project")
 	includeSource := boolArg(args, "include_source") // default false
 	includeSelf := boolArg(args, "include_self")     // default false
+	// #1442: per-neighbor fields projection. Same shape as
+	// search/symbol/symbols — comma-separated allow-list, empty
+	// means all fields. Used to drop the heavy signature +
+	// qualified_name + extraction_confidence shape when only the
+	// in-file outline is needed. include_source still gates the
+	// source-byte disk read; fields=id,source requires
+	// include_source=true to actually fetch source.
+	fieldsArg := str(args, "fields")
+	var fieldSet map[string]bool
+	if fieldsArg != "" {
+		fieldSet = make(map[string]bool)
+		for _, f := range strings.Split(fieldsArg, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				fieldSet[f] = true
+			}
+		}
+	}
 	// #1228 (thin-client umbrella PR 4): include_fixtures defaults to
 	// false. Mirrors trace #1225 + query #1212 fixture-filter behaviour.
 	// When the seed's file_path matches isTestFixturePath (testdata/,
@@ -288,7 +306,7 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 
 	neighbors := make([]map[string]any, 0, len(page))
 	for _, sym := range page {
-		entry := map[string]any{
+		allFields := map[string]any{
 			"id":                    sym.ID,
 			"name":                  sym.Name,
 			"qualified_name":        sym.QualifiedName,
@@ -301,9 +319,27 @@ func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolReques
 			"is_exported":           sym.IsExported,
 			"extraction_confidence": sym.ExtractionConfidence,
 		}
+		// #1442: source-byte read still requires include_source=true;
+		// fieldSet alone doesn't trigger the disk read because (a)
+		// it'd surprise callers who passed fields=id,source
+		// expecting only-cheap fields, and (b) the disk-read
+		// budget is materially different from the in-memory field
+		// projection. The pattern mirrors handleSymbol's
+		// includeSource handling.
 		if includeSource && root != "" {
 			if src, _ := readSymbolSourceForNeighbor(root, sym); src != "" {
-				entry["source"] = src
+				allFields["source"] = src
+			}
+		}
+		var entry map[string]any
+		if fieldSet == nil {
+			entry = allFields
+		} else {
+			entry = make(map[string]any, len(fieldSet))
+			for k := range fieldSet {
+				if v, ok := allFields[k]; ok {
+					entry[k] = v
+				}
 			}
 		}
 		neighbors = append(neighbors, entry)

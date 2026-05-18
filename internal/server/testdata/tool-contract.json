@@ -327,6 +327,10 @@
           "description": "#1232 opt-in: when the seed ID isn't in the session project but exists in another indexed project, default behavior is to error (rich-error with next_steps) instead of silently returning every in-file sibling from that other project — agents using the neighbor list to plan an in-file refactor would otherwise edit the wrong tree. Pass cross_project=true to opt back into the legacy silent-fallback-with-warning behavior. Default false. Has no effect when project= is set explicitly.",
           "type": "boolean"
         },
+        "fields": {
+          "description": "#1442: comma-separated allow-list of per-neighbor fields to include (e.g. 'id,name,kind,start_line'). Omit for all fields. Use to drop the heavy signature + extraction_confidence + qualified_name shape when only the in-file outline is needed — typical 3-4x payload reduction on metadata-only calls. Mirrors search's fields= projection. include_source still gates source bytes; fields=id,source still requires include_source=true to read.",
+          "type": "string"
+        },
         "id": {
           "description": "Stable symbol ID of the seed. The neighborhood is every symbol that shares its file.",
           "type": "string"
