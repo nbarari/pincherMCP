@@ -2374,14 +2374,26 @@ func (idx *Indexer) resolveUsesVar(projectID string, pending []ast.ExtractedEdge
 
 	seen := make(map[string]bool)
 	edges := make([]db.Edge, 0, len(pending))
+	// #1479 diagnostic counters — surface why pending edges drop so the
+	// user can distinguish "resolver bug" from "var-decl path not in the
+	// canonical set" from "extractor emitted unbindable refs". Logged
+	// once per resolve pass at the end, only when something dropped, so
+	// healthy projects stay quiet.
+	var droppedFromMissing, droppedToMissing, dedupedDuplicate int
 	for _, e := range pending {
 		fromID := resolveFrom(e.FromQN, e.FromFile)
 		toID := resolveTo(e.ToName)
-		if fromID == "" || toID == "" {
+		if fromID == "" {
+			droppedFromMissing++
+			continue
+		}
+		if toID == "" {
+			droppedToMissing++
 			continue
 		}
 		key := fromID + "\x00" + toID
 		if seen[key] {
+			dedupedDuplicate++
 			continue
 		}
 		seen[key] = true
@@ -2417,9 +2429,39 @@ func (idx *Indexer) resolveUsesVar(projectID string, pending []ast.ExtractedEdge
 		}
 	}
 
+	// #1479 diagnostic: surface drop counts when ANY edges were
+	// dropped so users debugging "USES_VAR is silently 0 in my DB" can
+	// distinguish bug-modes. Logged at INFO so doctor / dashboards can
+	// pick it up; counters are summed across the pass.
+	dropped := droppedFromMissing + droppedToMissing
+	if dropped > 0 || dedupedDuplicate > 0 {
+		slog.Info("pincher.uses_var.resolve.summary",
+			"project_id", projectID,
+			"pending_in", len(pending),
+			"resolved_out", len(edges),
+			"dropped_from_missing", droppedFromMissing,
+			"dropped_to_missing", droppedToMissing,
+			"deduped_duplicate", dedupedDuplicate,
+		)
+	}
+
 	// Atomic replace, same pattern as resolveImports (#475). Without
 	// this, removing a Jinja/YAML var reference between re-index runs
 	// would leave the prior edge behind forever.
+	//
+	// #1479 ordering note: the DELETE fires even when len(edges)==0,
+	// which is intentional — if every reference was removed from the
+	// source files between passes, the prior edges should disappear
+	// too. The early-return at the top of resolveUsesVar handles the
+	// "nothing was passed in" case before reaching this point, so a
+	// resolveChanged=false watcher tick can't wipe the prior edges
+	// (cf. indexer.go:878 gate). The user-visible #1479 symptom
+	// ("USES_VAR shows in summary but absent from DB") would imply
+	// either (a) every pending edge dropped to_missing because the
+	// resolver couldn't find Setting symbols in canonical var-decl
+	// paths, OR (b) the DELETE fires and INSERT silently fails. The
+	// new pincher.uses_var.resolve.summary log + the BulkUpsertEdges
+	// error path below pin both.
 	if err := idx.store.DeleteEdgesByKindAndSource(projectID, "USES_VAR", "resolve_pass"); err != nil {
 		slog.Warn("pincher.uses_var.delete_prior.err", "err", err)
 	}
@@ -2427,7 +2469,7 @@ func (idx *Indexer) resolveUsesVar(projectID string, pending []ast.ExtractedEdge
 		return 0
 	}
 	if err := idx.store.BulkUpsertEdges(edges); err != nil {
-		slog.Warn("pincher.uses_var.upsert.err", "err", err)
+		slog.Warn("pincher.uses_var.upsert.err", "err", err, "edge_count", len(edges))
 		return 0
 	}
 	return len(edges)
