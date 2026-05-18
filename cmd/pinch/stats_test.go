@@ -364,13 +364,18 @@ func TestStatsCLI_TextOutput_RetriesSection(t *testing.T) {
 	if !strings.Contains(out, "RETRIES") {
 		t.Errorf("RETRIES header missing from output:\n%s", out)
 	}
-	for _, label := range []string{"Total queries:", "Zero-result:", "Retry rate:", "Recovered:", "Tokens burned:"} {
+	for _, label := range []string{"Total queries:", "Zero-result:", "Zero-result rate:", "Recovered:", "Retry success:", "Tokens burned:"} {
 		if !strings.Contains(out, label) {
 			t.Errorf("retries label %q missing from output:\n%s", label, out)
 		}
 	}
 	if !strings.Contains(out, "18.0%") {
-		t.Errorf("retry rate 18.0%% missing from output:\n%s", out)
+		t.Errorf("zero-result rate 18.0%% missing from output:\n%s", out)
+	}
+	// #1494: "Retry rate:" was the misleading pre-fix label; if it
+	// resurfaces, the rename regressed.
+	if strings.Contains(out, "Retry rate:") {
+		t.Errorf("legacy 'Retry rate:' label present — #1494 rename regressed:\n%s", out)
 	}
 	if !strings.Contains(out, "4,200") {
 		t.Errorf("commified tokens-burned 4,200 missing from output:\n%s", out)
@@ -450,8 +455,17 @@ func TestStatsCLI_JSONShape_QueryMetrics(t *testing.T) {
 	if got := qm["queries_zero_result"]; got != float64(5) {
 		t.Errorf("queries_zero_result = %v, want 5", got)
 	}
-	if got := qm["retry_rate"]; got != 0.1 {
-		t.Errorf("retry_rate = %v, want 0.1 (5/50)", got)
+	// #1494 rename: retry_rate → zero_result_rate (the value is
+	// queries_zero_result/queries_total, which has never been a true
+	// retry rate). retry_success_rate is the new positive signal.
+	if got := qm["zero_result_rate"]; got != 0.1 {
+		t.Errorf("zero_result_rate = %v, want 0.1 (5/50)", got)
+	}
+	if _, present := qm["retry_rate"]; present {
+		t.Errorf("legacy retry_rate field present — #1494 rename regressed")
+	}
+	if got := qm["retry_success_rate"]; got != 0.8 {
+		t.Errorf("retry_success_rate = %v, want 0.8 (4/5)", got)
 	}
 }
 

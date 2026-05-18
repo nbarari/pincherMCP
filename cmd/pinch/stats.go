@@ -136,14 +136,42 @@ type AllTimeSavings struct {
 }
 
 // QueryMetricsReport mirrors db.QueryMetrics with JSON tags suited for
-// the `pincher stats --json` shape. Surfaces the four counters plus a
-// derived RetryRate so consumers don't have to recompute.
+// the `pincher stats --json` shape. Surfaces the four counters plus
+// two derived rates so consumers don't have to recompute them.
+//
+// Naming honesty note (#1494): the pre-v0.78.1 field `retry_rate` was
+// mis-named — it actually held `queries_zero_result / queries_total`,
+// which is the rate at which a query returned zero rows, NOT the rate
+// at which the caller had to retry. On a healthy codebase the
+// dominant zero-result class is audit-shape queries
+// (`MATCH (f:Function) WHERE NOT EXISTS { ... }` — zero rows = the
+// invariant holds) so the value routinely looked like a five-alarm
+// fire while nothing was actually wrong. The honest naming is
+// `zero_result_rate`. `retry_success_rate` is the new positive
+// signal — when a caller DID hit zero and DID retry, how often did
+// the retry succeed.
+//
+// Half 2 (this PR) ships the naming fix. Half 1 — splitting
+// `queries_zero_result` into `queries_zero_expected` (audit-shape) +
+// `queries_zero_unexpected` (caller surprised) — needs a schema
+// migration and is tracked separately (out of scope for the v0.78.1
+// patch line; queued for v0.80 or v0.79 hardening per re-triage).
 type QueryMetricsReport struct {
 	QueriesTotal            int64   `json:"queries_total"`
 	QueriesZeroResult       int64   `json:"queries_zero_result"`
 	QueriesRetriedSucceeded int64   `json:"queries_retried_succeeded"`
 	TokensBurnedOnFailures  int64   `json:"tokens_burned_on_failures"`
-	RetryRate               float64 `json:"retry_rate"` // queries_zero_result / queries_total, 0 when no queries
+	// ZeroResultRate = queries_zero_result / queries_total. 0 when no
+	// queries. Same value as the pre-v0.78.1 `retry_rate` field but
+	// under the honest name.
+	ZeroResultRate float64 `json:"zero_result_rate"`
+	// RetrySuccessRate = queries_retried_succeeded / queries_zero_result.
+	// 0 when no zero-result queries (denominator is undefined; surface
+	// as 0 not omitted so dashboards have a stable shape). Reads as
+	// "of the zero-result calls, what fraction recovered via a retry."
+	// A high value here is GOOD (the agent self-corrected); a low
+	// value at high zero_result_rate is the actual friction signal.
+	RetrySuccessRate float64 `json:"retry_success_rate"`
 }
 
 // ProjectStats is a per-project file/symbol/edge breakdown.
@@ -209,9 +237,13 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 		})
 	}
 
-	var retryRate float64
+	var zeroResultRate float64
 	if qm.QueriesTotal > 0 {
-		retryRate = float64(qm.QueriesZeroResult) / float64(qm.QueriesTotal)
+		zeroResultRate = float64(qm.QueriesZeroResult) / float64(qm.QueriesTotal)
+	}
+	var retrySuccessRate float64
+	if qm.QueriesZeroResult > 0 {
+		retrySuccessRate = float64(qm.QueriesRetriedSucceeded) / float64(qm.QueriesZeroResult)
 	}
 
 	return &StatsReport{
@@ -227,7 +259,8 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 				QueriesZeroResult:       qm.QueriesZeroResult,
 				QueriesRetriedSucceeded: qm.QueriesRetriedSucceeded,
 				TokensBurnedOnFailures:  qm.TokensBurnedOnFailures,
-				RetryRate:               retryRate,
+				ZeroResultRate:          zeroResultRate,
+				RetrySuccessRate:        retrySuccessRate,
 			},
 		},
 		Projects: projOut,
@@ -309,18 +342,31 @@ func formatStatsText(r *StatsReport) string {
 
 	// RETRIES rows (#241): query-failure / retry-rate counters surfaced
 	// only when at least one query-shaped call has been recorded. On a
-	// healthy project with low retry rate the whole section is omitted
-	// to avoid noise; on a misaligned-default project the high
-	// retry-rate row jumps out as a "your threshold is wrong" signal.
+	// healthy project with low zero-result rate the whole section is
+	// omitted to avoid noise; on a misaligned-default project the high
+	// zero-result row jumps out as a "your threshold is wrong" signal.
+	//
+	// #1494: "Retry rate:" label was mis-named — the value is actually
+	// queries_zero_result / queries_total, which on a healthy
+	// codebase is dominated by audit-shape queries (intentional zero
+	// rows). The honest label is "Zero-result rate:". A new "Retry
+	// success:" row surfaces queries_retried_succeeded /
+	// queries_zero_result so users can see how often the agent
+	// recovered after a zero result; only rendered when there ARE
+	// zero results to avoid a divide-by-zero-ish display on perfectly
+	// healthy projects.
 	if r.AllTime.QueryMetrics.QueriesTotal > 0 {
 		qm := r.AllTime.QueryMetrics
 		rows = append(rows,
 			row{"Total queries:", commify(qm.QueriesTotal)},
 			row{"Zero-result:", commify(qm.QueriesZeroResult)},
-			row{"Retry rate:", fmt.Sprintf("%.1f%%", qm.RetryRate*100)},
+			row{"Zero-result rate:", fmt.Sprintf("%.1f%%", qm.ZeroResultRate*100)},
 			row{"Recovered:", commify(qm.QueriesRetriedSucceeded)},
-			row{"Tokens burned:", commify(qm.TokensBurnedOnFailures)},
 		)
+		if qm.QueriesZeroResult > 0 {
+			rows = append(rows, row{"Retry success:", fmt.Sprintf("%.1f%%", qm.RetrySuccessRate*100)})
+		}
+		rows = append(rows, row{"Tokens burned:", commify(qm.TokensBurnedOnFailures)})
 	}
 	retriesEnd := len(rows)
 

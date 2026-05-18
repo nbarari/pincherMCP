@@ -987,10 +987,14 @@ END;`,
 	// equivalent args (modulo confidence/limit knobs) returning ≥1
 	// result — i.e. the agent learned, retried, and recovered.
 	// tokens_burned_on_failures sums tokens_used across the zero-result
-	// calls. Surfaced in `pincher stats` so users can see "Retry rate:
-	// 18%" and act (lower default min_confidence in CLAUDE.md, or file
-	// an extractor issue), instead of paying retry tokens forever
-	// without aggregate visibility.
+	// calls. Surfaced in `pincher stats` (#1494 renamed the JSON field
+	// + human label "Retry rate" → "Zero-result rate" — the original
+	// naming was metric-honesty-broken, the value is
+	// queries_zero_result/queries_total which is dominated by audit-
+	// shape queries on healthy codebases). Users can see the rate and
+	// act — lower default min_confidence in CLAUDE.md, or file an
+	// extractor issue — instead of paying retry tokens forever without
+	// aggregate visibility.
 	`ALTER TABLE sessions ADD COLUMN queries_total            INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE sessions ADD COLUMN queries_zero_result      INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE sessions ADD COLUMN queries_retried_succeeded INTEGER NOT NULL DEFAULT 0;
