@@ -1048,6 +1048,22 @@ func extractGoReads(d *ast.FuncDecl, callerQN string, importPkgs map[string]bool
 		if isPredeclaredOrBlank(name) {
 			return
 		}
+		// #1423: skip bare-name reads of locals (parameters, receiver,
+		// in-body declarations). Without this filter a parameter whose
+		// name happens to match a project Function (e.g. `totalSymbols
+		// int` shadowing the test helper `func totalSymbols(...)`)
+		// emits a READS that the #565 binding-pass converts to a false
+		// CALLS edge. Go's scope rules guarantee the local resolution
+		// wins inside the function body, so the READS would drop at
+		// resolve-time anyway — we just don't emit it in the first
+		// place. Selector reads (`local.Field`) still emit because the
+		// trailing `.Field` legitimately resolves to a field/method on
+		// the type — baseType != "" marks the selector path.
+		if baseType == "" && !strings.Contains(name, ".") {
+			if _, isLocal := varTypes[name]; isLocal {
+				return
+			}
+		}
 		if idx, ok := seenReads[name]; ok {
 			// A later typed read upgrades an earlier untyped one so the
 			// #760 resolver gets the disambiguating type even when the
