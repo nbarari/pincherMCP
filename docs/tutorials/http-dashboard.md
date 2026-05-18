@@ -40,8 +40,8 @@ pincher --http 0.0.0.0:7777 --http-key "$(openssl rand -hex 32)"
 Note the key — you'll need it on every request:
 
 ```bash
-export PINCHER_KEY=<the-key-you-just-generated>
-curl -H "Authorization: Bearer $PINCHER_KEY" http://your-host:7777/v1/projects
+export KEY=<the-key-you-just-generated>
+curl -H "Authorization: Bearer $KEY" http://your-host:7777/v1/projects
 ```
 
 If you want the key out of argv, use the `PINCHER_HTTP_KEY` env var instead of `--http-key`. For deployments behind a trusted reverse proxy with its own auth, the explicit escape hatch is `--http-allow-open` (or `PINCHER_HTTP_ALLOW_OPEN=1`).
@@ -126,7 +126,7 @@ curl -s http://localhost:7777/v1/trace \
 If you started pincher with `--http-key`, every request needs an `Authorization: Bearer <key>` header:
 
 ```bash
-curl -s -H "Authorization: Bearer $PINCHER_KEY" \
+curl -s -H "Authorization: Bearer $KEY" \
   http://localhost:7777/v1/projects | jq
 ```
 

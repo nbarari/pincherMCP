@@ -766,6 +766,8 @@ Used when the matching flag is empty — convenient for Docker, systemd, launchd
 |---|---|
 | `PINCHER_HTTP_ADDR` | `--http` |
 | `PINCHER_HTTP_KEY` | `--http-key` |
+| `PINCHER_HTTP_ALLOW_OPEN` | `--http-allow-open` (set to `1` to bind HTTP without an auth key — for deployments behind a trusted reverse proxy that handles auth itself) |
+| `PINCHER_MCP_HTTP_PATH` | `--mcp-http-path` (e.g. `/mcp`; mounts the Streamable-HTTP MCP transport on the HTTP server. Required by aggregators that speak MCP over HTTP — see [`docs/streamable-http.md`](streamable-http.md) and the [Codex tutorial](tutorials/codex.md)) |
 | `PINCHER_BASEPATH` | `--basepath` |
 | `PINCHER_TRUST_PROXY` | `--trust-proxy` (set to `1` to enable) |
 | `PINCHER_DB_READERS` | `--db-readers` |
@@ -783,7 +785,12 @@ Used when the matching flag is empty — convenient for Docker, systemd, launchd
 | macOS | `~/Library/Application Support/kwad77/pincher.db` |
 | Linux | `~/.local/share/kwad77/pincher.db` |
 
-Override with `--data-dir /custom/path`. Back up with any file copy tool.
+Override with either:
+
+- **`--data-dir /custom/path`** — passed to any `pincher` subcommand. The path is used verbatim (no `pincherMCP` suffix appended); the directory is auto-created if missing.
+- **`PINCHER_DATA_DIR=/custom/path`** — same effect at the env-var level. Useful when wiring pincher into an MCP host config that already passes an `env:` block (e.g. VS Code's `.vscode/mcp.json` per the [VS Code Copilot tutorial](tutorials/vscode-copilot.md#4-register-pincher-as-an-mcp-server) — a per-target `PINCHER_DATA_DIR` keeps each editor's pincher session counters isolated). `--data-dir` wins when both are set.
+
+Back up with any file copy tool.
 
 ---
 
