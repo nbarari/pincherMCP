@@ -251,9 +251,24 @@ func (m *markdownExtractor) Extract(source []byte, _, relPath string, _ ExtractO
 	//
 	// Goldmark renders most absolute URLs back as `node.Destination` raw,
 	// so a simple scheme-prefix check is sufficient.
+	// #1481 v0.77: selfModule for intra-doc anchor links (`[x](#y)`)
+	// must be the SAME QN-root the Section symbols got — the
+	// extractor builds Section QNs from the H1 slug downward (e.g.
+	// `project.installation` for the README's "Installation" section
+	// under H1 "Project"), NOT from the filename. Pre-fix this used
+	// `result.Module` which was never set in markdown.go (the comment
+	// on markdownModuleName claimed it was, but the assignment was
+	// missing). The empty string produced ToName=".configuration"
+	// which never matched any Section symbol, dropping every intra-
+	// doc REFERENCES edge. Now we derive selfModule from the first
+	// heading's slug (matches the convention Sections actually use).
+	selfModule := ""
+	if len(headings) > 0 {
+		selfModule = markdownSlug(headings[0].title)
+	}
 	seenEdge := make(map[string]struct{})
 	for _, lnk := range links {
-		toName := canonicalDocsLinkTarget(lnk.dest, result.Module)
+		toName := canonicalDocsLinkTarget(lnk.dest, selfModule)
 		if toName == "" {
 			continue
 		}

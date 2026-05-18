@@ -37,7 +37,15 @@ See [the tutorial](docs/tutorials/quickstart.md).
 	}
 }
 
-func TestExtractMarkdown_IntraDocLink_EmitsREFERENCES_1343(t *testing.T) {
+func TestExtractMarkdown_IntraDocLink_EmitsREFERENCES_1343_1481(t *testing.T) {
+	// #1481 v0.77: intra-doc anchor links must resolve to the actual
+	// Section QN, which is built from the H1-heading hierarchy
+	// (NOT the filename). Pre-fix this test expected ToName=
+	// "guide.setup" — but the Section symbol's QN is "top.setup"
+	// (the H1 is "Top"), so the emitted edge never matched any real
+	// Section, and the resolver dropped 100% of intra-doc edges in
+	// production despite this unit test passing. Test now asserts
+	// the H1-rooted shape so the edge actually resolves end-to-end.
 	src := []byte(`# Top
 
 [Back to setup](#setup)
@@ -52,13 +60,13 @@ Setup instructions.
 	}
 	var found bool
 	for _, e := range result.Edges {
-		if e.Kind == "REFERENCES" && e.FromQN == "top" && e.ToName == "guide.setup" {
+		if e.Kind == "REFERENCES" && e.FromQN == "top" && e.ToName == "top.setup" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected intra-doc REFERENCES edge top → guide.setup; got %+v", result.Edges)
+		t.Errorf("expected intra-doc REFERENCES edge top → top.setup (Section QN root is H1 slug, not filename); got %+v", result.Edges)
 	}
 }
 
