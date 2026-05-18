@@ -468,6 +468,7 @@ Responses compress ~65% with `Accept-Encoding: gzip`. Tested clients: curl, Pyth
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/v1/health` | GET | No | Liveness probe — schema version, index staleness. Always 200. |
+| `/v1/ready` | GET | No | Readiness probe (#660) — 200 when the server can serve traffic; 503 when an essential dependency (store, indexer, schema migration) isn't ready. Use `/v1/health` for liveness and `/v1/ready` for readiness gating in orchestrator manifests (Kubernetes `readinessProbe`, systemd `Type=notify`). |
 | `/v1/dashboard` | GET | No | Self-contained HTML dashboard (stats, search, project cards, sparkline). No external deps. |
 | `/v1/dashboard.css` | GET | No | Dashboard stylesheet. Served separately so CSP can drop `'unsafe-inline'`. |
 | `/v1/dashboard.js` | GET | No | Dashboard JavaScript. Same CSP rationale. |
