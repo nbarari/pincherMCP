@@ -95,15 +95,6 @@ h2{font-size:28px;font-weight:700;letter-spacing:-.5px;margin-bottom:8px}
 .install-pane{display:none}
 .install-pane.active{display:block}
 
-.comparison{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;margin-top:20px;overflow-x:auto}
-.comparison table{width:100%;border-collapse:collapse;font-size:13px;min-width:540px}
-.comparison th,.comparison td{padding:12px 14px;text-align:left;border-bottom:1px solid var(--border)}
-.comparison tr:last-child td{border-bottom:none}
-.comparison th{color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
-.comparison td.yes{color:var(--green);font-weight:600}
-.comparison td.no{color:var(--muted)}
-.comparison td.tool{font-weight:600;color:var(--text)}
-
 footer{border-top:1px solid var(--border);margin-top:40px;padding:32px 24px;text-align:center;color:var(--muted);font-size:13px}
 footer a{color:var(--accent)}
 </style>
@@ -116,7 +107,9 @@ footer a{color:var(--accent)}
     pincher<span>MCP</span>
   </a>
   <div class="links">
-    <a href="#how">How it works</a>
+    <a href="#leverage">Leverage</a>
+    <a href="#example">Example</a>
+    <a href="#how">Storage</a>
     <a href="#tools">Tools</a>
     <a href="#install">Install</a>
     <a href="#vision">Roadmap</a>
@@ -128,10 +121,10 @@ footer a{color:var(--accent)}
   <img src="assets/pinchy.png" alt="Pinchy, the pincherMCP mascot — a pixel-art crab holding a copper penny" class="pixel pinchy-hero"/>
   <div class="pill">Single binary · pure Go · no cloud</div>
   <h1>Codebase intelligence<br/>for LLM agents.</h1>
-  <p class="sub">pincherMCP indexes any repo into a byte-offset symbol store, a knowledge graph, and a BM25 full-text search — all populated in one AST pass — then exposes 23 tools over MCP stdio or HTTP REST. Agents get what they need in tokens, not files. Every response carries a structured <code>_meta</code> envelope your agent loop can route on.</p>
+  <p class="sub">pincherMCP indexes any repo into a byte-offset symbol store, a knowledge graph, and a BM25 full-text search — all populated in one AST pass — then exposes 23 tools over MCP stdio or HTTP REST. Agents get what they need in tokens, not files. <strong>Pincher is the foundation</strong>; the <code>_meta</code> envelope on every response is the enabler; the LLM in your host's loop is the router. <a href="integrations/loop-leverage-layers.md">Read the leverage-layers frame →</a></p>
   <div class="cta">
     <a class="btn btn-primary" href="#install">Install</a>
-    <a class="btn btn-secondary" href="https://github.com/kwad77/pincher">View on GitHub →</a>
+    <a class="btn btn-secondary" href="#leverage">How it earns its keep →</a>
   </div>
 </section>
 
@@ -146,20 +139,58 @@ footer a{color:var(--accent)}
   </div>
 </section>
 
-<section id="how">
-  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>How it works</h2>
-  <p class="section-sub">Three co-located indexes, one shared symbol table. No duplication, no sync overhead.</p>
+<section id="leverage">
+  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>Three leverage layers that stack</h2>
+  <p class="section-sub">Skip a layer and you leave value on the table. Most integrators wire up the atomic tools, miss the hook (the highest-leverage layer per token saved), and never branch on <code>_meta</code> — extracting ~20% of the available leverage. Full frame: <a href="integrations/loop-leverage-layers.md">loop-leverage-layers.md</a>.</p>
   <div class="cards">
     <div class="card">
-      <h3>Byte-offset store <span class="badge">Layer 1</span></h3>
+      <h3>1. Hook <span class="badge">pre-call</span></h3>
+      <p><code>pincher hook-check</code> intercepts <code>Read</code> / <code>Grep</code> BEFORE the agent commits. Returns "use this pincher tool instead" with a <code>_meta</code>-shaped justification. Zero round-trips — runs inside the host's tool-dispatch hook. The avoided call is <strong>infinite percent saving</strong>: the cost of a call that never fires is zero. Installed by <code>pincher init --target=&lt;your-host&gt;</code>.</p>
+    </div>
+    <div class="card">
+      <h3>2. <code>_meta</code> envelope <span class="badge">mid-loop</span></h3>
+      <p>Every response carries typed signals the agent's NEXT call branches on: <code>next_steps[]</code>, <code>empty_reason</code> enum, <code>warnings_v2[]</code>, <code>capabilities[]</code>, <code>request_id</code>, drift fields. Three branches and a loop on the host side replaces a paragraph of model reasoning per turn. Per-field contract: <a href="integrations/meta-envelope-contract.md">meta-envelope-contract.md</a>.</p>
+    </div>
+    <div class="card">
+      <h3>3. Composite tool <span class="badge">round-trip</span></h3>
+      <p><code>context_for_task</code> (v0.66) bundles the canonical 5–10-call investigation behind one entry point. Same store, no nested envelopes — direct execution. Latency drops ~5× on interactive UIs; the agent stops seeing "thinking…" indicators between every atomic call. Phase 4 composites (<a href="https://github.com/kwad77/pincher/issues/1391">#1391</a>) gate on real usage data — composites bundling the wrong sequences are worse than no composite at all.</p>
+    </div>
+  </div>
+</section>
+
+<section id="example">
+  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>Same investigation, three shapes</h2>
+  <p class="section-sub">Real task: "why does the <code>TestExtractGoCalls_Closure</code> test sometimes emit phantom CALLS edges?" Three integration shapes, three radically different token / latency profiles.</p>
+  <div class="cards">
+    <div class="card">
+      <h3>A — atomic only <span class="badge">~45K tokens</span></h3>
+      <p><strong>7 calls</strong>: <code>Grep</code> for the test → <code>Read</code> three large files → <code>Grep</code> "phantom CALLS" → <code>Grep</code> "shadow" → <code>Read</code> 8 more files. None of the reads were "wrong" — just bigger than necessary. This is what most hosts default to without pincher wired into the hook layer.</p>
+    </div>
+    <div class="card">
+      <h3>B — atomic + <code>_meta</code> branching <span class="badge">~3.2K tokens</span></h3>
+      <p><strong>4 calls</strong>: <code>search</code> → <code>context</code> → <code>trace</code> → <code>query</code>. Each call's <code>_meta.next_steps</code> shaped the next; <code>_meta.warnings_v2</code> named the related fix (<a href="https://github.com/kwad77/pincher/issues/1429">#1429</a>) so the agent stopped exploring. <strong>14× cheaper than shape A.</strong></p>
+    </div>
+    <div class="card">
+      <h3>C — hook + composite + <code>_meta</code> <span class="badge">~2.8K tokens</span></h3>
+      <p><strong>1 call</strong>: the agent's first instinct was <code>Grep</code> — the hook converted it to <code>search</code>. The agent then fired <code>context_for_task</code>, which returned the top symbols + context + inbound traces + related ADRs in one bundle. <strong>16× cheaper than A; one round-trip vs A's seven.</strong> All three leverage layers contributing.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>How it's stored under the hood</h2>
+  <p class="section-sub">Three co-located indexes in one shared symbol table — populated by a single AST pass. No duplication, no sync overhead. (Distinct from the three leverage layers above — those are <em>how an agent consumes pincher</em>; these are <em>how pincher stores the data</em>.)</p>
+  <div class="cards">
+    <div class="card">
+      <h3>Byte-offset store <span class="badge">store</span></h3>
       <p>Every symbol persists <code>start_byte</code>/<code>end_byte</code>. Retrieval is 1 SQL lookup + 1 <code>os.Seek</code> + 1 <code>os.Read</code>. No re-parsing, no line scanning, sub-millisecond on any symbol.</p>
     </div>
     <div class="card">
-      <h3>Knowledge graph <span class="badge">Layer 2</span></h3>
-      <p>Symbols are graph nodes; <code>CALLS</code> and <code>IMPORTS</code> are edges. Cypher-subset queries compile down to three SQL strategies (scan, JOIN, BFS) for sub-ms structural lookups.</p>
+      <h3>Knowledge graph <span class="badge">graph</span></h3>
+      <p>Symbols are graph nodes; <code>CALLS</code> and <code>IMPORTS</code> are edges. Cypher-subset (pinchQL) queries compile down to three SQL strategies (scan, JOIN, BFS) for sub-ms structural lookups.</p>
     </div>
     <div class="card">
-      <h3>FTS5 full-text <span class="badge">Layer 3</span></h3>
+      <h3>FTS5 full-text <span class="badge">search</span></h3>
       <p>Virtual table with BM25 ranking over names, signatures, and docstrings. Auto-synced via INSERT/UPDATE/DELETE triggers — you never manage it manually.</p>
     </div>
   </div>
@@ -241,8 +272,24 @@ sudo mv pincher-v0.72.0-linux-amd64 /usr/local/bin/pincher
 pincher --version</code></pre>
   </div>
 
-  <h2 style="margin-top:40px">Point your MCP client at it</h2>
-  <p class="section-sub">Any MCP-compatible client works. Three examples — the <code>command</code> is the same everywhere.</p>
+  <h2 style="margin-top:40px">One command per host</h2>
+  <p class="section-sub"><code>pincher init --target=&lt;host&gt;</code> writes the host's project-rules / hook file at the canonical path. <code>--target=detect</code> walks the local filesystem and wires up every detected host in one pass.</p>
+<pre><code># Wire up whichever editor / agent is installed locally
+pincher init --target=detect
+
+# Or pick a specific host
+pincher init --target=claude         # ./CLAUDE.md (Claude Code CLI)
+pincher init --target=cursor         # ./.cursor/rules/pincher.mdc
+pincher init --target=zed            # ./.zed/settings.json
+pincher init --target=codex          # ~/.codex/config.toml
+pincher init --target=vscode-copilot # ./.github/copilot-instructions.md
+pincher init --target=jetbrains      # ./.idea/.junie/guidelines.md  (v0.71)
+pincher init --target=antigravity    # ./.antigravity/rules.md  (v0.72)
+pincher init --target=windsurf       # ./.windsurfrules
+pincher init --target=gemini         # ~/.gemini/settings.json</code></pre>
+
+  <h2 style="margin-top:40px">Manual MCP wiring (if you'd rather)</h2>
+  <p class="section-sub">Any MCP-compatible client works. Two example configs — the <code>command</code> is the same everywhere.</p>
   <div class="two-col">
     <div>
       <h3 style="font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-weight:600">Claude Code</h3>
@@ -256,7 +303,7 @@ pincher --version</code></pre>
 }</code></pre>
     </div>
     <div>
-      <h3 style="font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-weight:600">Cursor / Zed</h3>
+      <h3 style="font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-weight:600">Cursor / Zed / Codex</h3>
 <pre><code>{
   "mcpServers": {
     "pincher": {
@@ -270,62 +317,25 @@ pincher --version</code></pre>
 
 <section id="vision">
   <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>Where pincher is going</h2>
-  <p class="section-sub">Pre-1.0. Everything between now and v1.0 is about making pincher great enough that the v1.0 adoption push lands on a product that earns retention, not just attention.</p>
+  <p class="section-sub">Pre-1.0. The cadence: nine minor releases per phase ending at a stable promotion (v0.60, v0.70, v0.80, v0.90, v1.0). Currently in Phase 3 — documentation + ecosystem maturity through v0.80.</p>
   <div class="cards">
     <div class="card">
-      <h3>Token savings is the front door <span class="badge">today</span></h3>
-      <p>Every tool stamps real cl100k token counts vs the file-read baseline. The ~95% reduction headline isn't synthetic — it's what users see on their own corpus. That's the initial-grab story; it works because the math is honest.</p>
+      <h3>Phase 3 today <span class="badge">v0.71 → v0.80</span></h3>
+      <p>Migration guide, per-host install parity, integrator-facing <code>_meta</code> envelope contract, hook-check equivalents per platform, container/sidecar patterns, multi-platform install validation. v0.80 promotes when every supported host has a measured time-to-first-result. Phase 3 umbrella: <a href="https://github.com/kwad77/pincher/issues/668">#668</a>.</p>
     </div>
     <div class="card">
-      <h3>The <code>_meta</code> envelope is the retention story <span class="badge">today</span></h3>
-      <p>Pincher is the foundation; <code>_meta</code> is the enabler; the LLM in your host's loop is the router. Every response carries drift warnings, stale-index signals, the <code>empty_reason</code> taxonomy, idempotency declarations, request-ID correlation, and <code>next_steps</code> the agent's NEXT call should branch on. Once your loop branches on <code>_meta</code>, pincher becomes infrastructure, not just a tool. v0.67's <code>context_for_task</code> composite tool is the concrete shape: one call replaces the typical 5-10 atomic calls an agent fires when picking up an investigation. The full per-field contract: <a href="integrations/meta-envelope-contract.md">_meta envelope contract</a>.</p>
-    </div>
-    <div class="card">
-      <h3>Cross-file resolution <span class="badge">today: Go + Python</span></h3>
-      <p>Go and Python are full-resolution (IMPORTS + CALLS + receiver-type binding). TypeScript receiver-type binding shipped in v0.72 (#1177) — two classes with the same method name now bind precisely instead of falling back to name-only Method lookup. Swift moved to the stable-regex tier in v0.73 (#1450) — struct / enum / actor / init / @attribute coverage. Rust and Java AST extractors are the remaining axes; the v0.79 cross-language false-positive sweep (#1389) decides whether the regex tier passes the v1.0 bar before those AST upgrades become critical-path. The 9-axis per-language matrix in the <a href="REFERENCE.md#language-support">reference</a> shows exactly where each language sits today.</p>
-    </div>
-    <div class="card">
-      <h3>Observability is standard infrastructure <span class="badge">today</span></h3>
-      <p>OTLP traces per tool call (v0.67 #1163), Prometheus metrics at <code>/v1/metrics</code> (v0.67), <code>X-Request-ID</code> correlation across stdio / HTTP / streamable-HTTP (v0.56 #835). Pincher fits the same operational shape as any other production service you run, so the SRE story for "pincher in our agent platform" is solved on the same day the feature lands. The <code>_meta.request_id</code> is the join key between host logs, pincher logs, and traces.</p>
-    </div>
-    <div class="card">
-      <h3>v1.0: schema freeze + migration guide <span class="badge">planned</span></h3>
-      <p>Tool descriptions, MCP schemas, and <code>_meta</code> envelope shape lock at v1.0. <a href="https://github.com/kwad77/pincher/issues/638">Roadmap issue</a> tracks the phase structure (alpha → beta → rc → stable channels). Until then: minor versions can change surface; patch versions only fix bugs.</p>
+      <h3>v1.0 freeze <span class="badge">planned</span></h3>
+      <p>Tool descriptions, MCP schemas, the <code>_meta</code> envelope shape, the <code>empty_reason</code> enum, the always-on <code>capabilities</code> list — all lock at v1.0. Migration guide finalized by then. Roadmap issue: <a href="https://github.com/kwad77/pincher/issues/638">#638</a>. Until v1.0: minor versions can change surface; patch versions only fix bugs.</p>
     </div>
     <div class="card">
       <h3>What we're <em>not</em> building <span class="badge">scope</span></h3>
-      <p>No cloud control plane. No telemetry beacons. No multi-tenant server mode. Local-first single-binary by design: your code never leaves your machine, every byte returned originates in your own <code>pincher.db</code>, and the install footprint stays one file. That constraint shapes everything else on this list.</p>
+      <p>No cloud control plane. No telemetry beacons. No multi-tenant server mode. No router / orchestrator inside pincher itself. Local-first single-binary by design: your code never leaves your machine, every byte returned originates in your own <code>pincher.db</code>, and the install footprint stays one file. That constraint shapes everything else on this list.</p>
     </div>
-  </div>
-</section>
-
-<section>
-  <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>How it compares</h2>
-  <p class="section-sub">Byte-offset retrieval, a knowledge graph, and FTS5 full-text search, co-located in a single pure-Go binary — populated by one AST pass, no external services.</p>
-  <div class="comparison">
-    <table>
-      <thead>
-        <tr>
-          <th>Capability</th>
-          <th>pincherMCP</th>
-          <th>CGO bindings</th>
-          <th>Python services</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td class="tool">Single binary</td><td class="yes">✓</td><td class="no">needs C toolchain</td><td class="no">needs Python + deps</td></tr>
-        <tr><td class="tool">MCP stdio</td><td class="yes">✓</td><td class="no">varies</td><td class="no">varies</td></tr>
-        <tr><td class="tool">HTTP REST + OpenAPI</td><td class="yes">✓</td><td class="no">rare</td><td class="yes">common</td></tr>
-        <tr><td class="tool">BPE token accounting</td><td class="yes">real cl100k</td><td class="no">—</td><td class="no">estimates</td></tr>
-        <tr><td class="tool">Blast-radius diff analysis</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
-        <tr><td class="tool">Runtime dependencies</td><td class="yes">none (pure Go)</td><td class="no">libc, libsqlite</td><td class="no">interpreter</td></tr>
-      </tbody>
-    </table>
   </div>
 </section>
 
 <footer>
-  MIT-licensed · <a href="https://github.com/kwad77/pincher">GitHub</a> · <a href="https://github.com/kwad77/pincher/issues">Issues</a> · <a href="https://github.com/kwad77/pincher/blob/master/README.md">Full docs</a>
+  MIT-licensed · <a href="https://github.com/kwad77/pincher">GitHub</a> · <a href="https://github.com/kwad77/pincher/issues">Issues</a> · <a href="https://github.com/kwad77/pincher/blob/master/README.md">README</a> · <a href="REFERENCE.md">Full reference</a> · <a href="integrations/loop-leverage-layers.md">Integration guide</a> · <a href="migration/v0.4-to-v1.0.md">Migration guide</a>
 </footer>
 
 <script>
