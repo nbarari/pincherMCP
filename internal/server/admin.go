@@ -780,6 +780,13 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 		// pre-upgrade rows here. Distinguishes "happening now" from
 		// "awaiting re-index to clear" — #1382.
 		IsStale bool `json:"is_stale,omitempty"`
+		// BinaryVersionAtFailure is the pincher binary version that
+		// recorded the row. Lets the reader tell "fixed-since" rows
+		// from "still recurring on the running binary" without
+		// cross-referencing CHANGELOG by hand — #1421. Empty string
+		// when the row pre-dates schema v33 or the binary ran without
+		// a version stamp (dev builds, source-built `go build`).
+		BinaryVersionAtFailure string `json:"binary_version_at_failure,omitempty"`
 	}
 	// Pre-build project indexed_at lookup so staleness comparison is O(1)
 	// per failure row instead of O(plist).
@@ -817,13 +824,14 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 				}
 			}
 			failures = append(failures, failureRow{
-				Project:    projectName[f.ProjectID],
-				File:       f.FilePath,
-				Language:   f.Language,
-				Reason:     f.Reason,
-				Details:    f.Details,
-				LastSeenAt: f.LastSeenAt.Format(time.RFC3339),
-				IsStale:    isStaleFailure(f.LastSeenAt, indexedAtByID[f.ProjectID]),
+				Project:                projectName[f.ProjectID],
+				File:                   f.FilePath,
+				Language:               f.Language,
+				Reason:                 f.Reason,
+				Details:                f.Details,
+				LastSeenAt:             f.LastSeenAt.Format(time.RFC3339),
+				IsStale:                isStaleFailure(f.LastSeenAt, indexedAtByID[f.ProjectID]),
+				BinaryVersionAtFailure: f.BinaryVersionAtFailure,
 			})
 		}
 	}

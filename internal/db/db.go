@@ -1393,6 +1393,33 @@ END;`,
 	// stamping-only slice that proves out branch detection on real
 	// pre-release dogfooding before compounding the schema risk.
 	`ALTER TABLE projects ADD COLUMN current_branch TEXT NOT NULL DEFAULT '';`,
+
+	// v32 → v33: extraction_failures.binary_version_at_failure —
+	// the pincher binary version that produced the failure. Lets
+	// doctor distinguish stale failures (extracted by an older
+	// binary that has since shipped the fix) from recurring
+	// failures (current binary still fails on these files).
+	//
+	// Purpose: with thousands of extraction_failures rows on a
+	// large multi-project install, the agent can't tell which
+	// rows are actionable. Pre-fix every row required cross-
+	// referencing with the project's `binary_version` in list/
+	// doctor to guess the originating binary — and truncation
+	// meant most rows didn't even appear. With this column the
+	// row carries its own provenance.
+	//
+	// NULL = pre-migration row (recorded before binary tracking
+	// landed). RecordExtractionFailureWithBinary populates the
+	// column on every new write; the legacy
+	// RecordExtractionFailure stays as a thin wrapper that
+	// passes "" so callers without binary context keep working.
+	//
+	// Future enhancement (#1421 bonus): a `fresh_only` doctor
+	// filter that drops rows whose binary_version_at_failure
+	// differs from the project's current binary_version — the
+	// "this binary still produces these failures" slice that's
+	// what operators usually want to act on.
+	`ALTER TABLE extraction_failures ADD COLUMN binary_version_at_failure TEXT NOT NULL DEFAULT '';`,
 }
 
 // v28RebuildSymbolsCompositePK is the SQL portion of v28 that drops
@@ -3890,6 +3917,15 @@ type ExtractionFailure struct {
 	Details     string
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
+	// #1421 (v33): the pincher binary version that produced this
+	// failure. Empty when the row was written before the
+	// binary_version_at_failure column was added (v33 migration
+	// default '') OR when the indexer caller didn't have a
+	// version stamp (best-effort — the fixed-row case where this
+	// matters is the bulk of writes). Doctor uses this to
+	// distinguish "stale failure that a later binary fixed" from
+	// "current binary still produces this failure."
+	BinaryVersionAtFailure string
 }
 
 // extractionFailureDetailsCap caps the persisted details field. The first
@@ -3905,17 +3941,40 @@ const extractionFailureDetailsCap = 1024
 // insert. Pass "" if there's no useful detail (the reason alone is the
 // signal).
 func (s *Store) RecordExtractionFailure(projectID, filePath, language, reason, details string) error {
+	// #1421: legacy thin-wrapper for callers without binary-version
+	// context (mostly tests). The indexer uses
+	// RecordExtractionFailureWithBinary so production rows carry
+	// provenance.
+	return s.RecordExtractionFailureWithBinary(projectID, filePath, language, reason, details, "")
+}
+
+// RecordExtractionFailureWithBinary is RecordExtractionFailure plus
+// the binary version that produced the failure. Stamped on every
+// indexer write so doctor can later distinguish stale failures
+// (older binary, fixed-since) from recurring failures (current
+// binary still fails on these files). Empty binaryVersion is
+// permitted — the column accepts NULL/'' for legacy callers.
+//
+// Idempotent on (project_id, file_path, reason): re-recording the
+// same failure updates details, last_seen_at, AND
+// binary_version_at_failure — the latter is the key signal,
+// because a row updated by the CURRENT binary's pass means the
+// failure is recurring under that binary. A row whose
+// binary_version_at_failure lags behind project's binary_version
+// is stale.
+func (s *Store) RecordExtractionFailureWithBinary(projectID, filePath, language, reason, details, binaryVersion string) error {
 	if len(details) > extractionFailureDetailsCap {
 		details = details[:extractionFailureDetailsCap] + "…[truncated]"
 	}
 	now := time.Now().Unix()
 	_, err := s.db.Exec(`
-		INSERT INTO extraction_failures (project_id, file_path, language, reason, details, first_seen_at, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO extraction_failures (project_id, file_path, language, reason, details, first_seen_at, last_seen_at, binary_version_at_failure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, file_path, reason) DO UPDATE SET
-			details      = excluded.details,
-			last_seen_at = excluded.last_seen_at`,
-		projectID, filePath, language, reason, details, now, now)
+			details                   = excluded.details,
+			last_seen_at              = excluded.last_seen_at,
+			binary_version_at_failure = excluded.binary_version_at_failure`,
+		projectID, filePath, language, reason, details, now, now, binaryVersion)
 	return err
 }
 
@@ -3962,7 +4021,7 @@ func (s *Store) PruneExtractionFailuresForFile(projectID, filePath string, keepR
 //
 // Reads via the reader pool (#51) — pure SELECT.
 func (s *Store) ListExtractionFailures(projectID string, limit int) ([]ExtractionFailure, error) {
-	q := `SELECT id, project_id, file_path, language, reason, details, first_seen_at, last_seen_at
+	q := `SELECT id, project_id, file_path, language, reason, details, first_seen_at, last_seen_at, binary_version_at_failure
 	      FROM extraction_failures
 	      WHERE project_id = ?
 	      ORDER BY last_seen_at DESC`
@@ -3980,13 +4039,14 @@ func (s *Store) ListExtractionFailures(projectID string, limit int) ([]Extractio
 	for rows.Next() {
 		var f ExtractionFailure
 		var first, last int64
-		var details sql.NullString
-		if err := rows.Scan(&f.ID, &f.ProjectID, &f.FilePath, &f.Language, &f.Reason, &details, &first, &last); err != nil {
+		var details, binaryVersion sql.NullString
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.FilePath, &f.Language, &f.Reason, &details, &first, &last, &binaryVersion); err != nil {
 			return nil, err
 		}
 		f.Details = details.String
 		f.FirstSeenAt = time.Unix(first, 0)
 		f.LastSeenAt = time.Unix(last, 0)
+		f.BinaryVersionAtFailure = binaryVersion.String
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -4037,7 +4097,7 @@ func (s *Store) ClearExtractionFailures(projectID string) error {
 // per-project N-roundtrip loop into one query, dropping multi-second
 // latency to milliseconds on multi-project installs.
 func (s *Store) ListRecentExtractionFailuresAcrossProjects(cutoffUnix int64, limit int) ([]ExtractionFailure, error) {
-	q := `SELECT id, project_id, file_path, language, reason, details, first_seen_at, last_seen_at
+	q := `SELECT id, project_id, file_path, language, reason, details, first_seen_at, last_seen_at, binary_version_at_failure
 	      FROM extraction_failures
 	      WHERE last_seen_at >= ?
 	      ORDER BY last_seen_at DESC`
@@ -4056,7 +4116,7 @@ func (s *Store) ListRecentExtractionFailuresAcrossProjects(cutoffUnix int64, lim
 		var f ExtractionFailure
 		var first, last int64
 		var details sql.NullString
-		if err := rows.Scan(&f.ID, &f.ProjectID, &f.FilePath, &f.Language, &f.Reason, &details, &first, &last); err != nil {
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.FilePath, &f.Language, &f.Reason, &details, &first, &last, &f.BinaryVersionAtFailure); err != nil {
 			return nil, err
 		}
 		f.Details = details.String

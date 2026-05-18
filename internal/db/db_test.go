@@ -584,8 +584,9 @@ var writerRoutedStoreMethods = map[string]bool{
 	"RecordSession":            true,
 	"RecordSessionWithMetrics": true,
 	"ResetSessions":            true,
-	"RecordExtractionFailure":         true,
-	"ClearExtractionFailures":         true,
+	"RecordExtractionFailure":           true,
+	"RecordExtractionFailureWithBinary": true, // #1421 binary_version_at_failure carrier
+	"ClearExtractionFailures":           true,
 	"PruneExtractionFailuresForFile":  true,
 	"PruneStaleExtractionFailures":    true,
 	"RecordSlowQuery":          true,

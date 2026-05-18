@@ -497,7 +497,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 				relPath, _ := filepath.Rel(absPath, path)
 				relPath = filepath.ToSlash(relPath)
 				details := fmt.Sprintf("size=%d bytes (cap=%d bytes)", info.Size(), cap)
-				if err := idx.store.RecordExtractionFailure(projectID, relPath, ast.DetectLanguage(path), "file_too_large", details); err != nil {
+				if err := idx.store.RecordExtractionFailureWithBinary(projectID, relPath, ast.DetectLanguage(path), "file_too_large", details, idx.binaryVersion); err != nil {
 					slog.Warn("pincher.index.record_failure.err", "err", err, "file", relPath, "reason", "file_too_large")
 				}
 				slog.Debug("pincher.index.too_large", "path", path, "size", info.Size(), "cap", cap)
@@ -1819,7 +1819,7 @@ func safeExtractWithModule(idx *Indexer, projectID, lang, relPath string, conten
 	defer func() {
 		if r := recover(); r != nil {
 			details := fmt.Sprintf("panic: %v", r)
-			if err := idx.store.RecordExtractionFailure(projectID, relPath, lang, "extractor_panicked", details); err != nil {
+			if err := idx.store.RecordExtractionFailureWithBinary(projectID, relPath, lang, "extractor_panicked", details, idx.binaryVersion); err != nil {
 				slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
 			}
 			slog.Warn("pincher.extractor.panic", "file", relPath, "lang", lang, "panic", r)
@@ -1874,7 +1874,7 @@ func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, r
 		if s.EndByte < s.StartByte || (s.EndByte == s.StartByte && s.Kind != "Module") {
 			details := fmt.Sprintf("symbol %q (%s): end_byte=%d <= start_byte=%d",
 				s.QualifiedName, s.Kind, s.EndByte, s.StartByte)
-			if err := idx.store.RecordExtractionFailure(projectID, relPath, lang, "byte_range_negative", details); err != nil {
+			if err := idx.store.RecordExtractionFailureWithBinary(projectID, relPath, lang, "byte_range_negative", details, idx.binaryVersion); err != nil {
 				slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
 			}
 			keep["byte_range_negative"] = struct{}{}
@@ -1922,7 +1922,7 @@ func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, r
 		}
 		details := fmt.Sprintf("qualified_name %q appears %d times (extractor produced duplicates)",
 			worst, worstCount)
-		if err := idx.store.RecordExtractionFailure(projectID, relPath, lang, "qualified_name_collision", details); err != nil {
+		if err := idx.store.RecordExtractionFailureWithBinary(projectID, relPath, lang, "qualified_name_collision", details, idx.binaryVersion); err != nil {
 			slog.Warn("pincher.failure_record.err", "err", err, "file", relPath)
 		}
 		keep["qualified_name_collision"] = struct{}{}
