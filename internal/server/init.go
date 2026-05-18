@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,28 @@ import (
 
 	pinit "github.com/kwad77/pincher/internal/init"
 )
+
+// initArgsJSON marshals a next_steps args payload so callers can
+// re-issue the suggested call verbatim. Pre-#1435 these were built
+// by string-concatenating absProjectPath into a JSON template,
+// which silently corrupted Windows paths whose backslashes are not
+// valid JSON escapes. json.Marshal escapes \, ", control chars,
+// and high codepoints correctly on every OS.
+func initArgsJSON(target, projectPath string) string {
+	b, err := json.Marshal(map[string]string{
+		"target":       target,
+		"project_path": projectPath,
+	})
+	if err != nil {
+		// Map[string]string with finite content can't fail to
+		// marshal; the err return exists only because json.Marshal
+		// has a generic signature. Fall back to a safe minimum so
+		// next_steps remains parseable even on the unreachable
+		// failure path.
+		return `{"target":"detect"}`
+	}
+	return string(b)
+}
 
 // handleInit is the MCP handler for the `init` tool (#253). It wraps
 // internal/init.Plan with safety properties suited to an agent
@@ -70,7 +93,7 @@ func (s *Server) handleInit(_ context.Context, req *mcp.CallToolRequest) (*mcp.C
 		return s.errResultRich(
 			"init: target=continue is not available via MCP — its path is always global (~/.continue/config.json) and would escape project_path. Use the `pincher init --target=continue` CLI.",
 			[]map[string]string{
-				{"tool": "init", "args": `{"target":"detect","project_path":"` + absProjectPath + `"}`,
+				{"tool": "init", "args": initArgsJSON("detect", absProjectPath),
 					"why": "let pincher auto-pick a per-project target instead of continue's always-global one"},
 			}), nil
 	}
@@ -92,9 +115,9 @@ func (s *Server) handleInit(_ context.Context, req *mcp.CallToolRequest) (*mcp.C
 		return s.errResultRich(
 			msg,
 			[]map[string]string{
-				{"tool": "init", "args": `{"target":"detect","project_path":"` + absProjectPath + `"}`,
+				{"tool": "init", "args": initArgsJSON("detect", absProjectPath),
 					"why": "detect picks the best target based on .claude/, .cursor/, .vscode/, etc."},
-				{"tool": "init", "args": `{"target":"all","project_path":"` + absProjectPath + `"}`,
+				{"tool": "init", "args": initArgsJSON("all", absProjectPath),
 					"why": "write to every supported per-project target at once"},
 			}), nil
 	}
