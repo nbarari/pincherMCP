@@ -330,6 +330,16 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int, proj
 	if a := nestedProjectAdvisory(r.Projects); a != "" {
 		r.Advisories = append(r.Advisories, a)
 	}
+	// #1635 v0.85: PreToolUse hook missing. When Claude Code looks
+	// present (.claude/ in cwd, or ~/.claude/settings.json exists) AND
+	// no `pincher hook-check` PreToolUse entry is wired up in any known
+	// settings location, the policy in CLAUDE.md is enforced only by
+	// agent self-policing. The runtime redirect is the load-bearing
+	// mechanism for measurable usage growth — surface its absence so
+	// users can run `pincher init --target=claude`.
+	if a := hookInstallAdvisory(); a != "" {
+		r.Advisories = append(r.Advisories, a)
+	}
 
 	return r, nil
 }
@@ -698,6 +708,115 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// hookInstallAdvisory (#1635 v0.85) fires when Claude Code looks
+// present in the environment AND the `pincher hook-check` PreToolUse
+// hook isn't installed in any settings location we know to inspect.
+// Returns "" (silent) when the hook is wired up, when Claude Code
+// isn't detected at all, or when the inspection itself fails.
+//
+// Why this matters: pincher's Read/Grep → search redirect (#627) is
+// the load-bearing mechanism for measurable usage growth — without it,
+// agent compliance with the CLAUDE.md policy is the only enforcement,
+// and `hook_invocations` (v24, #626) stays empty. A user can call
+// `pincher stats` and see 158M tokens saved with 4258 calls but ZERO
+// hook redirects, which is the silent failure mode this advisory
+// surfaces. Pair with #1632's zero-result split to close the
+// observability loop.
+//
+// Detection rule: settings files searched, in order — `.claude/settings.json`
+// in cwd, then `~/.claude/settings.json`. Hook detected when any
+// PreToolUse entry contains a command string with the substring
+// `pincher hook-check` (matches the same idempotency check
+// mergePincherHook uses, so `pincher hook-check --debug` etc. count).
+//
+// "Claude Code present" rule: at least one of (.claude/ directory in
+// cwd, ~/.claude/settings.json exists, CLAUDE_CONFIG_DIR env set).
+// Without ANY of those signals the advisory is silent — pincher
+// shouldn't nag users running under a different agent harness.
+//
+// Mirrors a CLI-only check today. The MCP doctor side (admin.go)
+// gets the same advisory in a follow-up PR; the CLI ships first
+// because that's where dogfood-flagged the absence.
+func hookInstallAdvisory() string {
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	projectSettings := filepath.Join(cwd, ".claude", "settings.json")
+	var homeSettings string
+	if home != "" {
+		homeSettings = filepath.Join(home, ".claude", "settings.json")
+	}
+
+	// "Claude Code present" gate. Three independent signals; any one
+	// is enough. Empty home dir + empty cwd + no env var = silent.
+	claudePresent := false
+	if cwd != "" {
+		if _, err := os.Stat(filepath.Join(cwd, ".claude")); err == nil {
+			claudePresent = true
+		}
+	}
+	if !claudePresent && homeSettings != "" {
+		if _, err := os.Stat(homeSettings); err == nil {
+			claudePresent = true
+		}
+	}
+	if !claudePresent && os.Getenv("CLAUDE_CONFIG_DIR") != "" {
+		claudePresent = true
+	}
+	if !claudePresent {
+		return ""
+	}
+
+	if hookFoundInSettings(projectSettings) || hookFoundInSettings(homeSettings) {
+		return ""
+	}
+
+	return "PreToolUse hook is NOT installed. Pincher's Read/Grep → search redirect (#627) " +
+		"is currently OFF; agent compliance with the policy in CLAUDE.md is the only enforcement. " +
+		"Run `pincher init --target=claude` from this project's root to install the hook. " +
+		"Once installed, `pincher hook-stats` will surface the redirect / conversion rate, and " +
+		"`hook_invocations` accumulates per-call telemetry. See #1635."
+}
+
+// hookFoundInSettings returns true when the JSON file at path contains
+// a PreToolUse hook whose command references `pincher hook-check`.
+// Missing / unreadable / unparseable files return false silently —
+// the advisory's "present?" check should never fail the doctor run.
+func hookFoundInSettings(path string) bool {
+	if path == "" {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return false
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		return false
+	}
+	preToolUse, _ := hooks["PreToolUse"].([]any)
+	for _, raw := range preToolUse {
+		entry, _ := raw.(map[string]any)
+		if entry == nil {
+			continue
+		}
+		entryHooks, _ := entry["hooks"].([]any)
+		for _, h := range entryHooks {
+			cmd, _ := h.(map[string]any)
+			if cmd == nil {
+				continue
+			}
+			if c, _ := cmd["command"].(string); strings.Contains(c, "pincher hook-check") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // formatDoctorMarkdown renders the report as a human-readable terminal
