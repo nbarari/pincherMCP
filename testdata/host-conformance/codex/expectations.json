@@ -1,0 +1,37 @@
+{
+  "host": "codex",
+  "host_version_seen": "canonical wire-shape; corpus reflects the protocol surface, not the host build (no live capture yet — see README § When to update)",
+  "captured_against": "v0.88.0",
+  "assertions": {
+    "tools_list_must_include": [
+      "search",
+      "symbol",
+      "context",
+      "architecture",
+      "trace",
+      "changes",
+      "investigate_failure"
+    ],
+    "search_response_shape": {
+      "must_have": ["jsonrpc", "id", "result.content"],
+      "content_first_item_kind": "text",
+      "content_text_regex": "(?i)indexer|index"
+    },
+    "architecture_response_shape": {
+      "must_have": ["jsonrpc", "id", "result.content"],
+      "content_first_item_kind": "text"
+    },
+    "error_envelope_forbidden_on_lines": [
+      "initialize-response",
+      "tools-list-response",
+      "search-response",
+      "architecture-response"
+    ]
+  },
+  "rationale": {
+    "tools_list_must_include": "These seven tool names are the agent-callable surface every host has shipped against since v0.51 (per `mcp_surface_split_test.go` working set). A new release breaking this list breaks every host in the matrix simultaneously.",
+    "search_response_shape": "Anchors the FTS5-backed search path. The regex requirement proves the response is semantically useful (matching content was returned), not just that the envelope is well-formed.",
+    "architecture_response_shape": "Anchors the cross-cutting orient-on-unfamiliar-area path; this tool failing post-release strands users on first contact.",
+    "error_envelope_forbidden_on_lines": "MCP allows tool-call errors via `result.isError: true` or `error: {...}` at the JSON-RPC level. Either shape on the listed lines means the host's canonical flow does not work — release blocker by definition."
+  }
+}

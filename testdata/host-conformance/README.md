@@ -36,11 +36,23 @@ either means (a) the change is purely additive (good — semver 1.x
 allows this), or (b) the corpus doesn't actually exercise the changed
 path (gap — file an issue to extend the corpus).
 
-## Initial scope (v0.87)
+## Host coverage
 
-This directory ships in the FILE-M PR with **one** host (`claude-code`)
-as a working reference. FILE-M acceptance criterion is "one canonical
-workflow script per host" — the remaining hosts (cursor, codex,
-jetbrains, vscode-copilot, zed) are filed as follow-up tasks that ship
-their workflow recordings between v0.87 and v0.91 (when FILE-R promotes
-the gate to release-blocker per #1536).
+| Host | Shipped | Source |
+|---|---|---|
+| `claude-code` | v0.87 (FILE-M #1532) | working reference |
+| `cursor` | v0.88 (#1562) | canonical wire-shape |
+| `codex` | v0.88 (#1563) | canonical wire-shape |
+| `jetbrains` | v0.88 (#1564) | canonical wire-shape |
+| `vscode-copilot` | v0.88 (#1565) | canonical wire-shape |
+| `zed` | v0.88 (#1566) | canonical wire-shape |
+
+All six hosts now have a workflow corpus. The five v0.88 hosts ship as
+**canonical wire-shape** transcripts — they replicate the claude-code
+reference's `initialize → tools/list → search → architecture` sequence
+with the host's own `clientInfo.name`, exercising pincher's protocol
+surface rather than a byte-exact capture of each host build. Replacing
+any of them with a live capture (the host's developer tools log the
+wire bytes) is a strict improvement — follow the steps under *When to
+update* — and stays compatible with the runner + the v0.91 release-gate
+(#1536, FILE-R) because the assertion schema is identical.
