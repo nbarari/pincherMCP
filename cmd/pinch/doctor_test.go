@@ -10,10 +10,25 @@ import (
 	"github.com/kwad77/pincher/internal/db"
 )
 
+// withNoClaudeCodeDetected (#1637) neutralizes hookInstallAdvisory's
+// Claude-Code-detection gate so tests can verify the empty-advisory
+// path on dev machines that have ~/.claude/ for real. Without this,
+// every contributor running `go test ./cmd/pinch/` on a Claude Code-
+// equipped machine would fail these tests because the advisory's
+// home-side check finds the real ~/.claude/settings.json.
+func withNoClaudeCodeDetected(t *testing.T) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+}
+
 // TestDoctorReport_EmptyDatabase pins the healthy-empty-state shape:
 // fresh DB, no projects, no failures, no slow queries → report renders
 // cleanly with the "No diagnostic issues to report" footer.
 func TestDoctorReport_EmptyDatabase(t *testing.T) {
+	withNoClaudeCodeDetected(t)
 	dir := t.TempDir()
 	store, err := db.Open(dir)
 	if err != nil {
@@ -225,6 +240,7 @@ func TestTruncMid_Cases(t *testing.T) {
 // Markdown formatter surfaces it. Useful when users paste doctor output
 // for support — version is right there alongside schema_version.
 func TestDoctorReport_BinaryVersionPopulated(t *testing.T) {
+	withNoClaudeCodeDetected(t)
 	dir := t.TempDir()
 	store, err := db.Open(dir)
 	if err != nil {
