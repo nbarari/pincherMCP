@@ -3641,6 +3641,82 @@ func (s *Store) DeleteEdgesByKindAndSource(projectID, kind, source string) error
 	})
 }
 
+// DeleteResolvePassEdgesByKindForSourceFiles deletes only the
+// resolve_pass edges of the given kind whose from-side symbol lives
+// in one of the provided source files (#1629 v0.87). Used by the
+// incremental resolve path on watcher ticks: when only a few files
+// re-extracted, we resolve only their pending edges and must wipe
+// only THEIR prior resolved edges — wiping everything would drop
+// the resolved edges from unchanged files that we're NOT going to
+// rebuild this pass.
+//
+// Empty files list is a no-op. Returns nil on success. Writer-routed.
+//
+// The deletion joins `edges.from_id` to `symbols.id` to recover the
+// source file_path, since `edges` doesn't store it directly. The
+// `symbols` table's `file_path` column is the canonical source.
+func (s *Store) DeleteResolvePassEdgesByKindForSourceFiles(projectID, kind string, files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(files))
+	args := []any{projectID, kind, projectID}
+	for i, f := range files {
+		placeholders[i] = "?"
+		args = append(args, f)
+	}
+	query := `DELETE FROM edges
+		WHERE project_id = ? AND kind = ? AND source = 'resolve_pass'
+		  AND from_id IN (
+		    SELECT id FROM symbols
+		    WHERE project_id = ? AND file_path IN (` + strings.Join(placeholders, ",") + `)
+		  )`
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(query, args...)
+		return err
+	})
+}
+
+// LoadPendingEdgesByKindAndFiles returns pending_edges rows filtered
+// to a specific set of source files (#1629 v0.87). Used by the
+// incremental resolve path on watcher ticks — load only the pending
+// edges that come from the files re-extracted this run, rather than
+// the full project-wide pool. On pincher-repo v0.85 measurement, the
+// full-pool load + walk dominated the 700ms incremental tick cost;
+// scoping to a single-file edit cuts that to ~100 rows.
+//
+// Empty files list returns nil, nil (no pending edges of this kind
+// from no files). Reader-routed.
+func (s *Store) LoadPendingEdgesByKindAndFiles(projectID, kind string, files []string) ([]PendingEdge, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(files))
+	args := []any{projectID, kind}
+	for i, f := range files {
+		placeholders[i] = "?"
+		args = append(args, f)
+	}
+	query := `SELECT project_id, from_file, kind, from_qn, to_name, confidence, receiver_type, base_type
+		FROM pending_edges
+		WHERE project_id = ? AND kind = ?
+		  AND from_file IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.ro.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingEdge
+	for rows.Next() {
+		var e PendingEdge
+		if err := rows.Scan(&e.ProjectID, &e.FromFile, &e.Kind, &e.FromQN, &e.ToName, &e.Confidence, &e.ReceiverType, &e.BaseType); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // PendingEdge is a per-file deferred edge candidate persisted in the
 // pending_edges table (#457). Re-resolution after an incremental
 // watcher tick sources the FULL set from this table, so edges from

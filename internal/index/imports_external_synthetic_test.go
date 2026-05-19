@@ -44,7 +44,7 @@ func TestResolveImports_NonResolvableTarget_SynthesizesExternal_1340(t *testing.
 	pending := []ast.ExtractedEdge{
 		{FromQN: "app", FromFile: "app.py", ToName: "os", Kind: "IMPORTS", Confidence: 1.0},
 	}
-	n := idx.resolveImports(projectID, pending, nil, nil)
+	n := idx.resolveImports(projectID, pending, nil, nil, nil)
 	if n != 1 {
 		t.Fatalf("resolveImports inserted %d edges; want 1 (synthetic binding)", n)
 	}

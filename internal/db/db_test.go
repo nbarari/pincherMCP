@@ -491,6 +491,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"SearchSymbols":           true,
 	"SearchSymbolsByCorpus":   true,
 	"FTS5Fragmentation":       true, // #1612 v0.87: per-corpus shadow-table COUNT(*)s.
+	"LoadPendingEdgesByKindAndFiles": true, // #1629 v0.87: scoped pending-edges load for incremental resolve.
 	"EdgesFrom":               true,
 	"EdgesTo":                 true,
 	"GraphStats":              true,
@@ -575,7 +576,8 @@ var writerRoutedStoreMethods = map[string]bool{
 	"BulkUpsertSymbols":        true,
 	"DeleteSymbolsForFile":     true,
 	"BulkUpsertEdges":            true,
-	"DeleteEdgesByKindAndSource": true,
+	"DeleteEdgesByKindAndSource":                true,
+	"DeleteResolvePassEdgesByKindForSourceFiles": true, // #1629 v0.87: scoped resolve_pass delete for incremental resolve.
 	"MaybeFireCelebration":       true,
 	"ReplacePendingEdgesForFile":      true,
 	"DeletePendingEdgesForFile":       true,

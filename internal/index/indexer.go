@@ -1088,7 +1088,31 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// 1000 set conservative so the heuristic stays a win, not a loss.
 		// On a LoadAllSymbolsByQN error, fall back to per-call lookups —
 		// correctness preserved; only the speedup is lost.
-		allImports := loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
+		// #1629 v0.87: incremental-tick scope for IMPORTS. When few
+		// files re-extracted AND we're not forcing, load only the
+		// IMPORTS pending edges from those files (and wipe only
+		// their prior resolved IMPORTS edges in resolveImports).
+		// Threshold: small enough that the SQLite IN clause stays
+		// well under the 999-parameter default; large enough that
+		// most real watcher ticks (1-3 files) hit the scoped path.
+		// CALLS and READS still use the full pool this iteration —
+		// extending #1629 to them is a follow-up slice.
+		const incrementalScopeThreshold = 32
+		var importsScope []string
+		useImportsScope := !force && totalFiles > 0 && totalFiles <= incrementalScopeThreshold
+		if useImportsScope {
+			importsScope = make([]string, 0, totalFiles)
+			for f := range seenFiles {
+				importsScope = append(importsScope, f)
+			}
+		}
+
+		var allImports []ast.ExtractedEdge
+		if useImportsScope {
+			allImports = loadScopedOrFallback(idx, projectID, "IMPORTS", importsScope, pendingImport)
+		} else {
+			allImports = loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
+		}
 		allCalls := loadOrFallback(idx, projectID, "CALLS", pendingCalls)
 		allReads := loadOrFallback(idx, projectID, "READS", pendingReads)
 		allReads = append(allReads, loadOrFallback(idx, projectID, "WRITES", nil)...)
@@ -1129,8 +1153,21 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			)
 		}
 
+		// #1629 v0.87: when the scoped path is in use and the scoped
+		// pending pool is empty, we still need to wipe the scoped
+		// prior resolved edges — a file that previously emitted
+		// IMPORTS may have removed them all in this edit. runResolve
+		// short-circuits when pendingIn==0, so call the scoped delete
+		// directly here. The non-scoped path doesn't need this because
+		// its delete-then-upsert pair lives inside resolveImports
+		// itself, gated by len(pending)>0.
+		if useImportsScope && len(allImports) == 0 {
+			if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "IMPORTS", importsScope); err != nil {
+				slog.Warn("pincher.imports.scoped_delete_no_pending.err", "err", err)
+			}
+		}
 		runResolve("IMPORTS", len(allImports), func() int {
-			return idx.resolveImports(projectID, allImports, pythonRoots, qnMap)
+			return idx.resolveImports(projectID, allImports, pythonRoots, qnMap, importsScope)
 		})
 		runResolve("CALLS", len(allCalls), func() int {
 			return idx.resolveCalls(projectID, allCalls, pythonRoots, qnMap)
@@ -2310,8 +2347,28 @@ func readGoModulePath(repoPath string) string {
 // by matching both endpoints against Module symbols in the project. Edges
 // with no matching Module on either side are dropped. Returns the number
 // of edges actually persisted.
-func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol) int {
+// scopeFiles, when non-empty, switches the resolve_pass deletion path
+// from "wipe every IMPORTS resolve_pass edge in the project" to "wipe
+// only those whose source-side symbol lives in one of these files".
+// Used by the incremental-tick path (#1629 v0.87) so unchanged files'
+// resolved IMPORTS edges aren't churned on every watcher pass. The
+// `pending` slice must already be filtered to the same scope by the
+// caller — passing project-wide pending edges with a non-nil scope
+// would resolve the full pool but only delete a subset of resolved
+// edges, leaving stale entries from outside the scope to compete
+// with the re-resolved ones on uniqueness collisions.
+func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol, scopeFiles []string) int {
 	if len(pending) == 0 {
+		// #1629 v0.87: even on a scoped pass with no pending edges,
+		// we still need to wipe the scoped resolve_pass edges — a
+		// file that previously had IMPORTS edges may have removed
+		// all of them in this edit. Without the delete, the stale
+		// resolved edges would linger.
+		if len(scopeFiles) > 0 {
+			if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "IMPORTS", scopeFiles); err != nil {
+				slog.Warn("pincher.imports.scoped_delete.err", "err", err)
+			}
+		}
 		return 0
 	}
 
@@ -2513,7 +2570,14 @@ func (idx *Indexer) resolveImports(projectID string, pending []ast.ExtractedEdge
 	}
 
 	// #475: atomic replace of the prior resolve pass's IMPORTS edges.
-	if err := idx.store.DeleteEdgesByKindAndSource(projectID, "IMPORTS", "resolve_pass"); err != nil {
+	// #1629 v0.87: when scopeFiles is set, wipe only the resolve_pass
+	// edges originating from those files — leaves unchanged-file
+	// edges intact for the incremental-tick fast path.
+	if len(scopeFiles) > 0 {
+		if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "IMPORTS", scopeFiles); err != nil {
+			slog.Warn("pincher.imports.scoped_delete.err", "err", err)
+		}
+	} else if err := idx.store.DeleteEdgesByKindAndSource(projectID, "IMPORTS", "resolve_pass"); err != nil {
 		slog.Warn("pincher.imports.delete_prior.err", "err", err)
 	}
 	if len(edges) == 0 {
@@ -2845,6 +2909,31 @@ func loadOrFallback(idx *Indexer, projectID, kind string, fallback []ast.Extract
 		slog.Warn("pincher.pending_edges.load.err", "kind", kind, "err", err)
 		return fallback
 	}
+	return pendingRowsToExtractedEdges(rows)
+}
+
+// loadScopedOrFallback is the file-scoped analog used by the
+// incremental-tick resolve path (#1629 v0.87). Returns only pending
+// edges whose from_file is in scopeFiles. On query error or empty
+// result, falls back to the in-memory pool already produced by
+// this run's extraction goroutines (which is per-file anyway, so
+// remains scoped without further filtering).
+func loadScopedOrFallback(idx *Indexer, projectID, kind string, scopeFiles []string, fallback []ast.ExtractedEdge) []ast.ExtractedEdge {
+	if len(scopeFiles) == 0 {
+		return fallback
+	}
+	rows, err := idx.store.LoadPendingEdgesByKindAndFiles(projectID, kind, scopeFiles)
+	if err != nil {
+		slog.Warn("pincher.pending_edges.load_scoped.err", "kind", kind, "err", err)
+		return fallback
+	}
+	return pendingRowsToExtractedEdges(rows)
+}
+
+// pendingRowsToExtractedEdges normalises db.PendingEdge → ast.ExtractedEdge.
+// Shared by the full and scoped loaders so any future column added to
+// PendingEdge has exactly one transcription site.
+func pendingRowsToExtractedEdges(rows []db.PendingEdge) []ast.ExtractedEdge {
 	out := make([]ast.ExtractedEdge, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, ast.ExtractedEdge{
