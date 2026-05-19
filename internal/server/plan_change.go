@@ -149,6 +149,47 @@ func (s *Server) handlePlanChange(ctx context.Context, req *mcp.CallToolRequest)
 				}
 			}
 		}
+		// #1577: a bare filename with an extension (e.g. "charge.go")
+		// matches looksLikeFilePath but never resolves via GetSymbolsForFile
+		// because the symbols table holds the FULL path. The original code
+		// fell through to the empty-suspects branch with diagnosis "target
+		// did not resolve" — silent-confidently-wrong. Now: if the file-
+		// path resolution found nothing AND the target has no slash, strip
+		// the extension and fall back to BM25 so a bare name still resolves.
+		// A real root-level file like `main.go` still resolves via the file
+		// branch above (because it really IS the indexed path).
+		if len(resolved.SymbolsAffected) == 0 && !strings.ContainsAny(target, "/\\") {
+			resolved.ResolutionPath = "name_search_after_bare_filename"
+			// Strip extension to give BM25 a clean identifier token.
+			// `charge.go` → `charge`; FTS5 tokenisation matches `Charge`
+			// via prefix/case-fold.
+			bm25Query := target
+			if dot := strings.LastIndex(bm25Query, "."); dot > 0 {
+				bm25Query = bm25Query[:dot]
+			}
+			results, err := s.store.SearchSymbolsByCorpus(projectID, bm25Query, "", "", "code", 5)
+			if err == nil {
+				for _, r := range results {
+					switch r.Symbol.Kind {
+					case "Function", "Method", "Class", "Interface", "Type":
+						resolved.SymbolsAffected = append(resolved.SymbolsAffected, blastRow{
+							ID:            r.Symbol.ID,
+							Name:          r.Symbol.Name,
+							QualifiedName: r.Symbol.QualifiedName,
+							Kind:          r.Symbol.Kind,
+							FilePath:      r.Symbol.FilePath,
+							StartLine:     r.Symbol.StartLine,
+						})
+						if resolved.File == target {
+							resolved.File = r.Symbol.FilePath
+						}
+					}
+					if len(resolved.SymbolsAffected) >= 3 {
+						break
+					}
+				}
+			}
+		}
 	default:
 		// Free-form name — BM25 search.
 		resolved.ResolutionPath = "name_search"

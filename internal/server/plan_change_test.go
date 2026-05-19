@@ -326,6 +326,40 @@ func TestPlanChange_ResolveByName(t *testing.T) {
 	}
 }
 
+// TestPlanChange_ResolveByBareFilename_FallsThroughToBM25 — regression
+// for #1577. A target like "charge.go" matches looksLikeFilePath (extension)
+// but contains no slash, so GetSymbolsForFile against the bare basename
+// never matches the indexed full-path "payments/charge.go". Previously
+// the handler hit the empty-suspects branch with diagnosis "target did
+// not resolve" — silent-confidently-wrong, because BM25 would have found
+// the right symbol. Now the file_path branch falls through to BM25 when
+// the bare-filename file-path lookup returns nothing.
+func TestPlanChange_ResolveByBareFilename_FallsThroughToBM25(t *testing.T) {
+	t.Parallel()
+	srv, _, projectID := setupPlanChangeTestServer(t)
+
+	res, err := srv.handlePlanChange(context.Background(), makeReq(map[string]any{
+		"target":  "charge.go", // bare filename, no path prefix
+		"project": projectID,
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	body := decode(t, res)
+
+	tgt, _ := body["target"].(map[string]any)
+	// The handler routes via file_path first (looksLikeFilePath says yes
+	// because of the extension), but the fallback rewrites resolution_path
+	// to name_search_after_bare_filename when the file branch returns nothing.
+	if tgt["resolution_path"] != "name_search_after_bare_filename" {
+		t.Errorf("resolution_path = %v; want name_search_after_bare_filename (#1577 regression — bare-filename targets should not silently return empty)", tgt["resolution_path"])
+	}
+	syms, _ := tgt["symbols_affected"].([]any)
+	if len(syms) == 0 {
+		t.Fatal("#1577 regression: bare-filename target returned empty SymbolsAffected — fallback to BM25 should have surfaced charge.go's symbols")
+	}
+}
+
 // TestPlanChange_DepthPartitioning_AndCrossPackage — positive: callers
 // partition correctly by depth, and the cross_package flag fires for
 // callers whose directory differs from the target's. ProcessOrder
