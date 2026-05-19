@@ -1,0 +1,58 @@
+name: Host conformance
+
+# FILE-M #1532 (v0.87 corpus) + FILE-R #1536 (v0.91 gate promotion).
+#
+# Replays per-host canonical workflows under
+# testdata/host-conformance/<host>/ against a freshly-built pincher
+# and validates responses against expectations.json. Drift caught
+# here would break the listed host's canonical flow.
+#
+# Phase: v0.87 — advisory (informational; failure does NOT block
+#                merge or release).
+#        v0.91 — required (per #1536 FILE-R; failure blocks release
+#                tag, listed in CLAUDE.md required-gates).
+#
+# The phase is set by the `continue-on-error` flag on the job below;
+# flip when FILE-R promotes.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-conformance:
+    name: host-conformance (advisory)
+    runs-on: ubuntu-latest
+    # Advisory phase per FILE-M (v0.87). Flip to false at v0.91 when
+    # FILE-R promotes this gate to release-blocker.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build pincher
+        run: go build -trimpath -ldflags="-s -w" -o ./pincher ./cmd/pinch/
+
+      - name: Install jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y jq
+          fi
+          jq --version
+
+      - name: Run host-conformance replay
+        env:
+          PINCHER_BIN: ${{ github.workspace }}/pincher
+        # Invoke via bash explicitly so a Windows-set file-mode (no
+        # executable bit) doesn't trip the runner — the script is
+        # POSIX bash regardless of who committed it.
+        run: bash scripts/host-conformance.sh all

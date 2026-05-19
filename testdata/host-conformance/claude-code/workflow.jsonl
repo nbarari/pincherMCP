@@ -1,0 +1,8 @@
+{"direction":"client→server","line":"initialize","payload":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude-code","version":"conformance-corpus"}}}}
+{"direction":"server→client","line":"initialize-response","payload_match":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"pincher"}}}}
+{"direction":"client→server","line":"tools-list","payload":{"jsonrpc":"2.0","id":2,"method":"tools/list"}}
+{"direction":"server→client","line":"tools-list-response","payload_match":{"jsonrpc":"2.0","id":2,"result":{"tools":"<array>"}}}
+{"direction":"client→server","line":"search","payload":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"Indexer","limit":3}}}}
+{"direction":"server→client","line":"search-response","payload_match":{"jsonrpc":"2.0","id":3,"result":{"content":"<array>"}}}
+{"direction":"client→server","line":"architecture","payload":{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"architecture","arguments":{}}}}
+{"direction":"server→client","line":"architecture-response","payload_match":{"jsonrpc":"2.0","id":4,"result":{"content":"<array>"}}}
