@@ -292,16 +292,16 @@ def collect_imports(tree, module):
     return edges
 
 
-def main():
-    relpath = sys.argv[1] if len(sys.argv) > 1 else ""
+def extract_one(relpath, source):
+    """Extract symbols + edges from a single file's source bytes.
+    Returns a dict in the same shape as the legacy one-shot main()
+    response. Shared by the one-shot and daemon entry points so
+    the extraction logic stays single-sourced (#1626 v0.87)."""
     module = module_qn(relpath)
-    source = sys.stdin.buffer.read()
-
     try:
         tree = ast.parse(source)
     except SyntaxError as e:
-        json.dump({"error": str(e)}, sys.stdout)
-        return
+        return {"error": str(e), "module": module}
 
     line_offsets = build_line_offsets(source)
     dunder_all = collect_dunder_all(tree)
@@ -338,10 +338,71 @@ def main():
     )
     edges.extend(collect_imports(tree, module))
 
-    json.dump(
-        {"symbols": symbols, "edges": edges, "module": module},
-        sys.stdout,
-    )
+    return {"symbols": symbols, "edges": edges, "module": module}
+
+
+def run_daemon():
+    """Persistent-subprocess request/response loop (#1626 v0.87).
+    Reads one newline-delimited JSON request per iteration from stdin
+    and writes one newline-delimited JSON response per iteration to
+    stdout. Stops cleanly on EOF.
+
+    Wire format (request, base64-encoded so binary content survives):
+        {"id": <int>, "path": "<relpath>", "content_b64": "<...>"}\\n
+    Response:
+        {"id": <int>, "symbols": [...], "edges": [...], "module": "..."}\\n
+    Errors:
+        {"id": <int>, "error": "<reason>", "module": "..."}\\n
+
+    The id field round-trips so the Go side can correlate requests
+    with responses even though the protocol is strictly serial
+    (one request, one response, in order).
+    """
+    import base64
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            # Cannot recover the request id — emit a sentinel and
+            # let the Go side decide how to handle it.
+            resp = {"id": -1, "error": "bad request JSON: " + str(e)}
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+            continue
+        req_id = req.get("id", 0)
+        relpath = req.get("path", "")
+        content_b64 = req.get("content_b64", "")
+        try:
+            source = base64.b64decode(content_b64)
+        except Exception as e:
+            resp = {"id": req_id, "error": "bad content_b64: " + str(e),
+                    "module": module_qn(relpath)}
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+            continue
+        out = extract_one(relpath, source)
+        out["id"] = req_id
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+
+
+def main():
+    # #1626 v0.87: --daemon switches to the persistent request/response
+    # loop used by the Go pythonRunner. Default behaviour stays as the
+    # legacy one-shot path so callers that haven't adopted the runner
+    # (and external invocations of the script) keep working unchanged.
+    if len(sys.argv) > 1 and sys.argv[1] == "--daemon":
+        run_daemon()
+        return
+
+    relpath = sys.argv[1] if len(sys.argv) > 1 else ""
+    source = sys.stdin.buffer.read()
+    out = extract_one(relpath, source)
+    json.dump(out, sys.stdout)
 
 
 if __name__ == "__main__":

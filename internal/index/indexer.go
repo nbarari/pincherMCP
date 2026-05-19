@@ -1098,20 +1098,28 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// Threshold: small enough that the SQLite IN clause stays
 		// well under the 999-parameter default; large enough that
 		// most real watcher ticks (1-3 files) hit the scoped path.
-		const incrementalScopeThreshold = 32
+		// #1629 v0.87: incremental-tick scope. ORIGINALLY thought to be
+		// safe at any threshold, but #1678 surfaced a correctness gap:
+		// when callee B re-extracts and caller A is hash-skipped, the
+		// cascade delete on B's symbols wipes the caller→callee edge,
+		// and A's pending_edges are out of scope so the resolver doesn't
+		// re-bind them. The Bar→Foo edge is permanently lost (regression
+		// of the #457 cross-file CALLS preservation contract).
+		//
+		// Properly widening scope to include referrers needs a snapshot
+		// of the edge graph TAKEN BEFORE per-file goroutines run their
+		// cascade deletes — that's a moderate refactor of the main
+		// extraction loop. Until that design lands, scoping is GATED OFF
+		// (useResolveScope := false) and the resolver runs project-wide
+		// every tick. The infrastructure (Store primitives, scopeFiles
+		// parameter on the resolvers) stays in place for the follow-up.
+		const incrementalScopeThreshold = 32 // honored once #1678 widening lands
 		var resolveScope []string
-		useResolveScope := !force && totalFiles > 0 && totalFiles <= incrementalScopeThreshold
-		if useResolveScope {
-			// CRITICAL: scope must come from files actually re-extracted
-			// this run, not from seenFiles (which includes hash-skipped
-			// files — the walker yields every file, even unchanged ones).
-			// extractedFiles is populated in the main loop right after
-			// totalFiles++ where we know the file isn't hash-skipped.
-			resolveScope = make([]string, 0, totalFiles)
-			for f := range extractedFiles {
-				resolveScope = append(resolveScope, f)
-			}
-		}
+		useResolveScope := false
+		_ = incrementalScopeThreshold
+		_ = resolveScope
+		_ = totalFiles
+		_ = extractedFiles
 
 		loadKind := func(kind string, fallback []ast.ExtractedEdge) []ast.ExtractedEdge {
 			if useResolveScope {

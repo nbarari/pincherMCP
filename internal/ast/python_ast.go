@@ -174,7 +174,22 @@ func (r *pythonResponse) toFileResult() *FileResult {
 // Returns (result, true) on success, (nil, false) on any failure — timeout,
 // non-zero exit, JSON parse error, or Python SyntaxError in the source.
 // The dispatch fn falls back to extractPython on false.
+//
+// #1626 v0.87: when PINCHER_PYTHON_AST_DAEMON=1, route through the
+// shared persistent subprocess (pythonRunner) instead of spawning a
+// fresh process per file. Amortises the ~80ms Windows process-spawn
+// + interpreter init across N files. Opt-in for now; promoted to
+// default once dogfood data confirms the win and stability.
 func extractPythonAST(src []byte, relPath string) (*FileResult, bool) {
+	if os.Getenv("PINCHER_PYTHON_AST_DAEMON") == "1" {
+		if resp, ok := defaultPythonRunner.extract(relPath, src); ok {
+			return resp.toFileResult(), true
+		}
+		// Daemon path failed — fall through to the per-file
+		// invocation so we don't silently regress to the regex
+		// extractor on a transient daemon glitch.
+	}
+
 	pyCmd := pythonCommand()
 	if pyCmd == nil {
 		return nil, false
