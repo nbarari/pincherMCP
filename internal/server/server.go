@@ -5037,6 +5037,13 @@ func (s *Server) handleSymbols(ctx context.Context, req *mcp.CallToolRequest) (*
 func (s *Server) handleContext(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
 
+	// #1601 v0.84: FILE-H follow-up. context returns symbol + imports +
+	// callees; bail early on cancelled ctx before doing the per-symbol
+	// fanout.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	id := str(args, "id")
 	if id == "" {
 		// #712: failure-as-pedagogy — context needs a symbol ID; search
@@ -5459,6 +5466,14 @@ func suggestContextNextSteps(sym db.Symbol) []map[string]string {
 
 func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
+
+	// #1601 v0.84: FILE-H follow-up. Entry-point ctx check before any DB
+	// work — atomic standard-tier tools were exempt from the #1579 sweep
+	// that covered composites + heavy tools. The atomic path is bounded
+	// but the cancellation contract should be uniform across every tool.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// #344: TrimSpace before validating so whitespace-only queries
 	// (e.g. " ", "\t", "\n") don't leak through to FTS5 as a low-level
@@ -6862,6 +6877,14 @@ func suggestNextStepsForResults(results []db.SearchResult) []map[string]string {
 func (s *Server) handleQuery(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
 
+	// #1601 v0.84: FILE-H follow-up. handleQuery delegates to
+	// cypher.Executor.Execute which runs BFS over the edge graph;
+	// per-iteration cancel handled by #1599 inside runBFS, this is the
+	// entry-point gate before any parsing/setup work.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Accept both `pinchql` (current) and `cypher` (legacy alias, kept
 	// for one release per #206). New callers should use `pinchql`; the
 	// alias is honored silently so existing scripts keep working.
@@ -7300,6 +7323,13 @@ func asFloat(v any) (float64, bool) {
 
 func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
+
+	// #1601 v0.84: FILE-H follow-up. Entry-point ctx check — trace runs
+	// BFS through TraceViaCTEScoped + per-hop GetSymbol lookups on the
+	// return path; bail before doing any work if the client cancelled.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// `id` is the exact-symbol escape hatch (#474): when the caller already
 	// has a symbol ID from search/symbols/query and wants to trace THAT
@@ -7928,6 +7958,14 @@ func (s *Server) handleTrace(ctx context.Context, req *mcp.CallToolRequest) (*mc
 
 func (s *Server) handleChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
+
+	// #1601 v0.84: FILE-H follow-up. handleChanges forks runGitDiff (an
+	// external `git` subprocess) + per-symbol intersection loops; bail
+	// early on cancelled ctx so we don't fork the subprocess for work
+	// nobody will read.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	projectArg := str(args, "project")
 	scope := str(args, "scope")
@@ -8831,6 +8869,14 @@ func (s *Server) handleDeadCode(ctx context.Context, req *mcp.CallToolRequest) (
 
 func (s *Server) handleArchitecture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
+
+	// #1601 v0.84: FILE-H follow-up. handleArchitecture runs several
+	// large rows.Next() scans (language histogram, entry points,
+	// hotspots, edges). QueryContext propagates ctx into SQL but the
+	// entry-point bail saves the work setup cost too.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	projectID, errRes := s.mustProject(args)
 	if errRes != nil {

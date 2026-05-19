@@ -264,6 +264,115 @@ func TestCancellation_HeavyToolsHaveContractTest(t *testing.T) {
 	}
 }
 
+// TestCancellation_StandardTierDBToolsHaveContractTest — #1601 v0.84
+// gate. Standard-tier atomic tools that hit the DB or run BFS need
+// the same entry-point check as the heavy tools. The set is enumerated
+// explicitly (vs walking toolComplexityTiers["standard"]) because not
+// every standard-tier tool runs DB work — context/changes do, schema
+// is in-memory.
+func TestCancellation_StandardTierDBToolsHaveContractTest(t *testing.T) {
+	t.Parallel()
+	tested := map[string]bool{
+		"changes":      true,
+		"architecture": true,
+		"query":        true,
+		"neighborhood": true,
+		"context":      true,
+	}
+	required := []string{"changes", "architecture", "query", "neighborhood", "context"}
+	for _, tool := range required {
+		if !tested[tool] {
+			t.Errorf("standard-tier DB tool %q has no cancellation contract test — add one to cancellation_test.go", tool)
+		}
+	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// #1601 v0.84: standard-tier atomic-tool cancellation contract pin.
+// FILE-H follow-up — #1527 + #1579 covered heavy-tier composites and
+// the four canonical atomic heavies (index/search/trace/fetch/
+// rebuild_fts). The remaining atomic standard-tier tools (changes,
+// architecture, query, neighborhood) still ran their entry-validation
+// + setup work on a cancelled ctx. Each handler now has an
+// entry-point ctx.Err() check; the tests below pin the contract.
+//
+// Smoke level — like the v0.82 composite tests, these prove the
+// entry-point check fires, not that mid-call interruption is clean.
+// Mid-call cancellation flows through QueryContext (atomic tools
+// already used it before this PR).
+// ────────────────────────────────────────────────────────────────
+
+func TestCancellation_HandleChanges_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleChanges", 500*time.Millisecond, func() (any, error) {
+		return srv.handleChanges(ctx, makeReq(map[string]any{}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleChanges took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
+func TestCancellation_HandleArchitecture_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleArchitecture", 500*time.Millisecond, func() (any, error) {
+		return srv.handleArchitecture(ctx, makeReq(map[string]any{}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleArchitecture took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
+func TestCancellation_HandleQuery_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleQuery", 500*time.Millisecond, func() (any, error) {
+		return srv.handleQuery(ctx, makeReq(map[string]any{
+			"pinchql": "MATCH (n:Function) RETURN n.name LIMIT 1",
+		}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleQuery took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
+func TestCancellation_HandleContext_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleContext", 500*time.Millisecond, func() (any, error) {
+		return srv.handleContext(ctx, makeReq(map[string]any{
+			"id": "internal/auth/login.go::auth.Login#Function",
+		}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleContext took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
+func TestCancellation_HandleNeighborhood_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleNeighborhood", 500*time.Millisecond, func() (any, error) {
+		return srv.handleNeighborhood(ctx, makeReq(map[string]any{
+			"id": "internal/auth/login.go::auth.Login#Function",
+		}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleNeighborhood took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
 // ────────────────────────────────────────────────────────────────
 // #1579 Composite-cancellation contract pin (v0.82). Each composite
 // below was caught with `_ = ctx` at the top of the handler — the

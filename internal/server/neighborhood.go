@@ -28,6 +28,14 @@ import (
 func (s *Server) handleNeighborhood(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
 
+	// #1601 v0.84: FILE-H follow-up. neighborhood loops over up to 500
+	// in-file siblings + optional per-symbol source-byte disk reads when
+	// include_source=true; bail before doing the loop work when the
+	// client cancelled.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	id := str(args, "id")
 	if id == "" {
 		// #712: failure-as-pedagogy — the caller has no id; the way to
