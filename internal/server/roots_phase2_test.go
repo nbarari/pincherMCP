@@ -74,6 +74,11 @@ func TestStartAutoIndex_RecordsIndexingThenIndexed(t *testing.T) {
 	}
 
 	srv.startAutoIndex([]string{tmp})
+	// #1605 v0.84: wait for the goroutine to finish before t.TempDir
+	// cleanup runs. On Windows the indexer holds lockfiles in
+	// <root>/locks/ and RemoveAll fails with "directory is not empty"
+	// when the goroutine is still in flight.
+	t.Cleanup(srv.WaitAutoIndex)
 
 	// Wait up to 5s for the goroutine to flip "indexing" → "indexed".
 	deadline := time.Now().Add(5 * time.Second)
@@ -114,6 +119,11 @@ func TestStartAutoIndex_PreservesAdvertisedOrder(t *testing.T) {
 	}
 
 	srv.startAutoIndex([]string{first, second})
+	// #1605 v0.84: same fix as TestStartAutoIndex_RecordsIndexingThenIndexed.
+	// The test's assertion (slot order at enqueue time) doesn't need
+	// the goroutines to complete first, but t.TempDir cleanup does on
+	// Windows.
+	t.Cleanup(srv.WaitAutoIndex)
 
 	got := srv.AutoIndexedRoots()
 	if len(got) != 2 {
