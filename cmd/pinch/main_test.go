@@ -94,9 +94,19 @@ func TestIndexCLI_Binary_JSONSummary(t *testing.T) {
 
 	cmd := exec.Command(bin, "index", "--data-dir", dataDir, "--json-summary", projDir)
 	cmd.Env = pincherCoverEnv()
-	out, err := cmd.CombinedOutput()
+	// #1621 v0.85: stdout-only capture. Pre-fix this test used
+	// CombinedOutput, but v0.85's #1613 observability legitimately
+	// streams `pincher.*.summary` slog.Info lines to stderr — those
+	// are diagnostic, not part of the --json-summary contract.
+	// `--json-summary`'s stdout is a single JSON object; tests must
+	// validate stdout-only.
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("pincher index --json-summary: %v\n%s", err, out)
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+		t.Fatalf("pincher index --json-summary: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr)
 	}
 
 	var summary map[string]any

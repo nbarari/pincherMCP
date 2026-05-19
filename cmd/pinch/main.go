@@ -405,8 +405,23 @@ func parseFlagsInterspersed(fs *flag.FlagSet, args []string) []string {
 }
 
 func runIndexCLI(args []string) {
-	// Silence the DB/indexer log output — callers only want the result line.
-	log.SetOutput(io.Discard)
+	// #1621 v0.85: do NOT silence slog. The v0.85 perf push (#1613)
+	// added rich per-phase observability via slog.Info lines —
+	// extraction.summary, resolve_block.summary,
+	// {imports,calls,reads,uses_var}.resolve.summary, gc.summary — and
+	// users running `pincher index --force` are exactly the audience
+	// for those numbers (dogfooders deciding what to tune).
+	//
+	// Pre-fix the old comment was "Silence the DB/indexer log output —
+	// callers only want the result line." and the implementation was
+	// `log.SetOutput(io.Discard)`. In Go 1.25 the default slog handler
+	// routes through `log.Default()`'s writer, so redirecting stdlib log
+	// silently disabled slog too — meaning every diagnostic the indexer
+	// emits was invisible at the CLI for v0.85 dogfood. Restoring
+	// visibility outweighs the stdlib-log noise concern (pincher uses
+	// slog throughout; stdlib log is rare in production paths).
+	//
+	// Scripts that DO want the old quiet behavior can `2>/dev/null`.
 
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "Override data directory")
