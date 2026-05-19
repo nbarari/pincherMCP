@@ -584,6 +584,7 @@ var writerRoutedStoreMethods = map[string]bool{
 	"DetectAndRecordMoves":     true,
 	"SetFileHash":              true,
 	"DeleteFileHash":           true,
+	"ClearFileHashesByLanguage": true,
 	"SetADR":                   true,
 	"DeleteADR":                true,
 	"RecordSession":            true,
@@ -1518,6 +1519,101 @@ func TestDeleteFileHash(t *testing.T) {
 	h := s.GetFileHash("p1", "file.go")
 	if h != "" {
 		t.Errorf("expected empty hash after delete, got %q", h)
+	}
+}
+
+// #1543 v0.84: ClearFileHashesByLanguage drops file_hash rows for
+// files whose extracted symbols include any of the listed languages.
+// Cross-check pinning: only the targeted language's files get
+// cleared, others keep their hash.
+func TestClearFileHashesByLanguage(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+
+	// Seed three files: one Go symbol, one Bash symbol, one Python.
+	goSym := testSymbol("g1", "GoFunc", "Function", "p1", "main.go")
+	goSym.Language = "Go"
+	bashSym := testSymbol("b1", "bash_fn", "Function", "p1", "deploy.sh")
+	bashSym.Language = "Bash"
+	pySym := testSymbol("py1", "PyFunc", "Function", "p1", "app.py")
+	pySym.Language = "Python"
+	if err := s.BulkUpsertSymbols([]Symbol{goSym, bashSym, pySym}); err != nil {
+		t.Fatalf("BulkUpsertSymbols: %v", err)
+	}
+
+	// Stamp a hash for each file.
+	s.SetFileHash("p1", "main.go", "go-hash")
+	s.SetFileHash("p1", "deploy.sh", "bash-hash")
+	s.SetFileHash("p1", "app.py", "py-hash")
+
+	// Clear Bash + Python — Go should be untouched.
+	cleared, err := s.ClearFileHashesByLanguage("p1", []string{"Bash", "Python"})
+	if err != nil {
+		t.Fatalf("ClearFileHashesByLanguage: %v", err)
+	}
+	if cleared != 2 {
+		t.Errorf("expected 2 files cleared, got %d", cleared)
+	}
+	if h := s.GetFileHash("p1", "main.go"); h != "go-hash" {
+		t.Errorf("Go file hash should be preserved, got %q", h)
+	}
+	if h := s.GetFileHash("p1", "deploy.sh"); h != "" {
+		t.Errorf("Bash file hash should be cleared, got %q", h)
+	}
+	if h := s.GetFileHash("p1", "app.py"); h != "" {
+		t.Errorf("Python file hash should be cleared, got %q", h)
+	}
+}
+
+// Empty languages slice is a no-op — defensive contract since the
+// caller (the indexer's drift wrapper) should never invoke with empty.
+func TestClearFileHashesByLanguage_EmptyLanguagesIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+	s.SetFileHash("p1", "file.go", "abc123")
+
+	cleared, err := s.ClearFileHashesByLanguage("p1", nil)
+	if err != nil {
+		t.Fatalf("ClearFileHashesByLanguage(nil): %v", err)
+	}
+	if cleared != 0 {
+		t.Errorf("expected 0 files cleared for empty languages, got %d", cleared)
+	}
+	if h := s.GetFileHash("p1", "file.go"); h != "abc123" {
+		t.Errorf("hash should be untouched on no-op call, got %q", h)
+	}
+}
+
+// Cross-project scoping — ClearFileHashesByLanguage must NOT touch
+// files in other projects.
+func TestClearFileHashesByLanguage_ProjectScoping(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertProject(testProject("p1"))
+	s.UpsertProject(testProject("p2"))
+
+	bash1 := testSymbol("b1", "f1", "Function", "p1", "deploy.sh")
+	bash1.Language = "Bash"
+	bash2 := testSymbol("b2", "f2", "Function", "p2", "deploy.sh")
+	bash2.Language = "Bash"
+	if err := s.BulkUpsertSymbols([]Symbol{bash1, bash2}); err != nil {
+		t.Fatalf("BulkUpsertSymbols: %v", err)
+	}
+	s.SetFileHash("p1", "deploy.sh", "p1-bash")
+	s.SetFileHash("p2", "deploy.sh", "p2-bash")
+
+	// Clear Bash on p1 only.
+	cleared, err := s.ClearFileHashesByLanguage("p1", []string{"Bash"})
+	if err != nil {
+		t.Fatalf("ClearFileHashesByLanguage: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("expected 1 file cleared, got %d", cleared)
+	}
+	if h := s.GetFileHash("p1", "deploy.sh"); h != "" {
+		t.Errorf("p1 hash should be cleared, got %q", h)
+	}
+	if h := s.GetFileHash("p2", "deploy.sh"); h != "p2-bash" {
+		t.Errorf("p2 hash must NOT be touched by p1's clear, got %q", h)
 	}
 }
 
