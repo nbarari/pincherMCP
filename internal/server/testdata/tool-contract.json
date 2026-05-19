@@ -395,6 +395,30 @@
     }
   },
   {
+    "name": "plan_change",
+    "description": "**Use before editing a function or file to preview the blast radius.** Takes `target` (file path, symbol id, or free-form name). Composes `changes` + `trace direction=in` + `adr action=list` into one envelope `{target, blast_radius, related_adrs}` with depth-1 (CRITICAL) and depth-2 (HIGH) caller lists, cross-package boundary crossings, intersecting test files, and any ADRs whose key/value mentions the target's package or symbol name. Emits `_meta.warnings_v2.blast_radius_high` when depth-1 callers exceed 14 (suggests staged refactor). Replaces the typical 4-call pre-edit sequence.",
+    "input_schema": {
+      "properties": {
+        "depth": {
+          "description": "BFS depth for inbound caller traversal (default 2, max 4). Depth 1 = CRITICAL callers, depth 2 = HIGH callers, depth 3-4 = MEDIUM-LOW.",
+          "type": "integer"
+        },
+        "project": {
+          "description": "Project name or ID. Defaults to session project.",
+          "type": "string"
+        },
+        "target": {
+          "description": "What's about to be edited. Three accepted shapes: (1) symbol id like 'internal/auth/login.go::auth.Login#Function' — traces just that symbol; (2) file path like 'internal/auth/login.go' — enumerates every callable symbol in the file; (3) free-form name like 'Login' — BM25-searches and takes the top callable hits. Resolution heuristic: contains '::' → id; ends in source extension or has '/' → file; otherwise → name search.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "query",
     "description": "**Use when you need structural relationships, not text matches** — pinchQL graph queries over the symbol graph. pinchQL is a pragmatic Cypher-shaped subset: `MATCH`, `WHERE`, `RETURN`, `LIMIT`, single-hop joins (`-[:CALLS]-\u003e`), and bounded variable-length BFS (`-[:CALLS*1..3]-\u003e`). Examples: callers `MATCH (a)-[:CALLS]-\u003e(b) WHERE b.name=\"Open\" RETURN a.name`; classes in a file `MATCH (n:Class) WHERE n.file_path CONTAINS \"server\" RETURN n.name`; multi-hop `MATCH (a)-[:CALLS*1..3]-\u003e(b) WHERE a.name=\"main\" RETURN b.name`. The legacy `cypher` parameter name is still accepted as a soft alias for one release. Prefer `search` for name/text lookups, `trace` for fixed-shape callgraph BFS — both are cheaper.",
     "input_schema": {

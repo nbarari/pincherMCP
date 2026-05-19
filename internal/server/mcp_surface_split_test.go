@@ -27,6 +27,7 @@ var expectedMCPTools = map[string]bool{
 	"context":          true,
 	"context_for_task":    true, // #1259 v0.67 composite-context tool
 	"investigate_failure": true, // #1391 v0.81 Phase 4 composite — bug-hunt from stack trace
+	"plan_change":         true, // #1391 v0.82 Phase 4 composite — pre-edit blast radius
 	"trace":            true,
 	"query":   true,
 	"guide":   true,

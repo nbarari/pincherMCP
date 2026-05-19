@@ -121,7 +121,7 @@ Savings persist in SQLite across restarts, reconnects, and binary upgrades.
 
 ## What to read next
 
-- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-24-mcp-tools)** — every tool, every parameter, every `_meta` field
+- **[REFERENCE.md → MCP tools](../REFERENCE.md#the-25-mcp-tools)** — every tool, every parameter, every `_meta` field
 - **[REFERENCE.md → CLI subcommands](../REFERENCE.md#cli-subcommands)** — `pincher doctor`, `pincher self-test`, `pincher rebuild-fts`, etc.
 - **[Tutorial: Cursor](cursor.md)** — same flow with Cursor's rules-file format
 - **[Tutorial: HTTP dashboard](http-dashboard.md)** — open the live dashboard for any browser-friendly client

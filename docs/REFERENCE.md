@@ -2,7 +2,7 @@
 
 The long-form reference. The [README](../README.md) is the pitch + quickstart; this file is the manual. For 10-minute end-to-end walkthroughs, see [`tutorials/`](tutorials/) — [Claude Code](tutorials/claude-code.md), [Cursor](tutorials/cursor.md), [HTTP dashboard](tutorials/http-dashboard.md).
 
-**Schema version:** v33 · **MCP tools:** 24 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
+**Schema version:** v33 · **MCP tools:** 25 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
 
 ## Contents
 
@@ -11,7 +11,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
   - [Three-layer storage](#three-layer-storage)
   - [pinchQL query routing](#pinchql-query-routing)
   - [Data flow: index to query](#data-flow-index-to-query)
-- [The 24 MCP tools](#the-24-mcp-tools)
+- [The 25 MCP tools](#the-25-mcp-tools)
   - [Stable symbol IDs](#stable-symbol-ids)
   - [Field projection](#field-projection)
   - [Extraction confidence](#extraction-confidence)
@@ -60,7 +60,7 @@ The long-form reference. The [README](../README.md) is the pitch + quickstart; t
 ┌───────────────────────┐          ┌───────────────────────────┐
 │  pincher (MCP process)│          │  pincher --http :8080     │
 │                       │          │  (dashboard / REST)       │
-│  • 24 MCP tools       │          │                           │
+│  • 25 MCP tools       │          │                           │
 │  • idx.Watch()        │          │  • POST /v1/{tool}        │
 │  • SessionFlusher     │          │  • GET /v1/dashboard      │
 │    (flush every 10 s) │          │  • GET /v1/openapi.json   │
@@ -177,7 +177,7 @@ Project-scoped paths — `search`, `symbol`/`symbols` when `project=` is passed,
 
 ---
 
-## The 24 MCP tools
+## The 25 MCP tools
 
 All latencies measured on this codebase. Token counts use cl100k_base BPE — the same tokenizer family as Claude.
 
@@ -212,6 +212,7 @@ All latencies measured on this codebase. Token counts use cl100k_base BPE — th
 | `trace` | BFS call-path trace — who calls this, or what does it call. Grouped by depth. Risk labels: CRITICAL (depth 1) → LOW (depth 4+). | <5 ms (depth 3) |
 | `context_for_task` | Composite: one call replaces 5-10 atomic calls during investigation. Takes either `task` (free-form) or `seed_id`. Composes `search` → `context` → `trace direction=both` → `changes` overlap into one envelope `{seeds, neighbors, callers, callees, recent_changes}`. `max_seeds` defaults to 3 (cap 10); `trace_depth` defaults to 2 (cap 4); `include_changes` defaults true. Use when starting an investigation; use the atomic tools for follow-up. (#1259 v0.71) | ~20-80 ms (≈ Σ atomic-call latencies) |
 | `investigate_failure` | **Composite #1 of Phase 4 (#1391 v0.81).** The bug-hunt loop in one call. Takes `error_text` (raw stack trace / panic / exception), parses identifier-shaped frame tokens via a stopword-aware heuristic, BM25-searches each across the code corpus, and ranks suspects by a weighted sum of evidence: stack-frame match (+0.45), multi-frame match (+0.10), file-appears-in-trace (+0.20), modified-in-working-tree (+0.20), caller fan-in (log-scaled +0.05). Returns `{implicated_symbols, callers, recent_changes, rank, frames_parsed}` with per-suspect `evidence` enumerating which signals fired. Replaces the typical 5-call bug-hunt sequence. Stamps `_meta.empty_reason` when no frames parse or no suspects resolve. | ~40-150 ms (BM25 × N frames + trace × maxSuspects) |
+| `plan_change` | **Composite #2 of Phase 4 (#1391 v0.82).** Pre-edit blast-radius composite. Takes `target` (file path, symbol id, or free-form name). Resolves to one or more affected callable symbols, traces inbound callers at depth 1 (CRITICAL) and depth 2 (HIGH), partitions them by package boundary + test-file status, and looks up ADRs whose key/value mentions the target's package, directory, or symbol name. Returns `{target, blast_radius, related_adrs}` with `blast_radius.summary` counts and `blast_radius.test_files_intersecting` (the test files you should run before pushing). Emits `_meta.warnings_v2.blast_radius_high` when depth-1 caller count exceeds 14 (suggests staged refactor). Replaces the typical 4-call pre-edit sequence (`changes` → `trace direction=in` → `context` → `adr list`). | ~20-100 ms (resolve + trace × affected symbols + ADR overlap) |
 
 ### Architecture & knowledge
 
@@ -913,7 +914,7 @@ pincherMCP/
 │   │   ├── bloat_trap.go         # IsBloatTrap: refuse filesystem root + $HOME;
 │   │   │                         # hook mode also requires a project marker
 │   │   └── lockfile.go           # Cross-process project lockfile w/ stale reclaim
-│   └── server/server.go          # 24 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
+│   └── server/server.go          # 25 MCP tools, HTTP REST, gzip, OpenAPI 3.1, bearer auth,
 │                                 # basepath / reverse-proxy support, sessions persistence
 └── go.mod
 ```

@@ -3261,6 +3261,7 @@ var toolComplexityTiers = map[string]string{
 	"guide":            "heavy",
 	"context_for_task":     "heavy", // #1259: composite of search + N×(context + trace) + changes
 	"investigate_failure":  "heavy", // #1391 v0.81: composite of search × frames + trace × suspects + changes
+	"plan_change":          "heavy", // #1391 v0.82: composite of resolve + trace × symbols + adr list
 }
 
 // toolComplexityTier returns the registered tier for a tool, or the
@@ -3293,6 +3294,7 @@ var toolIdempotent = map[string]bool{
 	"context":          true,
 	"context_for_task":    true, // #1259
 	"investigate_failure": true, // #1391 v0.81 — read-only composite
+	"plan_change":         true, // #1391 v0.82 — read-only composite
 	"trace":               true,
 	"query":            true,
 	"guide":            true,
@@ -3613,6 +3615,7 @@ var toolMetadata = map[string]toolMetadataEntry{
 	"guide":            {Annotations: annotationsReadOnly},
 	"context_for_task":    {Title: "Composite context for an investigation", Annotations: annotationsReadOnly}, // #1259
 	"investigate_failure": {Title: "Bug-hunt composite from a stack trace", Annotations: annotationsReadOnly}, // #1391 v0.81
+	"plan_change":         {Title: "Pre-edit blast-radius composite", Annotations: annotationsReadOnly},       // #1391 v0.82
 
 	// Diagnostics (read-only, idempotent).
 	"health":  {Annotations: annotationsReadOnly},
@@ -4034,6 +4037,25 @@ func (s *Server) registerTools() {
 			}
 		}`),
 	}, s.handleInvestigateFailure)
+
+	// 16d. plan_change (#1391 Phase 4 composite #2, v0.82). The pre-edit
+	// blast-radius composite. Takes a file_or_symbol target; resolves
+	// to one or more affected symbols; traces inbound callers at
+	// depth 1 (CRITICAL) and depth 2 (HIGH); partitions by package
+	// boundary + test-file status; surfaces ADRs whose key or value
+	// mentions the target's package/directory. Emits a high-blast-
+	// radius warning when depth-1 callers > 14.
+	s.addTool(&mcp.Tool{
+		Name:        "plan_change",
+		Description: "**Use before editing a function or file to preview the blast radius.** Takes `target` (file path, symbol id, or free-form name). Composes `changes` + `trace direction=in` + `adr action=list` into one envelope `{target, blast_radius, related_adrs}` with depth-1 (CRITICAL) and depth-2 (HIGH) caller lists, cross-package boundary crossings, intersecting test files, and any ADRs whose key/value mentions the target's package or symbol name. Emits `_meta.warnings_v2.blast_radius_high` when depth-1 callers exceed 14 (suggests staged refactor). Replaces the typical 4-call pre-edit sequence.",
+		InputSchema: json.RawMessage(`{
+			"type":"object","required":["target"],"properties":{
+				"target":{"type":"string","description":"What's about to be edited. Three accepted shapes: (1) symbol id like 'internal/auth/login.go::auth.Login#Function' — traces just that symbol; (2) file path like 'internal/auth/login.go' — enumerates every callable symbol in the file; (3) free-form name like 'Login' — BM25-searches and takes the top callable hits. Resolution heuristic: contains '::' → id; ends in source extension or has '/' → file; otherwise → name search."},
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project."},
+				"depth":{"type":"integer","description":"BFS depth for inbound caller traversal (default 2, max 4). Depth 1 = CRITICAL callers, depth 2 = HIGH callers, depth 3-4 = MEDIUM-LOW."}
+			}
+		}`),
+	}, s.handlePlanChange)
 
 	// 17. neighborhood — graph view around a symbol. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
@@ -12082,6 +12104,7 @@ var baselineMethodForTool = map[string]string{
 	"context":          baselineMethodFullFileRead,
 	"context_for_task":    baselineMethodFullFileRead, // #1259: composite replaces N atomic file reads
 	"investigate_failure": baselineMethodFullFileRead, // #1391 v0.81: composite replaces N atomic search/trace/changes reads
+	"plan_change":         baselineMethodFullFileRead, // #1391 v0.82: composite replaces N atomic resolve/trace/adr reads
 	"search":       baselineMethodFullFileRead,
 	"query":        baselineMethodFullFileRead,
 	"trace":        baselineMethodFullFileRead,

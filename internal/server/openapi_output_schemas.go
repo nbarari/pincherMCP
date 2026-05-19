@@ -420,6 +420,52 @@ var outputSchemas = map[string]string{
 		}
 	}`,
 
+	// 16d. plan_change — #1391 Phase 4 composite #2 (v0.82).
+	// Pre-edit blast-radius composite: resolves target, traces inbound
+	// callers, partitions by package boundary + test files, surfaces
+	// related ADRs.
+	"plan_change": `{
+		"type":"object",
+		"required":["target","blast_radius","related_adrs","_meta"],
+		"properties":{
+			"target":{
+				"type":"object",
+				"properties":{
+					"file":{"type":"string"},
+					"resolution_path":{"type":"string"},
+					"symbols_affected":{"type":"array","items":{"type":"object"}}
+				}
+			},
+			"blast_radius":{
+				"type":"object",
+				"properties":{
+					"depth_1_callers":{"type":"array","items":{"type":"object"}},
+					"depth_2_callers":{"type":"array","items":{"type":"object"}},
+					"cross_package":{"type":"array","items":{"type":"object"}},
+					"test_files_intersecting":{"type":"array","items":{"type":"string"}},
+					"summary":{
+						"type":"object",
+						"properties":{
+							"depth_1_count":{"type":"integer"},
+							"depth_2_count":{"type":"integer"},
+							"cross_package_count":{"type":"integer"},
+							"test_file_count":{"type":"integer"}
+						}
+					}
+				}
+			},
+			"related_adrs":{"type":"array","items":{
+				"type":"object",
+				"properties":{
+					"key":{"type":"string"},
+					"value":{"type":"string"},
+					"why":{"type":"string"}
+				}
+			}},
+			"_meta":` + metaRef + `
+		}
+	}`,
+
 	// 16c. investigate_failure — #1391 Phase 4 composite #1 (v0.81).
 	// Bug-hunt composite: parses stack trace, ranks suspects, unions
 	// callers, intersects recent changes.

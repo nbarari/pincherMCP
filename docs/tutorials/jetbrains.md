@@ -117,7 +117,7 @@ pincher stats
 
 ## What to read next
 
-- [REFERENCE.md → MCP tools](../REFERENCE.md#the-24-mcp-tools) — every tool, every parameter
+- [REFERENCE.md → MCP tools](../REFERENCE.md#the-25-mcp-tools) — every tool, every parameter
 - [Tutorial: Claude Code](claude-code.md) — same flow for the Claude Code CLI
 - [Tutorial: VS Code Copilot](vscode-copilot.md) — same flow for VS Code Copilot
 - [`docs/integrations/loop-leverage-layers.md`](../integrations/loop-leverage-layers.md) — the three-layer agent-leverage frame
