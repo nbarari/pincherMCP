@@ -14,8 +14,8 @@ Unit file: [`packaging/systemd/pincher.service`](../../packaging/systemd/pincher
 #    - homebrew tap (Linux+macOS)
 brew tap kwad77/pincher https://github.com/kwad77/homebrew-pincher && brew install pincher
 #    - or download from releases
-curl -L -o pincher.tar.gz https://github.com/kwad77/pincher/releases/download/v0.82.0/pincher-v0.82.0-linux-amd64.tar.gz
-tar -xzf pincher.tar.gz && sudo mv pincher-v0.82.0-linux-amd64 /usr/local/bin/pincher
+curl -L -o pincher.tar.gz https://github.com/kwad77/pincher/releases/download/v0.83.0/pincher-v0.83.0-linux-amd64.tar.gz
+tar -xzf pincher.tar.gz && sudo mv pincher-v0.83.0-linux-amd64 /usr/local/bin/pincher
 
 # 2. Install the user unit
 mkdir -p ~/.config/systemd/user

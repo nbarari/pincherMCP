@@ -1,1 +1,0 @@
-`context_for_task` honors `ctx.Err()` — entry-point + per-seed checks across trace and neighbor loops (#1590 v0.83). Closes a FILE-H gap: composite pre-dated #1579's contract and ran 20+ DB calls after cancellation. Cancellation test gate now covers every heavy tool.
