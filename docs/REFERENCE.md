@@ -406,6 +406,57 @@ The 9-axis honest breakdown. `✅` = supported, `⚠️` = partial / language-ti
 
 **Type / receiver resolution** is the highest-leverage missing axis on regex-tier languages — without it, `X.method()` can't bind to a specific receiver type's method definition, so `trace name=method` returns every same-named method across the project. Tracked alongside the AST roadmap.
 
+### v1.0 fitness declaration (FILE-N · [#1533](https://github.com/kwad77/pincher/issues/1533))
+
+For v1.0, each language gets one of four explicit support statuses. Pincher will provide tests, fix bugs, and accept feature work according to the tier; this declaration says exactly what users can plan against.
+
+| Status | What pincher promises |
+|---|---|
+| `promised` | Production-grade. AST/parser extraction at 1.0 confidence. Every tool works against this language. Regressions block release. |
+| `supported` | Good enough for daily use. Stable-regex extraction at 0.85 confidence. Symbols + same-file edges are reliable; cross-file edges and type-resolution are tracked but not gated. |
+| `best-effort` | Useful, with known gaps. Approximate-regex extraction at 0.70 confidence. Symbols are usable; edge graph is limited. We fix reported bugs but won't gate release on them. |
+| `excluded` | Not supported in v1.0. The language has an entry in the tier list but the extractor is stub-quality. Tracked for a post-v1.0 release. |
+
+| Language | Tier | v1.0 status | Known limitations |
+|---|---|---|---|
+| Go | AST 1.0 | **promised** | None — reference implementation |
+| Python | AST 1.0 (dispatcher) | **promised** | Docstring extraction partial; AST upgrade requires `python` on PATH at index time |
+| YAML / JSON | AST 1.0 | **promised** | Sequence-rename ID instability (#205, won't-fix for 1.0) — workaround: search by name not id |
+| Bash | AST 1.0 | **promised** | No cross-file CALLS (Bash sourcing model differs from import) |
+| HCL / Terraform | AST 1.0 | **promised** | `REFERENCES` edges only via `var.X` — no full HCL expression resolution |
+| TOML | AST 1.0 | **promised** | None significant — pure structural extraction |
+| Markdown | AST 1.0 | **promised** | None — heading hierarchy is the whole contract |
+| Jinja2 | AST 1.0 | **promised** | 2-second parse timeout on truncated input (gonja lexer hang guard) |
+| JavaScript / JSX | AST 1.0 (dispatcher since #1328 v0.71) | **promised** | Type resolution absent; cross-file calls per #1177 |
+| TypeScript / TSX | Regex 0.85 | **supported** | Cross-file calls absent (#1177); type/receiver resolution absent |
+| Rust | Regex 0.85 | **supported** | Cross-file calls absent (#1182 v0.87); receiver type resolution absent |
+| Java | Regex 0.85 | **supported** | Cross-file calls absent (#1183 v0.87); Javadoc partial |
+| C# | Regex 0.85 | **supported** | Cross-file calls absent; receiver type resolution absent |
+| PHP | Regex 0.85 | **supported** | Cross-file calls absent; namespaces partial |
+| Kotlin | Regex 0.85 | **supported** | Cross-file calls absent |
+| Swift | Regex 0.85 | **supported** | Cross-file calls absent. AST upgrade tracked (#1452 v0.85) but the swift-syntax subprocess pattern is optional — until it ships, regex tier is the v1.0 promise |
+| C | Regex 0.85 | **supported** | Cross-file calls absent; macros not expanded |
+| C++ | Regex 0.85 | **supported** | Same as C, plus template instantiation not tracked |
+| Makefile | Regex 0.85 | **supported** | Includes not resolved cross-file |
+| SQL | Regex 0.85 | **supported** | No edge graph between table/view/function entities |
+| Ruby | Regex 0.70 | **best-effort** | Cross-file calls absent; metaprogramming patterns produce gaps |
+| Scala | Regex 0.70 | **best-effort** | Cross-file calls absent; implicit conversions invisible |
+| Lua | Regex 0.70 | **best-effort** | Cross-file calls absent; dynamic-dispatch patterns invisible |
+| Zig | Regex 0.70 | **best-effort** | Cross-file calls absent; comptime invisible |
+| Elixir | Regex 0.70 | **best-effort** | Cross-file calls absent; macro-defined functions partial |
+| Dart | Regex 0.70 | **best-effort** | Cross-file calls absent |
+| R | Regex 0.70 | **best-effort** | Cross-file calls absent; S3/S4 dispatch invisible |
+| Haskell | Stub 0.0 | **excluded** | Indentation-sensitive layout requires hardened regex or full parser — tracked post-v1.0 (#1161) |
+
+**Reading this table.**
+
+- `promised` languages get every regression treated as a 1.x patch-line bug. If something breaks for a `promised` language at v1.0+, the next patch ships a fix.
+- `supported` languages get bug fixes but cross-file resolver gaps are accepted as known limitations. Working around them with `neighborhood` (same-file siblings) instead of `trace direction=out` (cross-file) is the recommended path until the AST upgrade lands.
+- `best-effort` languages produce useful symbol search results. The edge graph is sparse; treat `trace` and `query` over edges as best-effort. The regex extractor's false-positive rate is the visible cost.
+- `excluded` languages return zero symbols. The extractor's stub status is intentional and load-bearing — index time stays bounded regardless of how many Haskell files end up in a project.
+
+**v1.0 surface promise.** Per [ADR-0002](adr/0002-v1-frozen-surface.md), the *tier* assignments and *v1.0 status* values above are part of the frozen v1.0 surface. Promotion (e.g. Rust regex-0.85 → AST-1.0) is a minor-release additive feature in 1.x. Demotion (a language's status going DOWN) is a breaking change and requires a 2.0.
+
 ### Skip rules
 
 The indexer refuses to extract from files that are guaranteed to produce noise rather than signal, regardless of extension:
