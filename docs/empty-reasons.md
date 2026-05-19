@@ -143,7 +143,7 @@ search query="*" limit=10 offset=0       # rewind to start
 
 **Constant:** `EmptyReasonTargetNotResolved`
 
-**Fires when:** A composite handler (`plan_change`, `investigate_failure`, etc.) accepted input that LOOKED valid for its resolution heuristic — file extension, name, or symbol-id shape — but couldn't find a matching symbol in the index. Distinct from `no_results_in_corpus`: the data isn't missing, your input was the wrong shape.
+**Fires when:** A composite handler (`plan_change`, `investigate_failure`, `context_for_task`) accepted input that LOOKED valid for its resolution heuristic — file extension, name, or symbol-id shape — but couldn't find a matching symbol in the index. Distinct from `no_results_in_corpus`: the data isn't missing, your input was the wrong shape.
 
 **Recovery:** Re-issue with a more specific target, or run `search` first to confirm what shape resolves. `list` confirms the project scope.
 
