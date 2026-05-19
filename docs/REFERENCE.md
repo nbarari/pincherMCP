@@ -911,6 +911,13 @@ Used when the matching flag is empty — convenient for Docker, systemd, launchd
 | `PINCHER_LOG_LEVEL` | One of `debug`, `info`, `warn`, `error`. Defaults to `info`. Applied to every `slog` call site. |
 | `PINCHER_TRACE_INDEX_FILES` | Set to `1` to add a per-file child span on the `pincher.index.run` OTLP trace. Opt-in: span volume scales with file count; off by default to keep traces shaped for whole-pass analysis rather than per-file noise. |
 
+**Resource-pressure tuning** (no flag equivalent):
+
+| Variable | Effect |
+|---|---|
+| `PINCHER_WATCHER_MEMORY_BACKOFF_MIB` | Available-memory floor (MiB) below which the file-watcher skips its 5-second tick instead of risking an OOM kill mid-extraction (#1572). Defaults to `512`. A skipped tick logs `pincher.watcher.memory_backoff` at `warn`. Reading is Linux-only (`/proc/meminfo` `MemAvailable`) this release; on macOS / Windows the watcher never backs off (the reader reports unavailable, preserving prior behaviour). Set to `0` to effectively disable the backoff. |
+| `PINCHER_PYTHON_AST_DAEMON` | Set to `1` to route Python AST extraction through a persistent CPython subprocess instead of spawning one process per file (#1626). Amortises the ~80ms process-spawn + interpreter-init across files — the first file pays it, subsequent files are sub-millisecond. Opt-in while the daemon's restart-on-crash recovery soaks; the per-file spawn path stays the default. |
+
 `PINCHER_HTTP_ADDR=:0` picks a free port and the bound address is printed to stderr at startup. The Docker image sets `PINCHER_HTTP_ADDR=:8080` by default.
 
 ---

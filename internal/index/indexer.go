@@ -1829,6 +1829,21 @@ func (idx *Indexer) Watch(ctx context.Context) {
 				// during long initial indexes.
 				continue
 			}
+			// #1572 v0.87: memory-pressure backoff. When the host's
+			// available memory is below the configured floor, skip
+			// this tick rather than risk an OOM kill mid-extraction.
+			// availableMemoryMiB returns ok=false on platforms it
+			// can't query (everything but Linux this slice) — there
+			// we never back off, preserving prior behaviour.
+			if mib, ok := availableMemoryMiB(); ok {
+				if floor := watcherMemoryBackoffMiB(); mib < floor {
+					slog.Warn("pincher.watcher.memory_backoff",
+						"available_mib", mib,
+						"floor_mib", floor,
+						"action", "skip_tick")
+					continue
+				}
+			}
 			projects, err := idx.store.ListProjects()
 			if err != nil {
 				continue
