@@ -369,6 +369,33 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 					"project_id", projectID,
 					"indexed_with", prev.BinaryVersion,
 					"running", idx.binaryVersion)
+			} else if len(inv.Languages) > 0 && !inv.All {
+				// #1543 v0.84: language-scoped selective invalidation.
+				// Only files whose extracted symbols include any listed
+				// language get their hash cleared — those files re-run
+				// on the normal Index() pass; all other files keep
+				// their hash and skip re-extraction. Falls back to the
+				// full force-reindex if the targeted clear errors
+				// (under-invalidating is a silent correctness bug).
+				cleared, clearErr := idx.store.ClearFileHashesByLanguage(projectID, inv.Languages)
+				if clearErr != nil {
+					slog.Warn("pincher.index.language_scoped_invalidation_failed",
+						"project_id", projectID,
+						"languages", inv.Languages,
+						"err", clearErr,
+						"fallback", "full_force_reindex")
+				} else {
+					binaryDriftForce = false
+					slog.Info("pincher.index.binary_drift_force_language_scoped",
+						"reason", "schema_migrations_language_scoped",
+						"languages", inv.Languages,
+						"files_cleared", cleared,
+						"migrations_applied_from", migFrom,
+						"migrations_applied_to", migTo,
+						"project_id", projectID,
+						"indexed_with", prev.BinaryVersion,
+						"running", idx.binaryVersion)
+				}
 			} else {
 				slog.Info("pincher.index.binary_drift_force_reindex",
 					"project_id", projectID,

@@ -43,7 +43,15 @@ func TestShouldSuppressBinaryDriftForce_TruthTable(t *testing.T) {
 			suppress: false,
 		},
 		{
-			name:    "migrations ran, union is language-scoped — KEEP force (selective TBD)",
+			// #1543 v0.84: gate itself still returns false for the
+			// language-scoped case — the language-scoped relaxation is
+			// applied by the indexer's wrapper (which calls
+			// ClearFileHashesByLanguage and sets binaryDriftForce=false
+			// after a successful selective clear). Keeping the gate
+			// strict here preserves the safety case: if the indexer's
+			// new branch errors or is bypassed, the full force-reindex
+			// still fires.
+			name:    "migrations ran, union is language-scoped — gate still says KEEP force (indexer wrapper relaxes)",
 			inv:     db.MigrationInvalidates{Languages: []string{"Bash"}},
 			from:    30,
 			to:      32,

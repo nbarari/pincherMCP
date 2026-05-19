@@ -4538,6 +4538,56 @@ func (s *Store) DeleteFileHash(projectID, path string) error {
 	return err
 }
 
+// ClearFileHashesByLanguage drops the stored content-hash row for every
+// file in the given project whose extracted symbols include any of the
+// listed languages (#1543 v0.84). Deleting from `files` is the canonical
+// way to make a file's next indexer pass treat it as new and re-extract:
+// the per-file hash compare returns "no prior hash" → extract runs.
+//
+// Used by the #1497 follow-up gate path: when a binary upgrade ran
+// schema migrations classified as `invalidates.Languages=[...]` (not
+// `All`), only files of those languages need re-extraction. Cleared
+// files re-run on the normal Index() pass without a project-wide
+// force-reindex.
+//
+// Returns the number of file rows deleted so the caller can log the
+// scope of the selective invalidation. Empty languages slice is a
+// no-op returning 0 (defensive — caller should not invoke with empty).
+func (s *Store) ClearFileHashesByLanguage(projectID string, languages []string) (int64, error) {
+	if len(languages) == 0 {
+		return 0, nil
+	}
+	// Build the IN list manually since database/sql doesn't support
+	// slice placeholders. SQL injection-safe because the languages slice
+	// comes from compile-time MigrationInvalidates classifications, not
+	// user input.
+	placeholders := make([]string, len(languages))
+	args := make([]any, 0, len(languages)+1)
+	args = append(args, projectID)
+	for i, lang := range languages {
+		placeholders[i] = "?"
+		args = append(args, lang)
+	}
+	query := fmt.Sprintf(`
+		DELETE FROM files
+		 WHERE project_id = ?
+		   AND path IN (
+		     SELECT DISTINCT file_path FROM symbols
+		      WHERE project_id = ? AND language IN (%s)
+		   )`, strings.Join(placeholders, ","))
+	// project_id used twice (outer + subquery): re-prepend.
+	args2 := make([]any, 0, len(languages)+2)
+	args2 = append(args2, projectID, projectID)
+	for _, lang := range languages {
+		args2 = append(args2, lang)
+	}
+	res, err := s.db.Exec(query, args2...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // FilesWithEdgesToFile returns distinct relative file paths (other than
 // `target` itself) that contain at least one symbol with an outgoing
 // edge pointing into a symbol in `target`. Used by the watcher (#427)
