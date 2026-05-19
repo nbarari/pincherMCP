@@ -1464,9 +1464,41 @@ func sliceElem(t string) string {
 // a project-level Variable symbol — saves pending-edge memory at the
 // extraction stage. Centralised so the read/write paths share the
 // same exclusion list and don't drift.
+//
+// #1622 v0.87: expanded from 5 names to the full Go predeclared-
+// identifier set (Go spec §6.1) plus the builtin functions. v0.85
+// observability measured 95% drop rate on READS pending edges
+// (48521 / 50989 on pincher-repo force-reindex) dominated by
+// `dropped_to_missing`. The most common false-positive class:
+// type references like `var x int`, `x.(string)`, `[]error{}` where
+// the predeclared TYPE gets walked as a READS edge by the
+// extractor's identifier walker. Excluding these here costs ~zero
+// at extract time and avoids the persistence + resolve-time
+// lookup. Trade-off: a project Variable literally named `int` /
+// `error` / `len` would now be skipped — Go permits the shadow
+// but the resolver would have dropped those reads anyway (the
+// predeclared binding wins in a function-body scope), so net
+// correctness is unchanged on real code.
 func isPredeclaredOrBlank(name string) bool {
 	switch name {
+	// Predeclared constants + blank identifier.
 	case "_", "true", "false", "nil", "iota":
+		return true
+	// Predeclared types (Go spec §6.1). `any` and `comparable`
+	// added in Go 1.18.
+	case "bool", "byte", "complex64", "complex128", "error",
+		"float32", "float64",
+		"int", "int8", "int16", "int32", "int64", "rune", "string",
+		"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+		"any", "comparable":
+		return true
+	// Predeclared builtin functions. Most appear as call subjects
+	// which extractGoCalls already filters, but a few can show up
+	// as value references (`funcs := []func(any)int{len}`) and the
+	// extractor walks them as bare-ident reads.
+	case "append", "cap", "clear", "close", "complex", "copy",
+		"delete", "imag", "len", "make", "max", "min", "new",
+		"panic", "print", "println", "real", "recover":
 		return true
 	}
 	return false
