@@ -31,6 +31,14 @@ import (
 func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
 
+	// #1590: FILE-H cancellation contract. The composite fans out per-seed
+	// trace + neighborhood lookups; in deep traces that's 20+ DB calls.
+	// Without ctx.Err() checks the handler runs to completion even after
+	// the client cancelled, wasting work the caller already abandoned.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	task := str(args, "task")
 	seedID := str(args, "seed_id")
 	if task == "" && seedID == "" {
@@ -181,7 +189,12 @@ func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequ
 		meta := map[string]any{}
 		var diagnosis, reason string
 		if seedID != "" {
-			reason = EmptyReasonNoResultsInCorpus
+			// #1591: seed_id didn't resolve is target-not-resolved, not
+			// no-results-in-corpus. Aligns with v0.82's #1578 fix to
+			// plan_change / investigate_failure: a missing anchor and an
+			// empty corpus query are distinct failure shapes the
+			// why_empty catalog answers differently.
+			reason = EmptyReasonTargetNotResolved
 			diagnosis = fmt.Sprintf("seed_id %q did not resolve in project %q — either the id is stale (try `search` for the symbol's name) or the wrong project is scoped", seedID, projectID)
 		} else {
 			reason = EmptyReasonNoResultsInCorpus
@@ -232,6 +245,11 @@ func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequ
 	seenCallee := map[string]int{}
 
 	for _, seed := range seeds {
+		// #1590: bail between seeds when the caller cancels — each seed
+		// triggers 2 BFS traces + N GetSymbol calls.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Outbound = what the seed calls (callees).
 		out, err := s.store.TraceViaCTEScoped(projectID, seed.ID, "outbound", []string{"CALLS"}, traceDepth)
 		if err == nil {
@@ -301,6 +319,10 @@ func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequ
 	seenNeighbor := map[string]bool{}
 	const maxNeighbors = 50
 	for _, seed := range seeds {
+		// #1590: bail between seeds — neighbor pass after the trace pass.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(neighbors) >= maxNeighbors {
 			break
 		}

@@ -248,15 +248,14 @@ func TestCancellation_HeavyToolsHaveContractTest(t *testing.T) {
 		"audit_unused":        true,
 		"onboard_module":      true,
 		"dead_code":           true,
+		"context_for_task":    true,
 	}
 	for tool, tier := range toolComplexityTiers {
 		if tier != "heavy" {
 			continue
 		}
 		// guide is heavy but synthesis-only — no DB loop to interrupt.
-		// context_for_task pre-dates FILE-H and is tracked in a
-		// follow-up; remove this skip once #TBD lands.
-		if tool == "guide" || tool == "context_for_task" {
+		if tool == "guide" {
 			continue
 		}
 		if !tested[tool] {
@@ -355,6 +354,26 @@ func TestCancellation_HandleDeadCode_ReturnsPromptly(t *testing.T) {
 	})
 	if res.elapsed > 500*time.Millisecond {
 		t.Errorf("handleDeadCode took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	}
+}
+
+// #1590 v0.83: context_for_task pre-dated FILE-H. Same pattern as the
+// other composites — entry-point ctx.Err() + per-iteration check in the
+// per-seed trace and neighbor loops. The composite fans out 2 traces +
+// N GetSymbol calls + 1 GetSymbolsForFile per seed; without ctx checks
+// it runs the full payload after the client cancels.
+func TestCancellation_HandleContextForTask_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	ctx := withCancelledContext(t)
+	res := runWithBudget(t, "handleContextForTask", 500*time.Millisecond, func() (any, error) {
+		return srv.handleContextForTask(ctx, makeReq(map[string]any{
+			"task": "fix the login retry bug",
+		}))
+	})
+	if res.elapsed > 500*time.Millisecond {
+		t.Errorf("handleContextForTask took %v on a cancelled ctx; expected <500ms", res.elapsed)
 	}
 }
 

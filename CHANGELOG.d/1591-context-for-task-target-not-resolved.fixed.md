@@ -1,0 +1,1 @@
+`context_for_task` stamps `empty_reason=target_not_resolved` when `seed_id` doesn't resolve, distinguishing the missing-anchor case from no-results-in-corpus (#1591 v0.83). Mirrors v0.82's #1578 fix to `plan_change` / `investigate_failure`. `why_empty` answers each shape differently — conflating them sent callers to the wrong recovery path.

@@ -238,6 +238,33 @@ func TestContextForTask_NoMatchingSeeds_StampsEmptyReason(t *testing.T) {
 	}
 }
 
+// #1591 v0.83: seed_id-not-found is target-not-resolved, not
+// no-results-in-corpus. The two failure shapes are distinct and
+// why_empty answers each differently — conflating them sends the
+// caller to the wrong recovery action.
+func TestContextForTask_UnresolvedSeedID_StampsTargetNotResolved(t *testing.T) {
+	t.Parallel()
+	srv, _, projectID := setupComposeTestServer(t)
+
+	res, err := srv.handleContextForTask(context.Background(), makeReq(map[string]any{
+		"seed_id": "doesnotexist.go::nowhere.NoSuch#Function",
+		"project": projectID,
+	}))
+	if err != nil {
+		t.Fatalf("handleContextForTask: %v", err)
+	}
+	body := decode(t, res)
+	meta, _ := body["_meta"].(map[string]any)
+	if meta == nil {
+		t.Fatalf("expected _meta on empty-seed response")
+	}
+	reason, _ := meta["empty_reason"].(string)
+	if reason != EmptyReasonTargetNotResolved {
+		t.Errorf("seed_id-not-found should stamp %q; got %q",
+			EmptyReasonTargetNotResolved, reason)
+	}
+}
+
 // Control: max_seeds cap is honored. Even when the task could match
 // many symbols, the composite expands at most max_seeds. Validates the
 // payload-bounding contract.
