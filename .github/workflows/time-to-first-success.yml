@@ -1,0 +1,85 @@
+name: Time to first success
+
+# FILE-Q #1535 v0.91 — weekly bench measuring the brand-new-user path
+# from `git clone` to `pincher search`. Budget: ≤5 min total. Regressions
+# >20% over the committed baseline page the maintainer (workflow fails).
+#
+# Not part of per-PR CI — runs on a weekly schedule + workflow_dispatch
+# so we catch regressions that drift in (install-size bloat, indexer
+# perf regression) without per-PR noise. Pairs with FILE-R #1536 host
+# conformance matrix that uses this script per host.
+
+on:
+  schedule:
+    # Monday 10:00 UTC — runs after govulncheck so the dep-upgrade
+    # follow-ups don't conflict on the same runner pool.
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ttfs:
+    name: time-to-first-success bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build pincher
+        run: |
+          go build -trimpath -ldflags="-s -w" -o ./pincher ./cmd/pinch/
+
+      - name: Run time-to-first-success bench
+        id: bench
+        env:
+          PINCHER_BIN: ${{ github.workspace }}/pincher
+          # Use a smaller stable repo than golang/go for CI runtime —
+          # the budget exists to gate REAL clones (golang/go ~12k files
+          # is the published-budget representative repo), but on the CI
+          # runner the network IO to clone golang/go is the dominant
+          # cost and is itself bursty. Use a smaller, more deterministic
+          # repo for the CI signal; record raw numbers in the artifact
+          # so regression analysis works against the smaller corpus.
+          BUDGET_SECONDS: 300
+        run: |
+          mkdir -p out
+          ./scripts/time-to-first-success.sh \
+            https://github.com/kwad77/pincher \
+            "Indexer" > out/ttfs.json
+          cat out/ttfs.json
+
+      - name: Compare against baseline
+        run: |
+          baseline=testdata/bench/time-to-first-success.bench.txt
+          if [ ! -f "$baseline" ]; then
+            echo "::warning::No baseline committed yet at $baseline — record this run's numbers as the first baseline."
+            exit 0
+          fi
+          # Compare total_ms against the baseline's pinned number with
+          # the workflow's 20% regression threshold (FILE-Q acceptance
+          # criterion).
+          current=$(jq -r '.total_ms' out/ttfs.json)
+          previous=$(awk '/^total_ms:/ {print $2}' "$baseline")
+          if [ -z "$previous" ]; then
+            echo "::error::baseline file present but no total_ms line — corrupt baseline at $baseline"
+            exit 1
+          fi
+          delta_pct=$(( (current - previous) * 100 / previous ))
+          echo "current=$current  previous=$previous  delta=${delta_pct}%"
+          if [ "$delta_pct" -gt 20 ]; then
+            echo "::error::time-to-first-success regressed ${delta_pct}% (>20% threshold)"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: time-to-first-success-${{ github.run_id }}
+          path: out/
+          retention-days: 90
