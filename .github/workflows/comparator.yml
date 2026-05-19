@@ -1,0 +1,58 @@
+name: External comparator
+
+# FILE-B #1521 v0.86 — weekly head-to-head bench against the
+# "raw Read+Grep agent loop" comparator. Output feeds the token-savings
+# methodology doc (FILE-A) with real measured ratios, NOT estimates.
+#
+# v0.86 scope: 1 representative task (find-symbol-by-name). Tasks
+# 2-20 ship in v0.87-v0.90 follow-ups; the runner is the load-bearing
+# scaffolding this PR delivers.
+
+on:
+  schedule:
+    # Saturday 15:00 UTC — last slot in the staggered weekly cycle.
+    # (Mon ttfs/govuln, Tue resource-pressure, Wed migration,
+    # Thu per-tool-latency, Fri multi-project-ceiling).
+    - cron: '0 15 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comparator:
+    name: raw-readgrep comparator (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Build pincher
+        run: go build -trimpath -ldflags="-s -w" -o ./pincher ./cmd/pinch/
+
+      - name: Run comparator
+        env:
+          PINCHER_BIN: ${{ github.workspace }}/pincher
+          TARGET_SYMBOL: Open
+        # Run against testdata/corpus/go-project — small, deterministic,
+        # ships in the repo. Real public-corpus comparator runs (linux
+        # kernel, kubernetes, react) ship in v0.87-v0.91 follow-ups
+        # after the runner has soaked against the local corpus first.
+        run: bash scripts/comparator-raw-readgrep.sh testdata/corpus/go-project out/comparator.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: comparator-${{ github.run_id }}
+          path: out/
+          retention-days: 90
