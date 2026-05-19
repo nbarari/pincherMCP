@@ -196,6 +196,18 @@ func decideReadHook(store *db.Store, in hookCheckInput, debug bool) hookDecision
 		return debugPass(debug, "limit already set", hookDecision{FilePathParsed: path})
 	}
 
+	// #1646 v0.86: test files pass through. Test files are commonly
+	// edited by hand (Read → Edit), and the `context` redirect's
+	// "same retrieval, ~80% smaller payload" promise is a bad trade
+	// when the agent needs the literal byte content for an Edit. The
+	// hook's job is to redirect navigation reads, not editing reads;
+	// test files are the most common false positive because they're
+	// often small enough that the agent reads them whole.
+	if isTestFile(path) {
+		return debugPass(debug, "test file exempted",
+			hookDecision{FilePathParsed: path})
+	}
+
 	relPath, fileBytes, projectID, ok := matchIndexedFile(store, path)
 	if !ok {
 		return debugPass(debug, "not in any indexed project", hookDecision{FilePathParsed: path})
@@ -280,6 +292,77 @@ func decideGrepHook(store *db.Store, in hookCheckInput, debug bool) hookDecision
 		SuggestedTool: "search",
 		SuggestedArgs: args,
 	}
+}
+
+// isTestFile reports whether a path looks like a test/spec source file
+// using cross-language naming conventions. The hook's redirect to
+// `context lite=true` is unhelpful when the agent is about to Edit the
+// file — losing the literal byte content forces a follow-up Read that
+// defeats the exemption. Recognized conventions (case-insensitive on
+// the trailing segment):
+//
+//   - Go:     *_test.go
+//   - Python: *_test.py / test_*.py
+//   - Rust:   *_test.rs (also covers internal #[cfg(test)] modules
+//             whose tests live in same file — those won't match)
+//   - JS/TS:  *.test.js / *.test.ts / *.test.jsx / *.test.tsx /
+//             *.spec.js / *.spec.ts / *.spec.jsx / *.spec.tsx
+//   - Ruby:   *_spec.rb / *_test.rb
+//   - Java:   *Test.java / *Tests.java / *IT.java
+//   - Swift:  *Test.swift / *Tests.swift / *Spec.swift
+//   - Kotlin: *Test.kt / *Tests.kt
+//   - C#:     *Tests.cs / *Test.cs
+//   - PHP:    *Test.php
+//
+// Also matches paths under common test directories regardless of file
+// extension: `tests/`, `test/`, `__tests__/`, `spec/`, `e2e/`, `it/`.
+// These cover Python `tests/`, JS `__tests__/`, Ruby `spec/`,
+// Cypress `e2e/`, and similar.
+//
+// Designed to err on the side of MORE pass-through (false negatives on
+// the hook). A non-test file matching the pattern is a tiny correctness
+// loss (agent reads bytes pincher could have summarized); a real test
+// file blocked here is a UX bug that compounds across every edit cycle.
+func isTestFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	clean := filepath.ToSlash(path)
+	lower := strings.ToLower(clean)
+
+	// Directory-segment match — matches a `/tests/`, `/test/`,
+	// `/__tests__/`, `/spec/`, `/e2e/`, or `/it/` anywhere in the
+	// path. Surrounded by slashes to avoid matching `testing.go` etc.
+	for _, seg := range []string{"/tests/", "/test/", "/__tests__/", "/spec/", "/e2e/", "/it/"} {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	// Match basename patterns. Use the lowered basename so case
+	// variants (`*Test.java`, `*test.go`) both match.
+	base := filepath.Base(lower)
+
+	// Suffix patterns (`_test.go` etc).
+	for _, suffix := range []string{
+		"_test.go", "_test.py", "_test.rs", "_test.rb",
+		"_spec.rb",
+		".test.js", ".test.jsx", ".test.ts", ".test.tsx", ".test.mjs",
+		".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx", ".spec.mjs",
+		"test.java", "tests.java", "it.java",
+		"test.swift", "tests.swift", "spec.swift",
+		"test.kt", "tests.kt",
+		"tests.cs", "test.cs",
+		"test.php",
+	} {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	// Prefix patterns (`test_*.py`).
+	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
+		return true
+	}
+	return false
 }
 
 func emitHookResponse(d hookDecision) {
