@@ -5846,7 +5846,7 @@ func (s *Store) ResolveHookInvocationsForSession(sessionID string, recentCalls [
 	rows, err := s.ro.Query(
 		`SELECT id, ts, suggested_tool
 		   FROM hook_invocations
-		  WHERE session_id = ? AND decision = 'redirect' AND took_recommendation IS NULL
+		  WHERE session_id = ? AND decision IN ('redirect','redirect_advisory') AND took_recommendation IS NULL
 		  ORDER BY ts`,
 		sessionID,
 	)
@@ -5983,7 +5983,7 @@ func (s *Store) LargestSymbolInFile(projectID, filePath string) (string, error) 
 func (s *Store) HookConversionRate7d() (float64, int, int, error) {
 	row := s.ro.QueryRow(
 		`SELECT
-		    COALESCE(SUM(CASE WHEN decision='redirect' THEN 1 ELSE 0 END), 0) AS redirects,
+		    COALESCE(SUM(CASE WHEN decision IN ('redirect','redirect_advisory') THEN 1 ELSE 0 END), 0) AS redirects,
 		    COALESCE(SUM(CASE WHEN took_recommendation=1 THEN 1 ELSE 0 END), 0) AS taken
 		   FROM hook_invocations
 		  WHERE ts > ?`,
@@ -6016,7 +6016,7 @@ func (s *Store) HookOverrideRate7d() (float64, int, int, error) {
 		    COALESCE(SUM(CASE WHEN took_recommendation IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
 		    COALESCE(SUM(CASE WHEN took_recommendation=0 THEN 1 ELSE 0 END), 0) AS overrides
 		   FROM hook_invocations
-		  WHERE decision='redirect' AND ts > ?`,
+		  WHERE decision IN ('redirect','redirect_advisory') AND ts > ?`,
 		time.Now().Add(-7*24*time.Hour).UnixNano(),
 	)
 	var resolved, overrides int
@@ -6038,7 +6038,7 @@ func (s *Store) HookCountsByTool7d() (map[string]map[string]int, error) {
 	rows, err := s.ro.Query(
 		`SELECT
 		    tool_name,
-		    SUM(CASE WHEN decision='redirect' THEN 1 ELSE 0 END) AS redirects,
+		    SUM(CASE WHEN decision IN ('redirect','redirect_advisory') THEN 1 ELSE 0 END) AS redirects,
 		    SUM(CASE WHEN took_recommendation=1 THEN 1 ELSE 0 END) AS taken
 		   FROM hook_invocations
 		  WHERE ts > ?
