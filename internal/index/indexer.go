@@ -489,6 +489,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		bufMu          sync.Mutex
 		lastStatsFlush time.Time           // throttle for in-flight project counts; guarded by bufMu
 		seenFiles      = map[string]bool{} // #326: relPaths the walker yielded this run; tail-pass GC's symbols for files NOT in this set. Populated in the main (single-threaded) loop so no mutex.
+		extractedFiles = map[string]bool{} // #1629 v0.87: relPaths actually re-extracted this run (hash-skipped files excluded). Used to scope the incremental resolve pass. Populated in the main loop right after totalFiles++ so no mutex.
 		// #1231 v0.66 DOGFOOD: per-file expected symbol count. Filled
 		// in the per-file goroutine (after disambiguateDuplicates + the
 		// symBuf append, under bufMu). Compared post-pass against the
@@ -607,6 +608,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		}
 
 		totalFiles++
+		extractedFiles[relPath] = true // #1629 v0.87: track for incremental-resolve scope.
 		prog.FilesTotal.Add(1)
 		wg.Add(1)
 		go func(path, relPath, hash string, content []byte) {
@@ -1088,12 +1090,10 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// 1000 set conservative so the heuristic stays a win, not a loss.
 		// On a LoadAllSymbolsByQN error, fall back to per-call lookups —
 		// correctness preserved; only the speedup is lost.
-		// #1629 v0.87: incremental-tick scope for all three resolve
-		// passes (IMPORTS / CALLS / READS). When few files
-		// re-extracted AND we're not forcing, load only the pending
-		// edges from those files and wipe only their prior resolved
-		// edges. Slice 1 (PR #1673) shipped IMPORTS; slice 2 extends
-		// the same pattern to CALLS and READS.
+		// #1629 v0.87: incremental-tick scope for the resolve passes.
+		// When few files re-extracted AND we're not forcing, load
+		// only the pending edges from those files and wipe only
+		// their prior resolved edges.
 		//
 		// Threshold: small enough that the SQLite IN clause stays
 		// well under the 999-parameter default; large enough that
@@ -1102,8 +1102,13 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		var resolveScope []string
 		useResolveScope := !force && totalFiles > 0 && totalFiles <= incrementalScopeThreshold
 		if useResolveScope {
+			// CRITICAL: scope must come from files actually re-extracted
+			// this run, not from seenFiles (which includes hash-skipped
+			// files — the walker yields every file, even unchanged ones).
+			// extractedFiles is populated in the main loop right after
+			// totalFiles++ where we know the file isn't hash-skipped.
 			resolveScope = make([]string, 0, totalFiles)
-			for f := range seenFiles {
+			for f := range extractedFiles {
 				resolveScope = append(resolveScope, f)
 			}
 		}
