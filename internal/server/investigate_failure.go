@@ -298,6 +298,12 @@ func (s *Server) handleInvestigateFailure(ctx context.Context, req *mcp.CallTool
 
 	maxRaw := maxSuspects * 3
 	for _, name := range frameNames {
+		// #1595: per-iteration cancellation check. N frame names × one
+		// SQL search each; without this the loop runs to completion
+		// after the client cancels.
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		if len(candidates) >= maxRaw {
 			break
 		}
@@ -513,6 +519,11 @@ func (s *Server) handleInvestigateFailure(ctx context.Context, req *mcp.CallTool
 	callers := []hopRowFailure{}
 	seenCaller := map[string]int{}
 	for _, sus := range suspects {
+		// #1595: per-iteration cancellation check. Each iteration is a
+		// BFS trace + N GetSymbol calls; bail between suspects on cancel.
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		hops, err := s.store.TraceViaCTEScoped(projectID, sus.SymbolID, "inbound", []string{"CALLS"}, traceDepth)
 		if err != nil {
 			continue

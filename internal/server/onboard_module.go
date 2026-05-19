@@ -147,7 +147,17 @@ func (s *Server) handleOnboardModule(ctx context.Context, req *mcp.CallToolReque
 	langCounts := map[string]int{}
 	testSymCount := 0
 	codeSymCount := 0
+	scanned := 0
 	for rows.Next() {
+		// #1595: check ctx every 100 rows. Large modules can have
+		// thousands of in-scope symbols; without this the scope scan
+		// runs to completion after the client cancels.
+		scanned++
+		if scanned%100 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		var s scopeSym
 		var exp, test, entry int
 		if err := rows.Scan(&s.id, &s.name, &s.qn, &s.kind, &s.lang, &s.file,
@@ -261,7 +271,16 @@ func (s *Server) handleOnboardModule(ctx context.Context, req *mcp.CallToolReque
 		projectID)
 	if err == nil {
 		defer edgeRows.Close()
+		edgesScanned := 0
 		for edgeRows.Next() {
+			// #1595: check ctx every 100 rows. Full CALLS edge scan can
+			// be tens of thousands of rows on a large project.
+			edgesScanned++
+			if edgesScanned%100 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			var fromID, toID, kind string
 			var fromName, toName *string
 			if err := edgeRows.Scan(&fromID, &toID, &kind, &fromName, &toName); err != nil {
