@@ -578,6 +578,7 @@ var writerRoutedStoreMethods = map[string]bool{
 	"BulkUpsertEdges":            true,
 	"DeleteEdgesByKindAndSource":                true,
 	"DeleteResolvePassEdgesByKindForSourceFiles": true, // #1629 v0.87: scoped resolve_pass delete for incremental resolve.
+	"DeleteEdgesByKindAndSourceForSourceFiles":   true, // #1629 v0.87 slice 2: generalized scoped delete (any source value).
 	"MaybeFireCelebration":       true,
 	"ReplacePendingEdgesForFile":      true,
 	"DeletePendingEdgesForFile":       true,

@@ -1088,34 +1088,36 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// 1000 set conservative so the heuristic stays a win, not a loss.
 		// On a LoadAllSymbolsByQN error, fall back to per-call lookups —
 		// correctness preserved; only the speedup is lost.
-		// #1629 v0.87: incremental-tick scope for IMPORTS. When few
-		// files re-extracted AND we're not forcing, load only the
-		// IMPORTS pending edges from those files (and wipe only
-		// their prior resolved IMPORTS edges in resolveImports).
+		// #1629 v0.87: incremental-tick scope for all three resolve
+		// passes (IMPORTS / CALLS / READS). When few files
+		// re-extracted AND we're not forcing, load only the pending
+		// edges from those files and wipe only their prior resolved
+		// edges. Slice 1 (PR #1673) shipped IMPORTS; slice 2 extends
+		// the same pattern to CALLS and READS.
+		//
 		// Threshold: small enough that the SQLite IN clause stays
 		// well under the 999-parameter default; large enough that
 		// most real watcher ticks (1-3 files) hit the scoped path.
-		// CALLS and READS still use the full pool this iteration —
-		// extending #1629 to them is a follow-up slice.
 		const incrementalScopeThreshold = 32
-		var importsScope []string
-		useImportsScope := !force && totalFiles > 0 && totalFiles <= incrementalScopeThreshold
-		if useImportsScope {
-			importsScope = make([]string, 0, totalFiles)
+		var resolveScope []string
+		useResolveScope := !force && totalFiles > 0 && totalFiles <= incrementalScopeThreshold
+		if useResolveScope {
+			resolveScope = make([]string, 0, totalFiles)
 			for f := range seenFiles {
-				importsScope = append(importsScope, f)
+				resolveScope = append(resolveScope, f)
 			}
 		}
 
-		var allImports []ast.ExtractedEdge
-		if useImportsScope {
-			allImports = loadScopedOrFallback(idx, projectID, "IMPORTS", importsScope, pendingImport)
-		} else {
-			allImports = loadOrFallback(idx, projectID, "IMPORTS", pendingImport)
+		loadKind := func(kind string, fallback []ast.ExtractedEdge) []ast.ExtractedEdge {
+			if useResolveScope {
+				return loadScopedOrFallback(idx, projectID, kind, resolveScope, fallback)
+			}
+			return loadOrFallback(idx, projectID, kind, fallback)
 		}
-		allCalls := loadOrFallback(idx, projectID, "CALLS", pendingCalls)
-		allReads := loadOrFallback(idx, projectID, "READS", pendingReads)
-		allReads = append(allReads, loadOrFallback(idx, projectID, "WRITES", nil)...)
+		allImports := loadKind("IMPORTS", pendingImport)
+		allCalls := loadKind("CALLS", pendingCalls)
+		allReads := loadKind("READS", pendingReads)
+		allReads = append(allReads, loadKind("WRITES", nil)...)
 
 		var qnMap map[string][]db.Symbol
 		if len(allImports)+len(allCalls)+len(allReads) > qnPreloadThreshold {
@@ -1154,26 +1156,34 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		}
 
 		// #1629 v0.87: when the scoped path is in use and the scoped
-		// pending pool is empty, we still need to wipe the scoped
-		// prior resolved edges — a file that previously emitted
-		// IMPORTS may have removed them all in this edit. runResolve
-		// short-circuits when pendingIn==0, so call the scoped delete
-		// directly here. The non-scoped path doesn't need this because
-		// its delete-then-upsert pair lives inside resolveImports
-		// itself, gated by len(pending)>0.
-		if useImportsScope && len(allImports) == 0 {
-			if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "IMPORTS", importsScope); err != nil {
-				slog.Warn("pincher.imports.scoped_delete_no_pending.err", "err", err)
+		// pending pool is empty for a given kind, we still need to
+		// wipe the scoped prior resolved edges — a file that
+		// previously emitted those edges may have removed them all
+		// in this edit. runResolve short-circuits when pendingIn==0,
+		// so the resolvers' own internal scoped-delete-on-empty
+		// branches handle the case. To make those fire, we call the
+		// resolver directly (not via runResolve) when the scoped path
+		// is in use AND the kind has no pending edges to resolve. The
+		// resolver bails early after the delete and returns 0.
+		if useResolveScope {
+			if len(allImports) == 0 {
+				idx.resolveImports(projectID, nil, pythonRoots, qnMap, resolveScope)
+			}
+			if len(allCalls) == 0 {
+				idx.resolveCalls(projectID, nil, pythonRoots, qnMap, resolveScope)
+			}
+			if len(allReads) == 0 {
+				idx.resolveReads(projectID, nil, qnMap, resolveScope)
 			}
 		}
 		runResolve("IMPORTS", len(allImports), func() int {
-			return idx.resolveImports(projectID, allImports, pythonRoots, qnMap, importsScope)
+			return idx.resolveImports(projectID, allImports, pythonRoots, qnMap, resolveScope)
 		})
 		runResolve("CALLS", len(allCalls), func() int {
-			return idx.resolveCalls(projectID, allCalls, pythonRoots, qnMap)
+			return idx.resolveCalls(projectID, allCalls, pythonRoots, qnMap, resolveScope)
 		})
 		runResolve("READS", len(allReads), func() int {
-			return idx.resolveReads(projectID, allReads, qnMap)
+			return idx.resolveReads(projectID, allReads, qnMap, resolveScope)
 		})
 
 		// #1165 Phase 2: bind Ansible USES_VAR refs to Setting symbols in
@@ -3376,8 +3386,17 @@ func resolveMethodByName(store *db.Store, projectID, name string) string {
 //
 // Only Go CALLS reach this path; non-Go regex extractors emit noisy ToName
 // values that would create false-positive cross-package edges.
-func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol) int {
+// scopeFiles works the same way it does in resolveImports (#1629
+// v0.87 slice 2): when non-empty, the resolver wipes only the
+// resolve_pass CALLS edges from those source files. Caller must
+// already have filtered `pending` to the same scope.
+func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, pythonRoots []string, qnMap map[string][]db.Symbol, scopeFiles []string) int {
 	if len(pending) == 0 {
+		if len(scopeFiles) > 0 {
+			if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "CALLS", scopeFiles); err != nil {
+				slog.Warn("pincher.calls.scoped_delete.err", "err", err)
+			}
+		}
 		return 0
 	}
 
@@ -3876,7 +3895,13 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, 
 	// rule changes (e.g. the #465 polymorphic-method blocklist) converge
 	// without --force on every incremental re-index. Per-file CALLS
 	// edges keep their cascade-on-delete model.
-	if err := idx.store.DeleteEdgesByKindAndSource(projectID, "CALLS", "resolve_pass"); err != nil {
+	// #1629 v0.87 slice 2: scope the delete when only some files
+	// re-extracted, preserving unchanged files' resolved CALLS.
+	if len(scopeFiles) > 0 {
+		if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, "CALLS", scopeFiles); err != nil {
+			slog.Warn("pincher.calls.scoped_delete.err", "err", err)
+		}
+	} else if err := idx.store.DeleteEdgesByKindAndSource(projectID, "CALLS", "resolve_pass"); err != nil {
 		slog.Warn("pincher.calls.delete_prior.err", "err", err)
 	}
 	if len(edges) == 0 {
@@ -3904,8 +3929,22 @@ func (idx *Indexer) resolveCalls(projectID string, pending []ast.ExtractedEdge, 
 // "who modifies Cache" vs "who only observes it" by filtering on
 // edge kind. Confidence is preserved from the extracted edge (0.5 —
 // lower than CALLS at 0.7 because over-emission is expected).
-func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge, qnMap map[string][]db.Symbol) int {
+// scopeFiles works the same way as in resolveImports / resolveCalls
+// (#1629 v0.87 slice 2): when non-empty, the resolver wipes only the
+// READS / WRITES / binding_pass CALLS edges from those source files.
+// Caller must already have filtered `pending` to the same scope.
+func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge, qnMap map[string][]db.Symbol, scopeFiles []string) int {
 	if len(pending) == 0 {
+		if len(scopeFiles) > 0 {
+			for _, k := range []string{"READS", "WRITES"} {
+				if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, k, scopeFiles); err != nil {
+					slog.Warn("pincher.reads.scoped_delete.err", "kind", k, "err", err)
+				}
+			}
+			if err := idx.store.DeleteEdgesByKindAndSourceForSourceFiles(projectID, "CALLS", "binding_pass", scopeFiles); err != nil {
+				slog.Warn("pincher.binding.scoped_delete.err", "err", err)
+			}
+		}
 		return 0
 	}
 
@@ -4354,16 +4393,29 @@ func (idx *Indexer) resolveReads(projectID string, pending []ast.ExtractedEdge, 
 
 	// #475: atomic replace of the prior resolve pass's READS + WRITES.
 	// Both kinds share the read-pass output, so wipe both before insert.
-	for _, k := range []string{"READS", "WRITES"} {
-		if err := idx.store.DeleteEdgesByKindAndSource(projectID, k, "resolve_pass"); err != nil {
-			slog.Warn("pincher.reads.delete_prior.err", "kind", k, "err", err)
+	// #1629 v0.87 slice 2: scoped deletion when incremental tick.
+	if len(scopeFiles) > 0 {
+		for _, k := range []string{"READS", "WRITES"} {
+			if err := idx.store.DeleteResolvePassEdgesByKindForSourceFiles(projectID, k, scopeFiles); err != nil {
+				slog.Warn("pincher.reads.scoped_delete.err", "kind", k, "err", err)
+			}
+		}
+	} else {
+		for _, k := range []string{"READS", "WRITES"} {
+			if err := idx.store.DeleteEdgesByKindAndSource(projectID, k, "resolve_pass"); err != nil {
+				slog.Warn("pincher.reads.delete_prior.err", "kind", k, "err", err)
+			}
 		}
 	}
 	// #565: separate atomic replace for function-value-binding CALLS
 	// edges (source='binding_pass'). Distinct from resolveCalls's
 	// resolve_pass CALLS so this delete doesn't nuke the direct-call
 	// graph. Per-file CALLS (source='per_file') are also untouched.
-	if err := idx.store.DeleteEdgesByKindAndSource(projectID, "CALLS", "binding_pass"); err != nil {
+	if len(scopeFiles) > 0 {
+		if err := idx.store.DeleteEdgesByKindAndSourceForSourceFiles(projectID, "CALLS", "binding_pass", scopeFiles); err != nil {
+			slog.Warn("pincher.binding.scoped_delete.err", "err", err)
+		}
+	} else if err := idx.store.DeleteEdgesByKindAndSource(projectID, "CALLS", "binding_pass"); err != nil {
 		slog.Warn("pincher.binding.delete_prior.err", "err", err)
 	}
 	if len(edges) == 0 {

@@ -3643,30 +3643,42 @@ func (s *Store) DeleteEdgesByKindAndSource(projectID, kind, source string) error
 
 // DeleteResolvePassEdgesByKindForSourceFiles deletes only the
 // resolve_pass edges of the given kind whose from-side symbol lives
-// in one of the provided source files (#1629 v0.87). Used by the
-// incremental resolve path on watcher ticks: when only a few files
-// re-extracted, we resolve only their pending edges and must wipe
-// only THEIR prior resolved edges — wiping everything would drop
-// the resolved edges from unchanged files that we're NOT going to
-// rebuild this pass.
+// in one of the provided source files (#1629 v0.87). Convenience
+// wrapper around DeleteEdgesByKindAndSourceForSourceFiles with
+// source="resolve_pass".
+func (s *Store) DeleteResolvePassEdgesByKindForSourceFiles(projectID, kind string, files []string) error {
+	return s.DeleteEdgesByKindAndSourceForSourceFiles(projectID, kind, "resolve_pass", files)
+}
+
+// DeleteEdgesByKindAndSourceForSourceFiles deletes edges of (kind,
+// source) whose from-side symbol lives in one of the provided source
+// files (#1629 v0.87 slice 2). Used by the incremental resolve path
+// on watcher ticks: when only a few files re-extracted, we resolve
+// only their pending edges and must wipe only THEIR prior resolved
+// edges — wiping everything would drop the resolved edges from
+// unchanged files that we're NOT going to rebuild this pass.
+//
+// Source values in use: "resolve_pass" (resolveImports / resolveCalls
+// / resolveReads / resolveUsesVar) and "binding_pass" (function-value
+// binding CALLS produced by resolveReads).
 //
 // Empty files list is a no-op. Returns nil on success. Writer-routed.
 //
 // The deletion joins `edges.from_id` to `symbols.id` to recover the
 // source file_path, since `edges` doesn't store it directly. The
 // `symbols` table's `file_path` column is the canonical source.
-func (s *Store) DeleteResolvePassEdgesByKindForSourceFiles(projectID, kind string, files []string) error {
+func (s *Store) DeleteEdgesByKindAndSourceForSourceFiles(projectID, kind, source string, files []string) error {
 	if len(files) == 0 {
 		return nil
 	}
 	placeholders := make([]string, len(files))
-	args := []any{projectID, kind, projectID}
+	args := []any{projectID, kind, source, projectID}
 	for i, f := range files {
 		placeholders[i] = "?"
 		args = append(args, f)
 	}
 	query := `DELETE FROM edges
-		WHERE project_id = ? AND kind = ? AND source = 'resolve_pass'
+		WHERE project_id = ? AND kind = ? AND source = ?
 		  AND from_id IN (
 		    SELECT id FROM symbols
 		    WHERE project_id = ? AND file_path IN (` + strings.Join(placeholders, ",") + `)
