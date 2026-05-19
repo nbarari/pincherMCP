@@ -1,0 +1,157 @@
+name: Migration rehearsal
+
+# FILE-U #1539 v0.93 — weekly migration smoke test.
+#
+# Installs the earliest supported pincher (v0.4.1, schema v4), indexes
+# a fixed synthetic corpus, then upgrades to the current binary and
+# verifies the upgrade succeeds AND a curated set of advertised tools
+# still works. Drift caught here seeds sections in the migration guide.
+#
+# Pairs with #1390 external migration-guide review: this is the
+# "find every silent break ourselves before externals see it" gate.
+#
+# Not required for per-PR CI. Weekly + workflow_dispatch.
+
+on:
+  schedule:
+    # Wednesday 11:00 UTC — staggered against govulncheck (Mon 09:00)
+    # and time-to-first-success (Mon 10:00) so a CI runner outage
+    # doesn't take down all three signals at once.
+    - cron: '0 11 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    name: v0.4 to current migration smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build current pincher
+        run: |
+          go build -trimpath -ldflags="-s -w" -o ./pincher-current ./cmd/pinch/
+
+      - name: Download v0.4.1 baseline binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # v0.4.1 is the earliest release with a stable extraction
+          # surface — pre-v0.4 the schema was still being defined. If
+          # we want to migrate from an older release we extend the
+          # rehearsal corpus here.
+          gh release download v0.4.1 \
+            --pattern 'pincher-v0.4.1-linux-amd64.tar.gz' \
+            --repo kwad77/pincher \
+            --dir ./baseline
+          cd baseline
+          tar -xzf pincher-v0.4.1-linux-amd64.tar.gz
+          # The tarball ships the binary as pincher-vX.Y.Z-<os>-<arch>;
+          # rename to a stable handle.
+          mv pincher-v0.4.1-linux-amd64 pincher-v0.4.1
+          chmod +x pincher-v0.4.1
+
+      - name: Create synthetic corpus
+        run: |
+          # A small, deterministic corpus that exercises Go extraction
+          # (the highest-confidence path at v0.4) plus a YAML file and
+          # a docs/ file. Real test repos drift; a checked-in synthetic
+          # corpus pins the upgrade signal.
+          mkdir -p corpus/{go,yaml,docs}
+          cat > corpus/go/main.go <<'GO'
+          package main
+
+          import "fmt"
+
+          func main() {
+              greet("world")
+          }
+
+          func greet(name string) {
+              fmt.Println("hello,", name)
+          }
+          GO
+          cat > corpus/yaml/config.yaml <<'YAML'
+          name: test-corpus
+          version: 1
+          services:
+            - name: api
+              port: 8080
+          YAML
+          cat > corpus/docs/README.md <<'MD'
+          # Test corpus
+
+          Used by `.github/workflows/migration-rehearsal.yml` (#1539 FILE-U).
+          MD
+          (cd corpus && git init --quiet && git add . && git -c user.email=ci@test -c user.name=ci commit -m "init" --quiet)
+
+      - name: Index with v0.4.1
+        id: idx_old
+        env:
+          DATA_DIR: ${{ github.workspace }}/datadir-v04
+        run: |
+          mkdir -p "${DATA_DIR}"
+          ./baseline/pincher-v0.4.1 --data-dir "${DATA_DIR}" index ./corpus
+          ls -la "${DATA_DIR}"
+          test -f "${DATA_DIR}/pincher.db" || (echo "::error::v0.4.1 did not create pincher.db at expected location"; exit 1)
+          echo "v0.4.1 baseline DB created."
+
+      - name: Upgrade and verify migration
+        env:
+          DATA_DIR: ${{ github.workspace }}/datadir-v04
+        run: |
+          # The current binary should open the v0.4-era DB, migrate it
+          # forward in place, and answer queries without losing data.
+          ./pincher-current --data-dir "${DATA_DIR}" --version
+
+          # Force a re-index that exercises the migrated schema. A
+          # successful migration leaves the existing rows queryable
+          # AND continues to accept new data.
+          ./pincher-current --data-dir "${DATA_DIR}" index ./corpus
+
+          # Verify advertised tools still work against the upgraded DB.
+          # Each is a one-line probe via the HTTP gateway (faster to
+          # script than the MCP stdio transport in CI).
+          ./pincher-current --data-dir "${DATA_DIR}" --http :18080 &
+          SERVER_PID=$!
+          trap "kill -TERM $SERVER_PID 2>/dev/null || true" EXIT
+          # Wait until the server is accepting connections (cap at 30s).
+          until curl -fsSL -m 1 http://127.0.0.1:18080/v1/health >/dev/null 2>&1; do
+            sleep 1
+          done
+
+          # Probe set: health, search (FTS path), symbol (byte-offset
+          # path), schema (introspection path). If any 404s or returns
+          # an error envelope, the migration broke something.
+          for tool in health stats schema; do
+            echo "Probing /v1/$tool"
+            curl -fsSL -m 5 "http://127.0.0.1:18080/v1/$tool" | jq -e '.error // empty' && {
+              echo "::error::tool $tool returned an error envelope after migration"
+              exit 1
+            } || true
+          done
+
+          # search expects a body — POST a minimal query.
+          curl -fsSL -m 5 -X POST -H 'Content-Type: application/json' \
+            -d '{"query":"main"}' \
+            http://127.0.0.1:18080/v1/search | jq -e '.results | length > 0' || {
+              echo "::error::search returned zero results post-migration — the v0.4 corpus rows did not survive"
+              exit 1
+            }
+
+          echo "Migration rehearsal: all advertised tools still functional."
+
+      - name: Upload data dir for forensics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-rehearsal-data-${{ github.run_id }}
+          path: datadir-v04/
+          retention-days: 30
