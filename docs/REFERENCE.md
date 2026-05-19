@@ -901,6 +901,14 @@ Used when the matching flag is empty — convenient for Docker, systemd, launchd
 | `PINCHER_DB_READERS` | `--db-readers` |
 | `PINCHER_MAX_FILE_SIZE_MB` | `--max-file-size-mb` |
 
+**Logging and observability** (no flag equivalent — env-var only; see [`docs/deployment/observability.md`](deployment/observability.md)):
+
+| Variable | Effect |
+|---|---|
+| `PINCHER_LOG_FORMAT` | `json` for structured logs (recommended for production aggregation); any other value (or unset) keeps the human-readable text format. |
+| `PINCHER_LOG_LEVEL` | One of `debug`, `info`, `warn`, `error`. Defaults to `info`. Applied to every `slog` call site. |
+| `PINCHER_TRACE_INDEX_FILES` | Set to `1` to add a per-file child span on the `pincher.index.run` OTLP trace. Opt-in: span volume scales with file count; off by default to keep traces shaped for whole-pass analysis rather than per-file noise. |
+
 `PINCHER_HTTP_ADDR=:0` picks a free port and the bound address is printed to stderr at startup. The Docker image sets `PINCHER_HTTP_ADDR=:8080` by default.
 
 ---
