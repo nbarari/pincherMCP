@@ -1,6 +1,9 @@
 package ast
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +59,31 @@ func TestJavaScriptAST_DisableOptOut_KeepsRegexConfidence_1328(t *testing.T) {
 			t.Errorf("opt-out path symbol %q: confidence = %v, expected ≤0.99 (regex tier)",
 				s.Name, s.ExtractionConfidence)
 		}
+	}
+}
+
+// #1477 v0.84: parseJSWithRecovery logs at slog.Debug when the parser
+// rejects source. Pre-fix the fallback to regex was silent — users
+// debugging "why are my JS symbols at regex confidence" had no
+// signal to trace. The Debug-level log makes the failure correlatable
+// when PINCHER_LOG_LEVEL=debug; production stays quiet by default.
+func TestParseJSWithRecovery_LogsParseFailureAtDebug(t *testing.T) {
+	// Capture slog output at debug level.
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	// Source that the JS parser will reject (incomplete statement).
+	bad := []byte("function broken( {")
+	_, ok := parseJSWithRecovery(bad)
+	if ok {
+		t.Fatal("parseJSWithRecovery returned ok=true on malformed input")
+	}
+	got := buf.String()
+	if !strings.Contains(got, "pincher.ast.js.parse_failed") {
+		t.Errorf("expected slog.Debug entry pincher.ast.js.parse_failed; got: %q", got)
 	}
 }
 

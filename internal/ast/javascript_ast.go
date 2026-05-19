@@ -2,6 +2,7 @@ package ast
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
@@ -93,20 +94,33 @@ func JavaScriptASTEnabled() bool {
 // parseJSWithRecovery parses source. If the parser rejects a top-level
 // `return` statement (LuCI views, older module loaders, non-spec but
 // real-world common), wrap source in an IIFE and retry once.
+//
+// #1477 v0.84: log the parse failure path at slog.Debug so users
+// debugging "why are my JS symbols at regex confidence" can correlate
+// their files with parser errors. Default-off (Debug level); enable
+// via PINCHER_LOG_LEVEL=debug.
 func parseJSWithRecovery(source []byte) (*js.AST, bool) {
 	parsed, err := js.Parse(parse.NewInputBytes(source), js.Options{})
 	if err == nil {
 		return parsed, true
 	}
-	if strings.Contains(err.Error(), "unexpected return") ||
-		strings.Contains(err.Error(), "return outside") {
+	firstErr := err.Error()
+	if strings.Contains(firstErr, "unexpected return") ||
+		strings.Contains(firstErr, "return outside") {
 		var buf bytes.Buffer
 		buf.WriteString("(function(){\n")
 		buf.Write(source)
 		buf.WriteString("\n})()")
 		if r, e := js.Parse(parse.NewInputBytes(buf.Bytes()), js.Options{}); e == nil {
 			return r, true
+		} else {
+			slog.Debug("pincher.ast.js.parse_failed_after_iife_recovery",
+				"first_err", firstErr,
+				"iife_err", e.Error())
 		}
+	} else {
+		slog.Debug("pincher.ast.js.parse_failed",
+			"err", firstErr)
 	}
 	return nil, false
 }
