@@ -255,6 +255,49 @@ func branchDriftAdvisory(projects []db.Project) string {
 // Remediation: `pincher vacuum` runs a wal_checkpoint(TRUNCATE)
 // + VACUUM cycle, which reclaims the WAL space. Tracking issue
 // #1206 / related #1149 (vacuum's own wal_reader_busy advisory).
+// fts5FragmentationAdvisory returns a human-readable advisory when
+// any per-corpus FTS5 vtab's data/idx ratio crosses the threshold,
+// or "" when every corpus is within the healthy band. #1612 v0.87:
+// gives the user a proactive signal that BM25 search latency is
+// degrading without waiting for them to notice a slow `search`.
+// Remediation is `pincher rebuild_fts` which is exposed via both the
+// MCP tool and the CLI subcommand.
+func fts5FragmentationAdvisory(rows []db.FTS5CorpusFragmentation) string {
+	type fragged struct {
+		corpus string
+		ratio  float64
+		data   int64
+		idx    int64
+	}
+	var bad []fragged
+	for _, r := range rows {
+		if r.NeedsRebuild {
+			bad = append(bad, fragged{r.Corpus, r.Ratio, r.DataRows, r.IdxRows})
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	// Build the per-corpus phrase. Skip the worst-first sort — the
+	// per-corpus order is stable across the three known names and
+	// presenting them in canonical order (code/config/docs) is the
+	// least surprising shape for a reader inspecting a doctor report.
+	var parts []string
+	for _, b := range bad {
+		parts = append(parts, fmt.Sprintf("%s corpus is %.1fx fragmented (%d data rows / %d index rows)",
+			b.corpus, b.ratio, b.data, b.idx))
+	}
+	joined := strings.Join(parts, "; ")
+	return fmt.Sprintf(
+		"FTS5 fragmentation high — %s. Healthy ratio is 1–3x; values above %.0fx indicate accumulated "+
+			"micro-segments that slow BM25 ranking. Remediation: `pincher rebuild_fts` (or call the "+
+			"`rebuild_fts` MCP tool) — drops and rebuilds every per-corpus vtab from `symbols` in a "+
+			"single transaction. Cost scales with symbol count: seconds on small repos, minutes on "+
+			"large ones. Safe to run during normal operation — readers are blocked only for the "+
+			"transaction's duration. See #1612.",
+		joined, db.FTS5FragmentationThreshold)
+}
+
 func walBloatAdvisory(dbSizeBytes, walSizeBytes int64) string {
 	const absThreshold = 512 << 20 // 512 MiB
 	// The percent rule (WAL > 10% of DB) is only meaningful once the
@@ -832,6 +875,18 @@ func (s *Server) handleDoctor(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// on a drifted branch still surfaces.
 	if a := branchDriftAdvisory(plist); a != "" {
 		advisories = append(advisories, a)
+	}
+	// #1612 v0.87: FTS5 fragmentation advisory. The per-corpus FTS5
+	// vtabs accumulate micro-segments as INSERTs land; BM25 latency
+	// degrades long before the user notices a slow `search`. The
+	// data/idx-row ratio is the cheapest accurate indicator —
+	// healthy at 1–3x, fragmented at 10x+. Best-effort: a missing
+	// shadow table (pre-v9 schema or partial migration) returns
+	// no rows and the advisory stays silent.
+	if fragRows, err := s.store.FTS5Fragmentation(); err == nil {
+		if a := fts5FragmentationAdvisory(fragRows); a != "" {
+			advisories = append(advisories, a)
+		}
 	}
 	data["advisories"] = advisories
 

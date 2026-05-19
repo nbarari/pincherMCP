@@ -490,6 +490,7 @@ var readerRoutedStoreMethods = map[string]bool{
 	"GetDeadCode":             true,
 	"SearchSymbols":           true,
 	"SearchSymbolsByCorpus":   true,
+	"FTS5Fragmentation":       true, // #1612 v0.87: per-corpus shadow-table COUNT(*)s.
 	"EdgesFrom":               true,
 	"EdgesTo":                 true,
 	"GraphStats":              true,

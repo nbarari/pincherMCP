@@ -340,6 +340,15 @@ func buildDoctorReport(store *db.Store, dir string, lookbackHours, top int, proj
 	if a := hookInstallAdvisory(); a != "" {
 		r.Advisories = append(r.Advisories, a)
 	}
+	// #1612 v0.87: FTS5 fragmentation advisory. Mirrors the MCP doctor's
+	// copy in internal/server/admin.go per the bounded-duplication
+	// convention. Best-effort: missing shadow tables (pre-v9 schema or
+	// partial migration) return no rows and the advisory stays silent.
+	if fragRows, err := store.FTS5Fragmentation(); err == nil {
+		if a := fts5FragmentationAdvisory(fragRows); a != "" {
+			r.Advisories = append(r.Advisories, a)
+		}
+	}
 
 	return r, nil
 }
@@ -588,6 +597,43 @@ func ghostProjectAdvisory(projects []DoctorProjectSummary) string {
 	msg += "Symbols were extracted but the resolver phase produced no real graph — `trace` / `query` over these projects will silently return zero rows. " +
 		"Remediation: re-index from a fresh CWD (`pincher index <path>`) and check `doctor`'s extraction_failures list for the underlying cause."
 	return msg
+}
+
+// fts5FragmentationAdvisory mirrors internal/server/admin.go's copy
+// (#1612 v0.87). Surfaces a `rebuild_fts` advisory when any per-corpus
+// FTS5 vtab's data/idx ratio crosses the threshold. Deliberately
+// duplicated per CLAUDE.md bounded-duplication convention — the CLI
+// lives in package main and can't import the server package.
+func fts5FragmentationAdvisory(rows []db.FTS5CorpusFragmentation) string {
+	type fragged struct {
+		corpus string
+		ratio  float64
+		data   int64
+		idx    int64
+	}
+	var bad []fragged
+	for _, r := range rows {
+		if r.NeedsRebuild {
+			bad = append(bad, fragged{r.Corpus, r.Ratio, r.DataRows, r.IdxRows})
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, b := range bad {
+		parts = append(parts, fmt.Sprintf("%s corpus is %.1fx fragmented (%d data rows / %d index rows)",
+			b.corpus, b.ratio, b.data, b.idx))
+	}
+	joined := strings.Join(parts, "; ")
+	return fmt.Sprintf(
+		"FTS5 fragmentation high — %s. Healthy ratio is 1–3x; values above %.0fx indicate accumulated "+
+			"micro-segments that slow BM25 ranking. Remediation: `pincher rebuild_fts` (or call the "+
+			"`rebuild_fts` MCP tool) — drops and rebuilds every per-corpus vtab from `symbols` in a "+
+			"single transaction. Cost scales with symbol count: seconds on small repos, minutes on "+
+			"large ones. Safe to run during normal operation — readers are blocked only for the "+
+			"transaction's duration. See #1612.",
+		joined, db.FTS5FragmentationThreshold)
 }
 
 // walBloatAdvisory mirrors internal/server/admin.go's copy (#1206).

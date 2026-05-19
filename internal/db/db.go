@@ -556,6 +556,64 @@ func (s *Store) RebuildFTS() (rows int64, err error) {
 	return rows, nil
 }
 
+// FTS5CorpusFragmentation summarises one per-corpus FTS5 vtab's
+// fragmentation state. data_rows / idx_rows is the practical
+// fragmentation ratio: a freshly-rebuilt FTS5 hovers around 1–3x;
+// values above ~10x indicate accumulated micro-segments worth
+// merging via `rebuild_fts`. See #1612.
+type FTS5CorpusFragmentation struct {
+	Corpus     string // "code" / "config" / "docs"
+	IdxRows    int64
+	DataRows   int64
+	Ratio      float64 // data_rows / idx_rows, 0 when idx_rows == 0
+	NeedsRebuild bool  // ratio crossed the advisory threshold
+}
+
+// FTS5FragmentationThreshold is the ratio above which `pincher doctor`
+// surfaces the fragmentation advisory. 10x is empirical: post-rebuild
+// pincher-repo measurements show healthy corpora at 1–3x; observed
+// fragmented corpora (config corpus on a long-running install with 27
+// projects' worth of YAML/JSON inserts) sit at 60x+. The 10x floor
+// keeps the advisory silent on normal heavy-write workloads while
+// catching real fragmentation.
+const FTS5FragmentationThreshold = 10.0
+
+// FTS5Fragmentation returns per-corpus fragmentation stats for the
+// three per-corpus FTS5 virtual tables (`symbols_code_fts`,
+// `symbols_config_fts`, `symbols_docs_fts`). Reader-routed; uses the
+// FTS5 shadow tables (`_idx` and `_data`) directly because the
+// public FTS5 API exposes only `integrity-check` not fragmentation
+// numbers. Returns an empty slice if any of the vtabs is missing
+// (e.g., schema migrations haven't run yet).
+//
+// Cheap — three COUNT(*) queries against bounded shadow tables.
+// Latency is dominated by the SQLite open path, not these counts.
+func (s *Store) FTS5Fragmentation() ([]FTS5CorpusFragmentation, error) {
+	corpora := []string{"code", "config", "docs"}
+	out := make([]FTS5CorpusFragmentation, 0, len(corpora))
+	for _, c := range corpora {
+		row := FTS5CorpusFragmentation{Corpus: c}
+		if err := s.ro.QueryRow(
+			fmt.Sprintf(`SELECT COUNT(*) FROM symbols_%s_fts_idx`, c),
+		).Scan(&row.IdxRows); err != nil {
+			// Missing vtab — pre-v9 schema or partial migration. Return
+			// what we have so the advisory just stays silent.
+			return out, nil
+		}
+		if err := s.ro.QueryRow(
+			fmt.Sprintf(`SELECT COUNT(*) FROM symbols_%s_fts_data`, c),
+		).Scan(&row.DataRows); err != nil {
+			return out, nil
+		}
+		if row.IdxRows > 0 {
+			row.Ratio = float64(row.DataRows) / float64(row.IdxRows)
+			row.NeedsRebuild = row.Ratio > FTS5FragmentationThreshold
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // MigrationInvalidates declares what previously-extracted data a
 // migration makes stale (#1497). Used by upstream consumers (doctor,
 // the future binaryDriftForce gate) to distinguish "schema bumped but
