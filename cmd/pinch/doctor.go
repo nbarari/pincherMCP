@@ -382,9 +382,12 @@ func branchDriftAdvisory(projects []db.Project) string {
 			continue
 		}
 		// #1667 v0.87: skip projects whose on-disk path no longer
-		// exists — those are dead-path ghosts for `list prune_dead=true`,
-		// not for `pincher index`.
-		if _, err := os.Stat(p.Path); os.IsNotExist(err) {
+		// exists OR no longer points to a directory. Both routes
+		// are dead-path ghosts for `list prune_dead=true`, not
+		// for `pincher index`. The IsDir check catches the case
+		// where a project's path got replaced by a file of the
+		// same name.
+		if fi, err := os.Stat(p.Path); err != nil || !fi.IsDir() {
 			continue
 		}
 		probed++

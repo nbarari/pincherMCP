@@ -189,13 +189,16 @@ func branchDriftAdvisory(projects []db.Project) string {
 			continue
 		}
 		// #1667 v0.87: skip projects whose on-disk path no longer
-		// exists. Those are dead-path ghosts that should be cleaned
-		// up by `list prune_dead=true`, not by `pincher index <path>`.
-		// Without this, the advisory keeps firing on stale rows that
-		// can't be remediated by the suggested action — `pincher
-		// index` against a non-existent path errors out, training
-		// the user to ignore the advisory.
-		if _, err := os.Stat(p.Path); os.IsNotExist(err) {
+		// exists OR no longer points to a directory. Both are
+		// dead-path ghosts that should be cleaned up by `list
+		// prune_dead=true`, not by `pincher index <path>` — the
+		// suggested remediation errors out on a missing path and
+		// is nonsense for a file. The IsDir check catches the case
+		// where a project's path got replaced by a file of the
+		// same name (e.g., a `probe` directory replaced by a
+		// `probe.exe` executable that git -C then resolves via
+		// the parent's .git).
+		if fi, err := os.Stat(p.Path); err != nil || !fi.IsDir() {
 			continue
 		}
 		probed++
