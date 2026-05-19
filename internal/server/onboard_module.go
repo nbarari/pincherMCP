@@ -165,7 +165,23 @@ func (s *Server) handleOnboardModule(ctx context.Context, req *mcp.CallToolReque
 		}
 	}
 	if err := rows.Err(); err != nil {
-		// Defer iteration errors to the empty-handling branch.
+		// #1581: a mid-iteration rows.Err means we have PARTIAL data, not
+		// no data. The earlier `defer to empty-handling branch` comment was
+		// wrong — empty handling only fires when len(scopeSyms) == 0, which
+		// silently passed partial-scope results through as "complete." That
+		// produces a misleading language breakdown, missing entry-points,
+		// undercount in ExportedSurfaceCount, and stale next-step ids.
+		// Bail out with a rich error so the agent knows to retry rather
+		// than acting on undercounted scope data.
+		return s.errResultRich(
+			fmt.Sprintf("onboard_module: scope iteration failed after %d row(s) — partial data discarded: %v", len(scopeSyms), err),
+			[]map[string]string{
+				{"tool": "doctor", "args": `{}`,
+					"why": "rows.Err often means a transient connection or disk problem — doctor will surface it"},
+				{"tool": "onboard_module", "args": fmt.Sprintf(`{"directory":%q}`, directory),
+					"why": "retry — many rows.Err conditions are transient"},
+			},
+		), nil
 	}
 
 	scope := onboardScopeSummary{
