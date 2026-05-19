@@ -164,6 +164,11 @@ type Server struct {
 	// `_meta.auto_indexed` on the first tool call after init.
 	autoIndexedMu    sync.Mutex
 	autoIndexedRoots []autoIndexedRoot
+	// #1605 v0.84: track in-flight startAutoIndex goroutines so tests
+	// can synchronise on completion before t.TempDir cleanup. Production
+	// code never reads this — the goroutines are fire-and-forget by
+	// design. See server.WaitAutoIndex.
+	autoIndexWG sync.WaitGroup
 
 	// #620: dedupe binary_version_warning. Once a given (project, indexed-by
 	// version) pair has surfaced its drift warning to this server process,
@@ -1310,7 +1315,14 @@ func (s *Server) startAutoIndex(roots []string) {
 		idx := len(s.autoIndexedRoots) - 1
 		s.autoIndexedMu.Unlock()
 
+		// #1605 v0.84: WaitGroup tracks in-flight goroutines so tests
+		// can synchronise on completion before t.TempDir cleanup runs.
+		// Without this the goroutines hold lockfiles in <root>/locks/
+		// past the test return, and Windows TempDir RemoveAll races
+		// the indexer and fails with "directory is not empty."
+		s.autoIndexWG.Add(1)
 		go func(root string, idx int) {
+			defer s.autoIndexWG.Done()
 			_, err := s.indexer.Index(context.Background(), root, false)
 			s.autoIndexedMu.Lock()
 			defer s.autoIndexedMu.Unlock()
@@ -1323,6 +1335,20 @@ func (s *Server) startAutoIndex(roots []string) {
 			}
 		}(root, idx)
 	}
+}
+
+// WaitAutoIndex blocks until every startAutoIndex goroutine returns
+// (#1605 v0.84). Tests use this to synchronise on indexer completion
+// before t.TempDir cleanup runs — on Windows, locked files in
+// <root>/locks/ prevent RemoveAll and produce the flake observed in
+// #1576 and #1602.
+//
+// Production code should NOT call this — the goroutines are
+// fire-and-forget by design (roots/list handshake responds before
+// indexing completes). The test-only export keeps the production
+// contract unchanged while making the in-flight set inspectable.
+func (s *Server) WaitAutoIndex() {
+	s.autoIndexWG.Wait()
 }
 
 // AutoIndexedRoots returns a snapshot of the auto-indexed-roots audit
