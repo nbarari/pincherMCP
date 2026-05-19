@@ -3262,6 +3262,7 @@ var toolComplexityTiers = map[string]string{
 	"context_for_task":     "heavy", // #1259: composite of search + N×(context + trace) + changes
 	"investigate_failure":  "heavy", // #1391 v0.81: composite of search × frames + trace × suspects + changes
 	"plan_change":          "heavy", // #1391 v0.82: composite of resolve + trace × symbols + adr list
+	"audit_unused":         "heavy", // #1391 v0.83: composite of dead_code + trace × candidates with confidence classification
 }
 
 // toolComplexityTier returns the registered tier for a tool, or the
@@ -3295,6 +3296,7 @@ var toolIdempotent = map[string]bool{
 	"context_for_task":    true, // #1259
 	"investigate_failure": true, // #1391 v0.81 — read-only composite
 	"plan_change":         true, // #1391 v0.82 — read-only composite
+	"audit_unused":        true, // #1391 v0.83 — read-only composite (dead_code + deep-trace confirmation)
 	"trace":               true,
 	"query":            true,
 	"guide":            true,
@@ -3616,6 +3618,7 @@ var toolMetadata = map[string]toolMetadataEntry{
 	"context_for_task":    {Title: "Composite context for an investigation", Annotations: annotationsReadOnly}, // #1259
 	"investigate_failure": {Title: "Bug-hunt composite from a stack trace", Annotations: annotationsReadOnly}, // #1391 v0.81
 	"plan_change":         {Title: "Pre-edit blast-radius composite", Annotations: annotationsReadOnly},       // #1391 v0.82
+	"audit_unused":        {Title: "Dead-code composite with deep-trace confirmation", Annotations: annotationsReadOnly}, // #1391 v0.83
 
 	// Diagnostics (read-only, idempotent).
 	"health":  {Annotations: annotationsReadOnly},
@@ -4056,6 +4059,28 @@ func (s *Server) registerTools() {
 			}
 		}`),
 	}, s.handlePlanChange)
+
+	// 16e. audit_unused (#1391 Phase 4 composite #3, v0.83). Dead-code
+	// composite with deep-trace confirmation. Runs the existing
+	// dead_code path then, per candidate, fires a scoped inbound CALLS
+	// trace at confirm_depth (default 2). Classifies each candidate by
+	// what the trace surfaced: high (zero callers, safe to delete),
+	// medium (deeper callers — dynamic path the static graph missed),
+	// low (depth-1 caller — resolver bug, file rather than delete).
+	s.addTool(&mcp.Tool{
+		Name:        "audit_unused",
+		Description: "**Use to find safe-to-delete dead code with per-candidate confirmation.** Runs the existing `dead_code` SQL path then, per candidate, fires a scoped inbound CALLS trace at `confirm_depth` (default 2). Classifies each candidate by what the deep trace surfaced: `high` (zero callers — safe to delete), `medium` (deeper callers — likely a dynamic path the static call graph missed, read before deleting), `low` (depth-1 caller — almost always a resolver bug, file an issue rather than delete). Returns `{candidates, summary}` where summary counts the three classification buckets. Replaces the N+1 round trips of `dead_code` + per-candidate `trace direction=in depth=2/4` confirmations. Read-only; safe to call repeatedly.",
+		InputSchema: json.RawMessage(`{
+			"type":"object","properties":{
+				"project":{"type":"string","description":"Project name or ID. Defaults to session project."},
+				"language":{"type":"string","description":"Restrict to a single language (e.g. Go, Python). Empty = all languages."},
+				"kinds":{"type":"string","description":"Comma-separated symbol kinds. Default 'Function,Method'. Add Type/Class to widen the candidate set."},
+				"max_results":{"type":"integer","description":"Maximum candidates to audit (default 20, max 100). Each candidate fires one TraceViaCTE call at confirm_depth."},
+				"confirm_depth":{"type":"integer","description":"BFS depth for the per-candidate confirmation trace (default 2, max 4). Depth-1 means 'any direct caller anywhere'; depth-2 picks up one-hop indirection through wrappers/forwarders."},
+				"min_confidence":{"type":"number","description":"Extractor confidence floor (default 0.95 — AST-extracted languages only). Drop to 0.85 to include stable-regex extractors at known false-positive cost; the deep-trace step will still classify but the candidate population is wider."}
+			}
+		}`),
+	}, s.handleAuditUnused)
 
 	// 17. neighborhood — graph view around a symbol. v0.52 reversal of #624.
 	s.addTool(&mcp.Tool{
@@ -12105,6 +12130,7 @@ var baselineMethodForTool = map[string]string{
 	"context_for_task":    baselineMethodFullFileRead, // #1259: composite replaces N atomic file reads
 	"investigate_failure": baselineMethodFullFileRead, // #1391 v0.81: composite replaces N atomic search/trace/changes reads
 	"plan_change":         baselineMethodFullFileRead, // #1391 v0.82: composite replaces N atomic resolve/trace/adr reads
+	"audit_unused":        baselineMethodFullFileRead, // #1391 v0.83: composite replaces dead_code + N atomic trace confirmations
 	"search":       baselineMethodFullFileRead,
 	"query":        baselineMethodFullFileRead,
 	"trace":        baselineMethodFullFileRead,

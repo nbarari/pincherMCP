@@ -466,6 +466,44 @@ var outputSchemas = map[string]string{
 		}
 	}`,
 
+	// 16e. audit_unused — #1391 Phase 4 composite #3 (v0.83).
+	// Dead-code with deep-trace confirmation: runs dead_code, then per
+	// candidate fires a scoped inbound CALLS trace, classifies each by
+	// what the trace surfaced.
+	"audit_unused": `{
+		"type":"object",
+		"required":["candidates","summary","_meta"],
+		"properties":{
+			"candidates":{"type":"array","items":{
+				"type":"object",
+				"required":["symbol_id","name","qualified_name","kind","file_path","language","confidence","trace_summary","evidence"],
+				"properties":{
+					"symbol_id":{"type":"string"},
+					"name":{"type":"string"},
+					"qualified_name":{"type":"string"},
+					"kind":{"type":"string"},
+					"file_path":{"type":"string"},
+					"start_line":{"type":"integer"},
+					"language":{"type":"string"},
+					"confidence":{"type":"string","description":"high | medium | low"},
+					"trace_summary":{"type":"object"},
+					"evidence":{"type":"array","items":{"type":"string"}}
+				}
+			}},
+			"summary":{
+				"type":"object",
+				"required":["candidates_audited","deep_trace_confirmed_unused","deep_trace_surfaced_dynamic_callers","deep_trace_surfaced_direct_callers"],
+				"properties":{
+					"candidates_audited":{"type":"integer"},
+					"deep_trace_confirmed_unused":{"type":"integer"},
+					"deep_trace_surfaced_dynamic_callers":{"type":"integer"},
+					"deep_trace_surfaced_direct_callers":{"type":"integer"}
+				}
+			},
+			"_meta":` + metaRef + `
+		}
+	}`,
+
 	// 16c. investigate_failure — #1391 Phase 4 composite #1 (v0.81).
 	// Bug-hunt composite: parses stack trace, ranks suspects, unions
 	// callers, intersects recent changes.

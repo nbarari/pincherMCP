@@ -49,6 +49,39 @@
     }
   },
   {
+    "name": "audit_unused",
+    "description": "**Use to find safe-to-delete dead code with per-candidate confirmation.** Runs the existing `dead_code` SQL path then, per candidate, fires a scoped inbound CALLS trace at `confirm_depth` (default 2). Classifies each candidate by what the deep trace surfaced: `high` (zero callers — safe to delete), `medium` (deeper callers — likely a dynamic path the static call graph missed, read before deleting), `low` (depth-1 caller — almost always a resolver bug, file an issue rather than delete). Returns `{candidates, summary}` where summary counts the three classification buckets. Replaces the N+1 round trips of `dead_code` + per-candidate `trace direction=in depth=2/4` confirmations. Read-only; safe to call repeatedly.",
+    "input_schema": {
+      "properties": {
+        "confirm_depth": {
+          "description": "BFS depth for the per-candidate confirmation trace (default 2, max 4). Depth-1 means 'any direct caller anywhere'; depth-2 picks up one-hop indirection through wrappers/forwarders.",
+          "type": "integer"
+        },
+        "kinds": {
+          "description": "Comma-separated symbol kinds. Default 'Function,Method'. Add Type/Class to widen the candidate set.",
+          "type": "string"
+        },
+        "language": {
+          "description": "Restrict to a single language (e.g. Go, Python). Empty = all languages.",
+          "type": "string"
+        },
+        "max_results": {
+          "description": "Maximum candidates to audit (default 20, max 100). Each candidate fires one TraceViaCTE call at confirm_depth.",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Extractor confidence floor (default 0.95 — AST-extracted languages only). Drop to 0.85 to include stable-regex extractors at known false-positive cost; the deep-trace step will still classify but the candidate population is wider.",
+          "type": "number"
+        },
+        "project": {
+          "description": "Project name or ID. Defaults to session project.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "changes",
     "description": "**Use before final response after code edits** to surface the blast radius. Maps `git diff` to affected symbols, BFS-traces impact, returns `changed_symbols` + impacted callers tagged CRITICAL/HIGH/MEDIUM/LOW + summary counts + `tests_to_run` (test functions that exercise the changed symbols, ranked by overlap descending — re-run the top entries before pushing). Scopes: `unstaged` (default) / `staged` / `all` (includes untracked) / `base:\u003cbranch\u003e` (committed-only diff vs \u003cbranch\u003e's merge-base — use this to preview a PR's blast radius before opening it).",
     "input_schema": {

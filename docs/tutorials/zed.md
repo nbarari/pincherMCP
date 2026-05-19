@@ -113,7 +113,7 @@ Persistent across restarts, reconnects, and binary upgrades.
 
 ## What to read next
 
-- [REFERENCE.md → MCP tools](../REFERENCE.md#the-25-mcp-tools) — every tool, every parameter
+- [REFERENCE.md → MCP tools](../REFERENCE.md#the-26-mcp-tools) — every tool, every parameter
 - [Tutorial: Claude Code](claude-code.md) — same flow with stdio-mcp
 - [Tutorial: HTTP dashboard](http-dashboard.md) — live dashboard view
 - [`docs/integrations/loop-leverage-layers.md`](../integrations/loop-leverage-layers.md) — the three-layer agent-leverage frame
