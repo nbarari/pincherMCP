@@ -4,12 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>pincherMCP · Codebase intelligence for LLM agents</title>
-<meta name="description" content="Single Go binary that indexes any codebase into a byte-offset symbol store, knowledge graph, and BM25 search — exposed as 24 MCP tools or an HTTP REST API. Token savings is the front door; the _meta envelope is the planning-loop input your agent branches on. Pure Go, no CGO, no cloud."/>
+<meta name="description" content="Single Go binary that indexes any codebase into a byte-offset symbol store, knowledge graph, and BM25 search — exposed as 28 MCP tools or an HTTP REST API. Token savings is the front door; the _meta envelope is the planning-loop input your agent branches on. Pure Go, no CGO, no cloud."/>
 <meta name="theme-color" content="#0d1117"/>
 
 <meta property="og:type" content="website"/>
 <meta property="og:title" content="pincherMCP · Codebase intelligence for LLM agents"/>
-<meta property="og:description" content="Single Go binary. Index, graph, and full-text search a codebase. 24 MCP tools or HTTP REST."/>
+<meta property="og:description" content="Single Go binary. Index, graph, and full-text search a codebase. 28 MCP tools or HTTP REST."/>
 <meta property="og:url" content="https://kwad77.github.io/pincher/"/>
 <meta property="og:image" content="https://kwad77.github.io/pincher/assets/og.png"/>
 <meta property="og:image:width" content="1200"/>
@@ -130,7 +130,7 @@ footer a{color:var(--accent)}
 
 <section>
   <h2><img src="assets/crab.png" alt="" class="pixel crab-divider"/>Why it matters</h2>
-  <p class="section-sub">Every tool response carries a real BPE token count. Real numbers on this codebase (~707 files, ~7,116 symbols, ~13,477 edges, v0.81):</p>
+  <p class="section-sub">Every tool response carries a real BPE token count. Real numbers on this codebase (~790 files, ~7,800 symbols, ~14,000 edges, v0.82):</p>
   <div class="stats">
     <div class="stat"><div class="num green">~95%</div><div class="label">Token reduction<br/>vs reading whole files</div></div>
     <div class="stat"><div class="num blue">&lt;1ms</div><div class="label">Symbol fetch<br/>(byte-offset seek)</div></div>
@@ -267,8 +267,8 @@ brew services start pincher</code></pre>
 
   <div class="install-pane" id="pane-bin">
 <pre><code># Download the matching archive from the releases page, then:
-tar -xzf pincher-v0.81.0-linux-amd64.tar.gz
-sudo mv pincher-v0.81.0-linux-amd64 /usr/local/bin/pincher
+tar -xzf pincher-v0.82.0-linux-amd64.tar.gz
+sudo mv pincher-v0.82.0-linux-amd64 /usr/local/bin/pincher
 pincher --version</code></pre>
   </div>
 
@@ -320,8 +320,8 @@ pincher init --target=gemini         # ~/.gemini/settings.json</code></pre>
   <p class="section-sub">Pre-1.0. The cadence: nine minor releases per phase ending at a stable promotion (v0.60, v0.70, v0.80, v0.90, v1.0). Phase 3 closed at v0.80 stable; currently in Phase 4 — composite-tool buildout through v0.90.</p>
   <div class="cards">
     <div class="card">
-      <h3>Phase 4 today <span class="badge">v0.81 → v0.90</span></h3>
-      <p>Composite-tool buildout — bundling recognised investigation sequences (5–10 atomic calls today) behind single round-trip entry points. v0.81 ships <code>investigate_failure</code> (bug-hunt from stack trace); v0.82–v0.85 ship <code>plan_change</code>, <code>audit_unused</code>, <code>onboard_module</code>, <code>why_empty</code>. Each composite emits the same typed <code>_meta</code> contract as the atomic tools. Phase 4 umbrella: <a href="https://github.com/kwad77/pincher/issues/1391">#1391</a>. Phase 3 (v0.71 → v0.80) closed at stable promotion 2026-05-18 — umbrella: <a href="https://github.com/kwad77/pincher/issues/668">#668</a>.</p>
+      <h3>Phase 4 today <span class="badge">v0.82 complete</span></h3>
+      <p>Composite-tool buildout — bundling recognised investigation sequences (5–10 atomic calls today) behind single round-trip entry points. All five composites now shipped: <code>investigate_failure</code> (bug-hunt from stack trace), <code>plan_change</code> (pre-edit blast radius), <code>audit_unused</code> (dead-code with deep-trace confirmation), <code>onboard_module</code> (new-contributor orientation), <code>why_empty</code> (empty-result recovery). Each emits the same typed <code>_meta</code> contract as the atomic tools. Phase 4 umbrella: <a href="https://github.com/kwad77/pincher/issues/1391">#1391</a>. Phase 3 (v0.71 → v0.80) closed at stable promotion 2026-05-18 — umbrella: <a href="https://github.com/kwad77/pincher/issues/668">#668</a>. Phase 5 (v0.83 → v0.99) covers the v1.0 supply-chain + measurement + RC dogfood path.</p>
     </div>
     <div class="card">
       <h3>v1.0 freeze <span class="badge">planned</span></h3>

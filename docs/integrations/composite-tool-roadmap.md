@@ -15,10 +15,10 @@ composite call) and [`meta-envelope-contract.md`](./meta-envelope-contract.md)
 | # | Composite | Release | Status |
 |---|---|---|---|
 | 1 | `investigate_failure` | v0.81 | ✅ shipped (PR #1517) |
-| 2 | `plan_change` | v0.82 | 🚧 in flight (PR #1519) |
-| 3 | `audit_unused` | v0.83 | ⏳ next |
-| 4 | `onboard_module` | v0.84 | ⏳ paired with API freeze checkpoint (FILE-K + FILE-L) |
-| 5 | `why_empty` | v0.85 | ⏳ paired with failure-mode catalog (FILE-O) |
+| 2 | `plan_change` | v0.82 | ✅ shipped (PR #1519) |
+| 3 | `audit_unused` | v0.82 | ✅ shipped (PR #1546) |
+| 4 | `onboard_module` | v0.82 | ✅ shipped (PR #1548) |
+| 5 | `why_empty` | v0.82 | ✅ shipped (PR #1549) — Phase 4 suite complete |
 
 ---
 
@@ -266,11 +266,11 @@ promotion + v1.0 release-prep.
 | Release | Composite | Rationale | Status |
 |---|---|---|---|
 | v0.81 | `investigate_failure` | Highest-frequency loop; biggest immediate ROI | ✅ shipped |
-| v0.82 | `plan_change` | Pre-edit confirmation; complements the existing `changes` atomic | 🚧 PR #1519 |
-| v0.83 | `audit_unused` | Polish on existing `dead_code`; lowest implementation risk | ⏳ next |
-| v0.84 | `onboard_module` | Architecture-shaped; refines `architecture` aspect surface; paired with the API freeze checkpoint (FILE-K + FILE-L) | ⏳ |
-| v0.85 | `why_empty` | Cross-tool diagnostic; depends on every other composite already shipping with structured `_meta.diagnosis_v2`; paired with the failure-mode catalog (FILE-O) | ⏳ |
-| v0.86–v0.88 | Non-composite v1.0 blockers (field data, security, supply chain) per `.planning-roadmap-to-v1.md` | — | ⏳ |
+| v0.82 | `plan_change` | Pre-edit confirmation; complements the existing `changes` atomic | ✅ shipped (PR #1519) |
+| v0.82 | `audit_unused` | Polish on existing `dead_code`; lowest implementation risk | ✅ shipped (PR #1546) — bundled into v0.82 megarelease |
+| v0.82 | `onboard_module` | Architecture-shaped; refines `architecture` aspect surface; paired with the API freeze checkpoint (FILE-K + FILE-L) | ✅ shipped (PR #1548) — bundled into v0.82 megarelease |
+| v0.82 | `why_empty` | Cross-tool diagnostic; depends on every other composite already shipping with structured `_meta.diagnosis_v2`; paired with the failure-mode catalog (FILE-O) | ✅ shipped (PR #1549) — Phase 4 suite complete |
+| v0.83+ | Non-composite v1.0 blockers (field data, security, supply chain) per `.planning-roadmap-to-v1.md` | — | 🚧 scaffolded across v0.83–v0.97 |
 | v0.89 | HARDENING (no new features) | — | ⏳ |
 | v0.90 | STABLE PROMOTION (channel re-tag) | — | ⏳ |
 
