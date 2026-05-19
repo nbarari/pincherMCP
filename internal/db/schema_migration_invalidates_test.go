@@ -49,13 +49,11 @@ func TestSchemaMigrationInvalidates_ClassificationCount(t *testing.T) {
 			nothingN++
 		}
 	}
-	// Snapshot as of v33 (32 migration entries): 27 Nothing / 5 All.
-	// (Note: the prior comment block above the slice cites "22 Nothing"
-	// — that was a draft count; the actual reconciled audit landed at
-	// 27 Nothing / 5 All after the trigger-only entries (v9→v10,
-	// v11→v12, v12→v13, v13→v14, v27→v28) were correctly classified
-	// as Nothing.)
-	const wantNothing = 27
+	// Snapshot as of v34 (33 migration entries): 28 Nothing / 5 All.
+	// v33→v34 (#1632) added the sessions.queries_zero_expected +
+	// queries_zero_unexpected split — telemetry only, no extraction
+	// impact, classified Nothing.
+	const wantNothing = 28
 	const wantAll = 5
 	if nothingN != wantNothing || allN != wantAll {
 		t.Errorf("classification drifted: got Nothing=%d All=%d, want Nothing=%d All=%d. If you intentionally added/changed a migration's invalidates value, update these constants AND the rationale block in db.go.",

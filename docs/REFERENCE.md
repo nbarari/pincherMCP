@@ -2,7 +2,7 @@
 
 The long-form reference. The [README](../README.md) is the pitch + quickstart; this file is the manual. For 10-minute end-to-end walkthroughs, see [`tutorials/`](tutorials/) — [Claude Code](tutorials/claude-code.md), [Cursor](tutorials/cursor.md), [HTTP dashboard](tutorials/http-dashboard.md).
 
-**Schema version:** v33 · **MCP tools:** 28 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
+**Schema version:** v34 · **MCP tools:** 28 · **Languages detected:** ~25 (10 AST/parser-tier, 21 regex-tier, plus 1 stub-tier (Haskell) — see [Language support](#language-support))
 
 ## Contents
 
@@ -961,7 +961,7 @@ Measured on this codebase (13 files, 618 symbols, 5,785 edges, Windows 11, SQLit
 
 ## Schema
 
-Schema is versioned via the `schema_version` table. Current version: **v33**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
+Schema is versioned via the `schema_version` table. Current version: **v34**. Migrations apply automatically on startup — no data loss, no manual steps. To add a migration: append a SQL string to `schemaMigrations` in `db.go`; the version number is auto-derived from the slice length.
 
 Migration history:
 
@@ -1000,6 +1000,7 @@ Migration history:
 | v30→v31 | `branch` column on `symbols` / `edges` / `files` / `pending_edges` — multi-branch coexistence foundation (#1303 Phase 1) |
 | v31→v32 | `projects.current_branch` — git branch the project was last indexed against (#1303 Phase 2a). Doctor surfaces a branch-drift advisory when the on-disk branch differs. Wire format JSON tag is `last_indexed_branch` (#1388). |
 | v32→v33 | `extraction_failures.binary_version_at_failure` — pincher binary version that recorded the row. Doctor surfaces the value so readers can distinguish "fixed-since-this-binary" rows from "still recurring on the running binary" without cross-referencing CHANGELOG by hand (#1421). |
+| v33→v34 | `sessions.queries_zero_expected` + `queries_zero_unexpected` — split `queries_zero_result` into audit-shape (pinchQL with a property predicate, empty rows are healthy) vs caller-surprised (search / trace / neighborhood, empty rows are usage-killers). New `zero_unexpected_rate` is the actionable metric — the rate at which pincher returns empty when the agent expected results. Closes #1494 half 1 / #1632. |
 
 ---
 

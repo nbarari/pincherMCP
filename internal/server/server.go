@@ -226,6 +226,15 @@ type Server struct {
 	statsQueriesZeroResult       int64
 	statsQueriesRetriedSucceeded int64
 	statsTokensBurned            int64
+	// #1632 v0.85: split zero-result counters. Sums to statsQueriesZeroResult
+	// on every increment. statsQueriesZeroExpected covers audit-shape
+	// pinchQL queries (property predicates expecting empty rows on a
+	// healthy codebase); statsQueriesZeroUnexpected covers
+	// caller-surprised paths (search / symbol-by-id / trace /
+	// neighborhood / property-less query) where empty rows mean
+	// the agent will likely fall back to Read/Grep next.
+	statsQueriesZeroExpected   int64
+	statsQueriesZeroUnexpected int64
 
 	// #635 v0.64: per-call event buffer feeding the dashboard
 	// triangulating panels (entropy / payload distribution / per-tier
@@ -471,6 +480,8 @@ func New(store *db.Store, indexer *index.Indexer, version string) *Server {
 		atomic.StoreInt64(&s.statsQueriesZeroResult, row.QueryMetrics.QueriesZeroResult)
 		atomic.StoreInt64(&s.statsQueriesRetriedSucceeded, row.QueryMetrics.QueriesRetriedSucceeded)
 		atomic.StoreInt64(&s.statsTokensBurned, row.QueryMetrics.TokensBurnedOnFailures)
+		atomic.StoreInt64(&s.statsQueriesZeroExpected, row.QueryMetrics.QueriesZeroExpected)
+		atomic.StoreInt64(&s.statsQueriesZeroUnexpected, row.QueryMetrics.QueriesZeroUnexpected)
 		// Preserve the original session start so uptime/wall-clock
 		// math reflects the supervisor's lifetime, not the inner's.
 		if !row.StartedAt.IsZero() {
@@ -691,6 +702,8 @@ func (s *Server) flushSession() {
 		QueriesZeroResult:       atomic.LoadInt64(&s.statsQueriesZeroResult),
 		QueriesRetriedSucceeded: atomic.LoadInt64(&s.statsQueriesRetriedSucceeded),
 		TokensBurnedOnFailures:  atomic.LoadInt64(&s.statsTokensBurned),
+		QueriesZeroExpected:     atomic.LoadInt64(&s.statsQueriesZeroExpected),
+		QueriesZeroUnexpected:   atomic.LoadInt64(&s.statsQueriesZeroUnexpected),
 	}
 	if err := s.store.RecordSessionWithMetrics(s.persistentSessionID, s.sessionStartedAt, calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID, s.snapshotCallsByLanguage(), qm); err != nil {
 		slog.Warn("pincher.session.flush.err", "err", err)
@@ -1187,11 +1200,45 @@ func (s *Server) recordQueryMetrics(tool string, args map[string]any, data map[s
 	if count == 0 {
 		atomic.AddInt64(&s.statsQueriesZeroResult, 1)
 		atomic.AddInt64(&s.statsTokensBurned, int64(tokensUsed))
+		// #1632 v0.85: split the zero-result counter into audit-shape
+		// (expected) vs caller-surprised (unexpected). The sum equals
+		// statsQueriesZeroResult on every increment — both counters
+		// move together so back-compat queries keep working.
+		if isAuditShapeQuery(tool, args) {
+			atomic.AddInt64(&s.statsQueriesZeroExpected, 1)
+		} else {
+			atomic.AddInt64(&s.statsQueriesZeroUnexpected, 1)
+		}
 		return
 	}
 	if prevTool == tool && prevHash == q && q != "" {
 		atomic.AddInt64(&s.statsQueriesRetriedSucceeded, 1)
 	}
+}
+
+// isAuditShapeQuery classifies a zero-result query as expected (audit-
+// shape) vs unexpected (caller-surprised). #1632 v0.85.
+//
+// Returns true when the caller's intent is enumerative — pinchQL with
+// a property predicate (curly-brace block in the query string), e.g.
+// `MATCH (f:Function {is_documented: false}) RETURN f`. Empty rows on
+// such a query mean "no problems found" — a healthy-codebase signal,
+// not a friction event. False on everything else (search, trace,
+// neighborhood, symbol-by-id, property-less query) — the conservative
+// default that favors the friction signal.
+//
+// Future evolution can refine the rule (e.g., recognize specific
+// audit-shape WHERE clauses) without a schema migration since the
+// classification is computed at call time.
+func isAuditShapeQuery(tool string, args map[string]any) bool {
+	if tool != "query" {
+		return false
+	}
+	q, _ := args["pinchql"].(string)
+	if q == "" {
+		q, _ = args["cypher"].(string)
+	}
+	return strings.Contains(q, "{")
 }
 
 // MCPServer returns the underlying *mcp.Server.

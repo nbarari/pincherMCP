@@ -174,7 +174,7 @@ Every pincher tool emits `_meta`. The capabilities surface lets the
 host gate on advertised features:
 
 ```
-schema_v33 · hook_check · supervised · operator_tools_on_mcp ·
+schema_v34 · hook_check · supervised · operator_tools_on_mcp ·
 session_persistence · binary_drift_warning · tokens_used_envelope ·
 tokens_saved_pct · standardized_error_envelope · complexity_tier ·
 sse · idempotency_declared · metrics_prometheus

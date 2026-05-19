@@ -1493,6 +1493,35 @@ END;`,
 	// "this binary still produces these failures" slice that's
 	// what operators usually want to act on.
 	`ALTER TABLE extraction_failures ADD COLUMN binary_version_at_failure TEXT NOT NULL DEFAULT '';`,
+
+	// v33 → v34: split queries_zero_result into expected (audit-shape)
+	// vs unexpected (caller-surprised) sub-counters. The original
+	// queries_zero_result column stays as the durable sum so existing
+	// readers and dashboards keep working without changes; the two new
+	// columns let `pincher stats` surface the actionable rate.
+	//
+	// Background: #1494 renamed the misleading `retry_rate` JSON field
+	// to `zero_result_rate` (queries_zero_result / queries_total) but
+	// flagged that the value conflates two populations:
+	//
+	//   - Expected zero (audit-shape): query tool with a property
+	//     predicate ({is_documented:false}, {kind:'Function',is_used:0})
+	//     — empty rows is a healthy-codebase signal, not a friction
+	//     event.
+	//   - Unexpected zero (caller-surprised): search for a symbol
+	//     expecting >=1 match, trace for callers, neighborhood lookup
+	//     by id — empty rows is a usage-killer. The agent rarely
+	//     refines (queries_retried_succeeded is <1% of zero-results
+	//     in dogfood data) so each unexpected zero is a near-permanent
+	//     loss of downstream pincher usage for that call.
+	//
+	// Mixing them masks the actionable rate. With the split, the
+	// new headline metric is zero_unexpected_rate
+	// (queries_zero_unexpected / queries_total) — that's the dial
+	// that translates "pincher gets called" into "pincher gets called
+	// the SECOND time". Closes #1494 half 1 / #1632.
+	`ALTER TABLE sessions ADD COLUMN queries_zero_expected   INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE sessions ADD COLUMN queries_zero_unexpected INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // schemaMigrationInvalidates classifies each migration in schemaMigrations
@@ -1571,6 +1600,7 @@ var schemaMigrationInvalidates = []MigrationInvalidates{
 	invalidatesAll,     // [29] v30→v31: branch column on symbols/edges/files/pending_edges (queries that filter by branch miss pre-migration rows)
 	invalidatesNothing, // [30] v31→v32: projects.current_branch (metadata, stamped on next index)
 	invalidatesNothing, // [31] v32→v33: extraction_failures.binary_version_at_failure (metadata on diagnostic table)
+	invalidatesNothing, // [32] v33→v34: sessions.queries_zero_expected + queries_zero_unexpected (per-session metric split; pre-migration rows hold zero on both)
 }
 
 func init() {
@@ -4821,10 +4851,12 @@ func (s *Store) RecordSessionWithMetrics(sessionID string, startedAt time.Time, 
 		`INSERT OR REPLACE INTO sessions(
 			session_id, started_at, last_seen, calls, tokens_used, tokens_saved,
 			cost_avoided, http_url, http_pid, calls_by_language,
-			queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures,
+			queries_zero_expected, queries_zero_unexpected)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, startedAt.Unix(), time.Now().Unix(), calls, tokensUsed, tokensSaved, costAvoided, httpURL, httpPID, clbl,
 		qm.QueriesTotal, qm.QueriesZeroResult, qm.QueriesRetriedSucceeded, qm.TokensBurnedOnFailures,
+		qm.QueriesZeroExpected, qm.QueriesZeroUnexpected,
 	)
 	return err
 }
@@ -5135,6 +5167,23 @@ type QueryMetrics struct {
 	// calls. This is pure overhead — tokens the agent paid for a
 	// response that ultimately required a retry to be useful.
 	TokensBurnedOnFailures int64
+
+	// QueriesZeroExpected and QueriesZeroUnexpected (v34, #1632) split
+	// QueriesZeroResult into "audit-shape" vs "caller-surprised"
+	// populations so dashboards can surface the actionable rate.
+	// The two MUST satisfy:
+	//     QueriesZeroExpected + QueriesZeroUnexpected == QueriesZeroResult
+	// on every flushed row. Pre-v34 rows hold zero on both new columns
+	// (their zero-results are accounted for in QueriesZeroResult only),
+	// so aggregates over the historical dataset are conservative —
+	// "of every NEW zero result since v34, this many were
+	// audit-shape and this many were caller-surprised."
+	//
+	// Classification rule: tool=="query" AND pinchql/cypher contains
+	// "{" (property predicate) → expected; everything else →
+	// unexpected. The conservative default favors the friction signal.
+	QueriesZeroExpected   int64
+	QueriesZeroUnexpected int64
 }
 
 // ToolCallEvent is one row in session_tool_calls — emitted by the
@@ -5199,7 +5248,8 @@ func (s *Store) GetSessionByID(sessionID string) (*SessionRow, error) {
 	}
 	q := `SELECT session_id, started_at, last_seen, calls, tokens_used, tokens_saved,
 	             cost_avoided, http_url, http_pid, calls_by_language,
-	             queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures
+	             queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures,
+	             queries_zero_expected, queries_zero_unexpected
 	      FROM sessions WHERE session_id=? LIMIT 1`
 	var r SessionRow
 	var startedUnix, lastSeenUnix int64
@@ -5209,6 +5259,7 @@ func (s *Store) GetSessionByID(sessionID string) (*SessionRow, error) {
 		&r.CostAvoided, &r.HTTPURL, &r.HTTPPID, &clbl,
 		&r.QueryMetrics.QueriesTotal, &r.QueryMetrics.QueriesZeroResult,
 		&r.QueryMetrics.QueriesRetriedSucceeded, &r.QueryMetrics.TokensBurnedOnFailures,
+		&r.QueryMetrics.QueriesZeroExpected, &r.QueryMetrics.QueriesZeroUnexpected,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -5229,7 +5280,8 @@ func (s *Store) GetSessionByID(sessionID string) (*SessionRow, error) {
 func (s *Store) GetSessions(limit int) ([]SessionRow, error) {
 	q := `SELECT session_id, started_at, last_seen, calls, tokens_used, tokens_saved,
 	             cost_avoided, http_url, http_pid, calls_by_language,
-	             queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures
+	             queries_total, queries_zero_result, queries_retried_succeeded, tokens_burned_on_failures,
+	             queries_zero_expected, queries_zero_unexpected
 	      FROM sessions ORDER BY started_at DESC`
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
@@ -5245,7 +5297,8 @@ func (s *Store) GetSessions(limit int) ([]SessionRow, error) {
 		var startedUnix, lastSeenUnix int64
 		var clbl sql.NullString
 		if err := rows.Scan(&r.SessionID, &startedUnix, &lastSeenUnix, &r.Calls, &r.TokensUsed, &r.TokensSaved, &r.CostAvoided, &r.HTTPURL, &r.HTTPPID, &clbl,
-			&r.QueryMetrics.QueriesTotal, &r.QueryMetrics.QueriesZeroResult, &r.QueryMetrics.QueriesRetriedSucceeded, &r.QueryMetrics.TokensBurnedOnFailures); err != nil {
+			&r.QueryMetrics.QueriesTotal, &r.QueryMetrics.QueriesZeroResult, &r.QueryMetrics.QueriesRetriedSucceeded, &r.QueryMetrics.TokensBurnedOnFailures,
+			&r.QueryMetrics.QueriesZeroExpected, &r.QueryMetrics.QueriesZeroUnexpected); err != nil {
 			return nil, err
 		}
 		r.StartedAt = time.Unix(startedUnix, 0)
@@ -5270,9 +5323,12 @@ func (s *Store) GetAllTimeQueryMetrics() (QueryMetrics, error) {
 		`SELECT COALESCE(SUM(queries_total),0),
 		        COALESCE(SUM(queries_zero_result),0),
 		        COALESCE(SUM(queries_retried_succeeded),0),
-		        COALESCE(SUM(tokens_burned_on_failures),0)
+		        COALESCE(SUM(tokens_burned_on_failures),0),
+		        COALESCE(SUM(queries_zero_expected),0),
+		        COALESCE(SUM(queries_zero_unexpected),0)
 		 FROM sessions`,
-	).Scan(&qm.QueriesTotal, &qm.QueriesZeroResult, &qm.QueriesRetriedSucceeded, &qm.TokensBurnedOnFailures)
+	).Scan(&qm.QueriesTotal, &qm.QueriesZeroResult, &qm.QueriesRetriedSucceeded, &qm.TokensBurnedOnFailures,
+		&qm.QueriesZeroExpected, &qm.QueriesZeroUnexpected)
 	return qm, err
 }
 

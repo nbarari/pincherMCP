@@ -157,10 +157,10 @@ type AllTimeSavings struct {
 // migration and is tracked separately (out of scope for the v0.78.1
 // patch line; queued for v0.80 or v0.79 hardening per re-triage).
 type QueryMetricsReport struct {
-	QueriesTotal            int64   `json:"queries_total"`
-	QueriesZeroResult       int64   `json:"queries_zero_result"`
-	QueriesRetriedSucceeded int64   `json:"queries_retried_succeeded"`
-	TokensBurnedOnFailures  int64   `json:"tokens_burned_on_failures"`
+	QueriesTotal            int64 `json:"queries_total"`
+	QueriesZeroResult       int64 `json:"queries_zero_result"`
+	QueriesRetriedSucceeded int64 `json:"queries_retried_succeeded"`
+	TokensBurnedOnFailures  int64 `json:"tokens_burned_on_failures"`
 	// ZeroResultRate = queries_zero_result / queries_total. 0 when no
 	// queries. Same value as the pre-v0.78.1 `retry_rate` field but
 	// under the honest name.
@@ -172,6 +172,21 @@ type QueryMetricsReport struct {
 	// A high value here is GOOD (the agent self-corrected); a low
 	// value at high zero_result_rate is the actual friction signal.
 	RetrySuccessRate float64 `json:"retry_success_rate"`
+	// QueriesZeroExpected / QueriesZeroUnexpected (v34, #1632 v0.85)
+	// split queries_zero_result into audit-shape (pinchQL with a
+	// property predicate, empty rows = healthy codebase) and
+	// caller-surprised (search / trace / neighborhood / property-less
+	// query, empty rows = friction event). Pre-v34 rows hold zero on
+	// both fields; new rows satisfy
+	//     queries_zero_expected + queries_zero_unexpected == queries_zero_result.
+	QueriesZeroExpected   int64 `json:"queries_zero_expected"`
+	QueriesZeroUnexpected int64 `json:"queries_zero_unexpected"`
+	// ZeroUnexpectedRate = queries_zero_unexpected / queries_total.
+	// The actionable metric — high values flag the
+	// "agent calls pincher, gets nothing, falls back to Read/Grep" loop
+	// that ZeroResultRate alone couldn't separate from audit-shape
+	// healthy zeros.
+	ZeroUnexpectedRate float64 `json:"zero_unexpected_rate"`
 }
 
 // ProjectStats is a per-project file/symbol/edge breakdown.
@@ -245,6 +260,10 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 	if qm.QueriesZeroResult > 0 {
 		retrySuccessRate = float64(qm.QueriesRetriedSucceeded) / float64(qm.QueriesZeroResult)
 	}
+	var zeroUnexpectedRate float64
+	if qm.QueriesTotal > 0 {
+		zeroUnexpectedRate = float64(qm.QueriesZeroUnexpected) / float64(qm.QueriesTotal)
+	}
 
 	return &StatsReport{
 		DataDir:  dir,
@@ -261,6 +280,9 @@ func buildStatsReport(store *db.Store, dir string) (*StatsReport, error) {
 				TokensBurnedOnFailures:  qm.TokensBurnedOnFailures,
 				ZeroResultRate:          zeroResultRate,
 				RetrySuccessRate:        retrySuccessRate,
+				QueriesZeroExpected:     qm.QueriesZeroExpected,
+				QueriesZeroUnexpected:   qm.QueriesZeroUnexpected,
+				ZeroUnexpectedRate:      zeroUnexpectedRate,
 			},
 		},
 		Projects: projOut,
@@ -361,8 +383,21 @@ func formatStatsText(r *StatsReport) string {
 			row{"Total queries:", commify(qm.QueriesTotal)},
 			row{"Zero-result:", commify(qm.QueriesZeroResult)},
 			row{"Zero-result rate:", fmt.Sprintf("%.1f%%", qm.ZeroResultRate*100)},
-			row{"Recovered:", commify(qm.QueriesRetriedSucceeded)},
 		)
+		// #1632 v0.85: when the split sub-counters carry any signal
+		// (post-v34 sessions have at least one row), surface the
+		// audit-shape vs unexpected breakdown. Pre-v34 sessions hold
+		// zero on both counters; rendering them as 0.0% is honest but
+		// noisy — gate on whether either sub-counter is non-zero so
+		// pure-pre-v34 stats render exactly as before.
+		if qm.QueriesZeroExpected+qm.QueriesZeroUnexpected > 0 {
+			rows = append(rows,
+				row{"  Audit-shape:", commify(qm.QueriesZeroExpected)},
+				row{"  Unexpected:", commify(qm.QueriesZeroUnexpected)},
+				row{"Zero-unexpected rate:", fmt.Sprintf("%.1f%%", qm.ZeroUnexpectedRate*100)},
+			)
+		}
+		rows = append(rows, row{"Recovered:", commify(qm.QueriesRetriedSucceeded)})
 		if qm.QueriesZeroResult > 0 {
 			rows = append(rows, row{"Retry success:", fmt.Sprintf("%.1f%%", qm.RetrySuccessRate*100)})
 		}

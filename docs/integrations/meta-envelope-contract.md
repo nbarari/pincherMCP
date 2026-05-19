@@ -47,12 +47,12 @@ render off it. Observability pipelines correlate on it.
     "warnings_v2": [ { "code": "...", "severity": "info", ... } ],
 
     // — Capability advertisement —
-    "capabilities": ["schema_v33", "hook_check", "supervised", "..."],
+    "capabilities": ["schema_v34", "hook_check", "supervised", "..."],
 
     // — Drift / staleness —
     "binary_drift_warning": null,          // or { stored_version, running_version }
-    "schema_version": 33,
-    "schema_version_at_index": 33,         // per-project (may differ from server)
+    "schema_version": 34,
+    "schema_version_at_index": 34,         // per-project (may differ from server)
 
     // — Project + session context —
     "project_id": "d:claudecodepincher-repo",
@@ -186,7 +186,7 @@ Always-on tags emitted by every server:
 
 | Tag | Meaning |
 |---|---|
-| `schema_v33` | The DB schema version (current at the time of this release) |
+| `schema_v34` | The DB schema version (current at the time of this release) |
 | `hook_check` | `pincher hook-check` subcommand available |
 | `supervised` | `pincher supervised` MCP transport available |
 | `operator_tools_on_mcp` | Restricted operator-tier tools surfaced over MCP |
@@ -323,7 +323,7 @@ def call_pincher(tool, **args):
     meta = resp.get("_meta", {})
 
     # Capability gating (one-time per session is enough)
-    if "schema_v33" not in meta.get("capabilities", []):
+    if "schema_v34" not in meta.get("capabilities", []):
         log.warn("server schema older than this integration was built for")
 
     # Drift handling

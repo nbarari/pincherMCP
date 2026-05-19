@@ -14,7 +14,7 @@
   "files_blocked": 3,
   "files_indexed": 5,
   "files_seen": 8,
-  "schema_version": 33,
+  "schema_version": 34,
   "search_relevance": [
     {
       "corpus": "code",

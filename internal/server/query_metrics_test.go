@@ -187,4 +187,142 @@ func TestQueryMetrics_RoundTripThroughDB(t *testing.T) {
 	if qm.TokensBurnedOnFailures != 250 {
 		t.Errorf("tokens_burned_on_failures = %d, want 250 (100 + 150)", qm.TokensBurnedOnFailures)
 	}
+	// #1632 v0.85: both zero-results were `search` calls (caller-
+	// surprised); none were audit-shape `query` calls with property
+	// predicates. The split sums to QueriesZeroResult.
+	if qm.QueriesZeroExpected != 0 {
+		t.Errorf("queries_zero_expected = %d, want 0 (no audit-shape calls)", qm.QueriesZeroExpected)
+	}
+	if qm.QueriesZeroUnexpected != 2 {
+		t.Errorf("queries_zero_unexpected = %d, want 2 (both `search` zero-results are caller-surprised)", qm.QueriesZeroUnexpected)
+	}
+	if got := qm.QueriesZeroExpected + qm.QueriesZeroUnexpected; got != qm.QueriesZeroResult {
+		t.Errorf("split invariant: expected+unexpected = %d, want %d (queries_zero_result)", got, qm.QueriesZeroResult)
+	}
+}
+
+// #1632 v0.85: isAuditShapeQuery classifier table.
+//
+// True only when tool=="query" AND the pinchql/cypher string contains
+// "{" (property-predicate syntax). Everything else returns false so
+// the unexpected (friction-signal) counter is the conservative default.
+func TestIsAuditShapeQuery_Classifier_1632(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+		want bool
+	}{
+		{
+			name: "query with property predicate is audit-shape",
+			tool: "query",
+			args: map[string]any{"pinchql": "MATCH (f:Function {is_documented: false}) RETURN f"},
+			want: true,
+		},
+		{
+			name: "query via legacy cypher alias with property predicate is audit-shape",
+			tool: "query",
+			args: map[string]any{"cypher": "MATCH (f:Function {kind: 'Method'}) RETURN f LIMIT 50"},
+			want: true,
+		},
+		{
+			name: "query without any property predicate is caller-surprised",
+			tool: "query",
+			args: map[string]any{"pinchql": "MATCH (n) RETURN n LIMIT 1"},
+			want: false,
+		},
+		{
+			name: "query with empty pinchql is caller-surprised",
+			tool: "query",
+			args: map[string]any{"pinchql": ""},
+			want: false,
+		},
+		{
+			name: "search is never audit-shape",
+			tool: "search",
+			args: map[string]any{"query": "Open"},
+			want: false,
+		},
+		{
+			name: "trace is never audit-shape",
+			tool: "trace",
+			args: map[string]any{"name": "Open"},
+			want: false,
+		},
+		{
+			name: "neighborhood is never audit-shape",
+			tool: "neighborhood",
+			args: map[string]any{"id": "x"},
+			want: false,
+		},
+		{
+			name: "tool name typo / unknown defaults to caller-surprised",
+			tool: "queryy",
+			args: map[string]any{"pinchql": "MATCH (n {x: 1}) RETURN n"},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAuditShapeQuery(tc.tool, tc.args); got != tc.want {
+				t.Errorf("isAuditShapeQuery(%q, %v) = %v, want %v", tc.tool, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// #1632 v0.85: zero-result counter routing.
+//
+// An audit-shape query that returns 0 rows MUST increment
+// statsQueriesZeroExpected; a caller-surprised zero MUST increment
+// statsQueriesZeroUnexpected; and the sum across both MUST equal
+// statsQueriesZeroResult on every call.
+func TestRecordQueryMetrics_ZeroResultSplitRouting_1632(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+
+	// 1) Audit-shape: query with a property predicate, empty rows is
+	//    a "no problems found" signal, not friction.
+	srv.recordQueryMetrics(
+		"query",
+		map[string]any{"pinchql": "MATCH (f:Function {is_documented: false}) RETURN f"},
+		map[string]any{"count": 0},
+		120,
+	)
+	// 2) Caller-surprised: search with no match.
+	srv.recordQueryMetrics(
+		"search",
+		map[string]any{"query": "no-such-symbol"},
+		map[string]any{"count": 0},
+		80,
+	)
+	// 3) Caller-surprised: query WITHOUT property predicate.
+	srv.recordQueryMetrics(
+		"query",
+		map[string]any{"pinchql": "MATCH (n) RETURN n LIMIT 1"},
+		map[string]any{"count": 0},
+		50,
+	)
+	// 4) Successful call should not move either split counter.
+	srv.recordQueryMetrics(
+		"search",
+		map[string]any{"query": "Open"},
+		map[string]any{"count": 5},
+		200,
+	)
+
+	if got := atomic.LoadInt64(&srv.statsQueriesZeroExpected); got != 1 {
+		t.Errorf("queries_zero_expected = %d, want 1 (one audit-shape zero)", got)
+	}
+	if got := atomic.LoadInt64(&srv.statsQueriesZeroUnexpected); got != 2 {
+		t.Errorf("queries_zero_unexpected = %d, want 2 (one search + one property-less query)", got)
+	}
+	// Invariant: split sums to total zero-result on every call.
+	zr := atomic.LoadInt64(&srv.statsQueriesZeroResult)
+	ze := atomic.LoadInt64(&srv.statsQueriesZeroExpected)
+	zu := atomic.LoadInt64(&srv.statsQueriesZeroUnexpected)
+	if ze+zu != zr {
+		t.Errorf("split invariant broken: expected(%d)+unexpected(%d) = %d, want queries_zero_result=%d", ze, zu, ze+zu, zr)
+	}
 }
