@@ -1,1 +1,0 @@
-cypher `runBFS` honors `ctx.Err()` between start nodes (#1599 v0.84). Pre-fix the per-start-node loop iterated every remaining entry (up to 100) after cancellation, firing N error-returning SQL calls before returning. Now the loop bails on the first iteration after cancel. Mirrors the v0.82 #1579 + v0.83 #1595 composite-loop pattern but on the atomic-query surface.
