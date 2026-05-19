@@ -33,6 +33,7 @@ var validEmptyReasons = map[string]bool{
 	EmptyReasonIncrementalNoChange:     true,
 	EmptyReasonAllFilesBlocked:         true,
 	EmptyReasonExtractorEmittedNothing: true,
+	EmptyReasonTargetNotResolved:       true,
 }
 
 // Positive: stampEmpty sets both fields atomically on a fresh meta map.
@@ -79,6 +80,7 @@ func TestEmptyReason_ConstantsAreRegistered(t *testing.T) {
 		EmptyReasonIncrementalNoChange,
 		EmptyReasonAllFilesBlocked,
 		EmptyReasonExtractorEmittedNothing,
+		EmptyReasonTargetNotResolved,
 	} {
 		if !validEmptyReasons[c] {
 			t.Errorf("constant %q is exported but not in validEmptyReasons gate map", c)
@@ -136,6 +138,83 @@ func assertEmptyReason(t *testing.T, meta map[string]any, want string) {
 	if _, hasDiag := meta["diagnosis"]; !hasDiag {
 		t.Errorf("diagnosis must be stamped alongside empty_reason; meta keys: %v", metaKeys(meta))
 	}
+}
+
+// #1603 v0.84: orphan-stamp audit. Records which EmptyReason* constants
+// have a production stamp site (handler emits the code on an empty
+// result). Four constants currently have catalog entries + why_empty
+// support but NO handler ever stamps them — they're real conditions
+// surfaced via _meta.warnings or specific tool advisories instead.
+// Pin the current state so a future "we forgot to stamp X" regression
+// is visible at PR review (the orphan set must only shrink).
+//
+// To close the gap: instrument the documented detection paths and
+// move the constant from `knownOrphan` to `knownStamped`. The test
+// becomes a hard contract once `knownOrphan` is empty.
+func TestEmptyReason_OrphanStampAudit(t *testing.T) {
+	t.Parallel()
+
+	// knownStamped — production code in this package emits this code
+	// on at least one empty-result path. Verified by grep of
+	// internal/server/*.go (excluding *_test.go + empty_reason.go +
+	// why_empty.go).
+	knownStamped := map[string]bool{
+		EmptyReasonNoProjectIndexed:        true, // server.go list/architecture/schema
+		EmptyReasonCrossFileUnavailable:    true, // server.go trace/architecture
+		EmptyReasonQueryTooNarrow:          true, // server.go search/trace/changes/list
+		EmptyReasonNoResultsInCorpus:       true, // server.go search/trace/changes; audit_unused; context_for_task; investigate_failure; onboard_module
+		EmptyReasonCapDroppedAll:           true, // server.go search/list; neighborhood
+		EmptyReasonIncrementalNoChange:     true, // server.go handleIndex
+		EmptyReasonAllFilesBlocked:         true, // server.go handleIndex
+		EmptyReasonExtractorEmittedNothing: true, // server.go handleIndex
+		EmptyReasonTargetNotResolved:       true, // plan_change, investigate_failure, context_for_task (v0.82 #1578 + v0.83 #1591)
+	}
+
+	// knownOrphan — constant exists in empty_reason.go + has a catalog
+	// entry in why_empty.go + this test acknowledges the gap. why_empty
+	// still returns the recovery action when an external caller passes
+	// these codes (e.g. extracted from _meta.warnings), but no handler
+	// auto-stamps them today.
+	//
+	// Tracked in #1603. When a constant gets a real stamp site, move
+	// the row to knownStamped and a future PR will see the orphan
+	// count shrink.
+	knownOrphan := map[string]bool{
+		EmptyReasonStaleIndex:             true, // condition fires via _meta.warnings (binary_stale)
+		EmptyReasonUnsupportedLanguage:    true, // condition surfaces in doctor advisory, not stamped on search empty
+		EmptyReasonLowConfidenceExtractor: true, // no handler tells caller "your min_confidence excluded everything"
+		EmptyReasonSameFileOnly:           true, // collapsed into EmptyReasonCrossFileUnavailable in current trace path
+	}
+
+	// Every constant must appear in exactly one of the two sets.
+	allConstants := []string{
+		EmptyReasonNoProjectIndexed,
+		EmptyReasonStaleIndex,
+		EmptyReasonUnsupportedLanguage,
+		EmptyReasonLowConfidenceExtractor,
+		EmptyReasonSameFileOnly,
+		EmptyReasonCrossFileUnavailable,
+		EmptyReasonQueryTooNarrow,
+		EmptyReasonNoResultsInCorpus,
+		EmptyReasonCapDroppedAll,
+		EmptyReasonIncrementalNoChange,
+		EmptyReasonAllFilesBlocked,
+		EmptyReasonExtractorEmittedNothing,
+		EmptyReasonTargetNotResolved,
+	}
+	for _, c := range allConstants {
+		stamped := knownStamped[c]
+		orphan := knownOrphan[c]
+		if stamped && orphan {
+			t.Errorf("constant %q is in both knownStamped AND knownOrphan — one or the other", c)
+		}
+		if !stamped && !orphan {
+			t.Errorf("constant %q is in neither knownStamped nor knownOrphan — add it to one (orphan if no handler stamps it; stamped if a handler does)", c)
+		}
+	}
+	// Surface the orphan count so the gap is visible at PR review.
+	t.Logf("empty_reason orphan-stamp audit: %d stamped, %d orphan (tracked in #1603)",
+		len(knownStamped), len(knownOrphan))
 }
 
 // Positive: list on a freshly-initialised test server (no projects
