@@ -4273,6 +4273,23 @@ func diagnoseEmptyIndex(result *index.IndexResult, force bool) map[string]any {
 func (s *Server) handleIndex(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start, tool, args := beginCall(req)
 
+	// #1601 v0.84 follow-up: entry-point ctx check. handleIndex was
+	// missed by the atomic standard-tier sweep — the other handlers
+	// (handleSearch / handleTrace / handleChanges / handleArchitecture
+	// / handleQuery / handleContext) got their entry-point gate but
+	// handleIndex relied on the deeper per-iteration ctx check inside
+	// idx.Index (indexer.go ~445). On a pre-cancelled context, the
+	// pre-Index work (arg parse, IsBloatTrap, drift refusal,
+	// mustProject, db.Open) ran to completion before the ctx check
+	// bit, blowing the 500ms cancellation contract bound on slow
+	// runners (a Windows test flake in #1615's CI was the first
+	// reproducible signal). Uniformity across every atomic tool — the
+	// contract becomes "any handler returns from a cancelled ctx in
+	// O(microseconds), period."
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	path := str(args, "path")
 	if path == "" {
 		path = s.sessionRoot
