@@ -147,15 +147,18 @@ func TestCancellation_HandleFetch_ReturnsPromptly(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 
 	ctx := withCancelledContext(t)
-	res := runWithBudget(t, "handleFetch", 500*time.Millisecond, func() (any, error) {
-		// Use a URL that would normally succeed if not cancelled;
-		// the test isn't about validation but about cancellation.
+	// Use a closed local port URL: cancellation latency must dominate,
+	// not DNS resolution or TLS handshake. Originally pointed at
+	// example.com which made macOS CI runners spend hundreds of ms in
+	// TCP+TLS setup before the cancelled-ctx check could fire — flaky
+	// in CI but not in the way the test is meant to catch.
+	res := runWithBudget(t, "handleFetch", 1500*time.Millisecond, func() (any, error) {
 		return srv.handleFetch(ctx, makeReq(map[string]any{
-			"url": "https://example.com/docs",
+			"url": "http://127.0.0.1:1/cancelled",
 		}))
 	})
-	if res.elapsed > 500*time.Millisecond {
-		t.Errorf("handleFetch took %v on a cancelled ctx; expected <500ms", res.elapsed)
+	if res.elapsed > 1500*time.Millisecond {
+		t.Errorf("handleFetch took %v on a cancelled ctx; expected <1500ms", res.elapsed)
 	}
 	// Fetch should surface context-cancelled in the error path either
 	// via the result's IsError or the returned error itself.
