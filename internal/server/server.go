@@ -236,6 +236,15 @@ type Server struct {
 	statsQueriesZeroExpected   int64
 	statsQueriesZeroUnexpected int64
 
+	// #1631 v0.85: in-conversation next_steps adherence telemetry.
+	// Tracks emitted vs followed recommendations per session so the
+	// dashboard can surface `adherence_pct = followed / emitted` — the
+	// outcome metric that pairs with #1635's hook-boundary conversion
+	// rate. In-memory only this iteration; persistent surfacing across
+	// restarts requires a schema migration on the sessions table and
+	// is filed as a follow-up.
+	nextStepsAdherence nextStepsAdherenceTracker
+
 	// #635 v0.64: per-call event buffer feeding the dashboard
 	// triangulating panels (entropy / payload distribution / per-tier
 	// saved-pct). jsonResultWithMeta appends an event; flushSession
@@ -1172,6 +1181,13 @@ func (s *Server) recordQueryMetrics(tool string, args map[string]any, data map[s
 	if !queryShapedTools[tool] {
 		return
 	}
+	// #1631 v0.85: adherence check runs before any other counter work
+	// because the next_steps stash for this session was populated by
+	// PRIOR calls' jsonResultWithMeta. Matching here credits this
+	// call's args against the most recent stashed recommendation; the
+	// match consumes the entry so a single suggestion can't credit
+	// against multiple subsequent calls.
+	s.nextStepsAdherence.CheckAndConsume(s.sessionID, tool, args)
 	var count int
 	switch v := data["count"].(type) {
 	case int:
@@ -12219,6 +12235,28 @@ func (s *Server) jsonResultWithMeta(data map[string]any, start time.Time, tool s
 				}
 			}
 		}
+	}
+
+	// #1631 v0.85: stash next_steps that survived the verbose-prune so
+	// the agent's NEXT query-shaped call can be credited against them
+	// via recordQueryMetrics's CheckAndConsume. Runs AFTER the prune
+	// so we only stash recommendations the agent will actually see in
+	// the response. Also exposes the running adherence counters in
+	// _meta — small surface, lets dashboards and follow-up CLI surface
+	// the dial without a schema migration this iteration.
+	if steps, ok := meta["next_steps"].([]map[string]string); ok && len(steps) > 0 {
+		s.nextStepsAdherence.RecordEmitted(s.sessionID, steps)
+	}
+	if emitted, followed := s.nextStepsAdherence.Stats(); emitted > 0 {
+		entry := map[string]any{
+			"emitted":  emitted,
+			"followed": followed,
+		}
+		if emitted > 0 {
+			entry["pct"] = math.Round(float64(followed)/float64(emitted)*1000) / 10
+		}
+		meta["next_steps_adherence"] = entry
+		data["_meta"] = meta
 	}
 
 	// #1089: default to compact JSON. `mcp.TextContent` is a wire
