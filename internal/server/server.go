@@ -5937,6 +5937,45 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
+	// #1643 v0.86 exact-identifier wildcard fallthrough: when the query
+	// is a single bare identifier (no wildcards, no spaces, no quotes)
+	// and zero results came back after corpus + AND→OR fallthroughs,
+	// retry once with a trailing `*` so BM25's token-shape rules don't
+	// silently zero out a real exact-match miss. Surfaces several times
+	// in dogfood: `suggestEmptyTrace` returns zero while
+	// `suggestEmptyTrace*` returns the prefix-match hit because FTS5's
+	// stemming + token boundaries can drop the trailing identifier
+	// segment under specific tokenizer rules. Mirrors the existing
+	// AND→OR (#453) and corpus (#113) fallthrough patterns.
+	//
+	// Surfaced via `_meta.fellthrough_to_wildcard=true` so the agent
+	// knows the recovery happened and can re-issue the wildcard form
+	// directly next time. Skipped when the AND→OR fallthrough already
+	// rescued the query (mutually exclusive on `len(results) == 0`).
+	fellthroughToWildcard := false
+	wildcardQuery := ""
+	if len(results) == 0 && isExactIdentifierQuery(query) {
+		wildcardQuery = query + "*"
+		retryCorpora := []string{corpus}
+		if corpus == "" {
+			retryCorpora = []string{"", db.CorpusConfig, db.CorpusDocs}
+		}
+		for _, fb := range retryCorpora {
+			wcResults, wcErr := s.store.SearchSymbolsByCorpus(projectID, wildcardQuery, kind, language, fb, fetchLimit)
+			if wcErr != nil {
+				continue
+			}
+			if len(wcResults) > 0 {
+				results = wcResults
+				fellthroughToWildcard = true
+				if corpus == "" && fb != "" {
+					fellthroughTo = fb
+				}
+				break
+			}
+		}
+	}
+
 	// rawPreConfidenceCount is the result count BEFORE the min_confidence
 	// post-filter (#246). Used by the empty-result diagnosis verifier:
 	// if the raw count was > 0 but post-filter is 0, min_confidence is
@@ -6206,6 +6245,14 @@ func (s *Server) handleSearch(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if andFellThroughToOr {
 		meta["and_fallback_to_or"] = true
 		meta["effective_query"] = orQuery
+	}
+	// #1643 v0.86: surface the exact-identifier → wildcard recovery so
+	// the agent knows the rewrite happened and can re-issue the
+	// wildcard form directly. Mutually exclusive with the AND→OR
+	// rewrite above (one triggers, not both).
+	if fellthroughToWildcard {
+		meta["fellthrough_to_wildcard"] = true
+		meta["effective_query"] = wildcardQuery
 	}
 	// Suggest the obvious next tool call per top result kind. Reduces
 	// decision friction — agents see the next move spelled out instead of
