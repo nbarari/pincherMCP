@@ -490,6 +490,7 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		lastStatsFlush time.Time           // throttle for in-flight project counts; guarded by bufMu
 		seenFiles      = map[string]bool{} // #326: relPaths the walker yielded this run; tail-pass GC's symbols for files NOT in this set. Populated in the main (single-threaded) loop so no mutex.
 		extractedFiles = map[string]bool{} // #1629 v0.87: relPaths actually re-extracted this run (hash-skipped files excluded). Used to scope the incremental resolve pass. Populated in the main loop right after totalFiles++ so no mutex.
+		referrerFiles  = map[string]bool{} // #1678 v0.87: relPaths of UNCHANGED files that have cross-file edges INTO a re-extracted file. Snapshotted in the main loop BEFORE each file's goroutine cascade-deletes its incoming edges — without it, a hash-skipped caller's resolved edge to a re-extracted callee is lost. Single-threaded population so no mutex.
 		// #1231 v0.66 DOGFOOD: per-file expected symbol count. Filled
 		// in the per-file goroutine (after disambiguateDuplicates + the
 		// symBuf append, under bufMu). Compared post-pass against the
@@ -609,6 +610,21 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 
 		totalFiles++
 		extractedFiles[relPath] = true // #1629 v0.87: track for incremental-resolve scope.
+		// #1678 v0.87: snapshot the cross-file referrers of this file
+		// BEFORE its goroutine spawns. The goroutine's
+		// DeleteSymbolsForFile(relPath) cascade-deletes every edge whose
+		// to-side symbol lives in relPath — including edges FROM
+		// hash-skipped files that won't re-extract this run. Querying
+		// here, pre-spawn, captures those referrers so the incremental
+		// resolve scope can re-bind their pending_edges. The query is
+		// race-free: relPath's incoming edges are only ever cascaded by
+		// relPath's OWN goroutine, which hasn't started yet. Earlier
+		// files' goroutines cascade THEIR incoming edges, not relPath's.
+		if refs, refErr := idx.store.FilesWithEdgesToFile(projectID, relPath); refErr == nil {
+			for _, r := range refs {
+				referrerFiles[r] = true
+			}
+		}
 		prog.FilesTotal.Add(1)
 		wg.Add(1)
 		go func(path, relPath, hash string, content []byte) {
@@ -1098,28 +1114,43 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 		// Threshold: small enough that the SQLite IN clause stays
 		// well under the 999-parameter default; large enough that
 		// most real watcher ticks (1-3 files) hit the scoped path.
-		// #1629 v0.87: incremental-tick scope. ORIGINALLY thought to be
-		// safe at any threshold, but #1678 surfaced a correctness gap:
-		// when callee B re-extracts and caller A is hash-skipped, the
-		// cascade delete on B's symbols wipes the caller→callee edge,
-		// and A's pending_edges are out of scope so the resolver doesn't
-		// re-bind them. The Bar→Foo edge is permanently lost (regression
-		// of the #457 cross-file CALLS preservation contract).
+		// #1629 v0.87 + #1678: incremental-tick resolve scope. When few
+		// files re-extracted AND we're not forcing, the resolver re-binds
+		// only the pending_edges from a bounded scope rather than the
+		// whole project pool (50k+ rows on pincher-repo).
 		//
-		// Properly widening scope to include referrers needs a snapshot
-		// of the edge graph TAKEN BEFORE per-file goroutines run their
-		// cascade deletes — that's a moderate refactor of the main
-		// extraction loop. Until that design lands, scoping is GATED OFF
-		// (useResolveScope := false) and the resolver runs project-wide
-		// every tick. The infrastructure (Store primitives, scopeFiles
-		// parameter on the resolvers) stays in place for the follow-up.
-		const incrementalScopeThreshold = 32 // honored once #1678 widening lands
+		// The scope is the UNION of:
+		//   - extractedFiles — files actually re-extracted this run.
+		//     Their pending_edges were just rewritten.
+		//   - referrerFiles — UNCHANGED files with cross-file edges into
+		//     a re-extracted file. The #457 contract requires their
+		//     resolved edges survive a callee-only re-index; the cascade
+		//     delete on the callee wiped the edge, so the caller's
+		//     pending_edges must be re-bound here. referrerFiles was
+		//     snapshotted in the main loop BEFORE the cascades fired.
+		//
+		// Threshold gate: the UNION must stay small. A hub file with
+		// hundreds of referrers blows past the SQLite IN-clause budget
+		// and the win evaporates anyway — fall back to project-wide.
+		const incrementalScopeThreshold = 64
 		var resolveScope []string
 		useResolveScope := false
-		_ = incrementalScopeThreshold
-		_ = resolveScope
-		_ = totalFiles
-		_ = extractedFiles
+		if !force && totalFiles > 0 {
+			scopeSet := make(map[string]bool, len(extractedFiles)+len(referrerFiles))
+			for f := range extractedFiles {
+				scopeSet[f] = true
+			}
+			for f := range referrerFiles {
+				scopeSet[f] = true
+			}
+			if len(scopeSet) <= incrementalScopeThreshold {
+				useResolveScope = true
+				resolveScope = make([]string, 0, len(scopeSet))
+				for f := range scopeSet {
+					resolveScope = append(resolveScope, f)
+				}
+			}
+		}
 
 		loadKind := func(kind string, fallback []ast.ExtractedEdge) []ast.ExtractedEdge {
 			if useResolveScope {
