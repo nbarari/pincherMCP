@@ -310,8 +310,35 @@ func main() {
 		return
 	}
 	if err := srv.MCPServer().Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
+		// #1568 v0.83: distinguish graceful stdin-EOF from a fatal
+		// transport error. Hosts that pipe a finite request stream and
+		// close stdin cleanly (host-conformance harness, replay tests)
+		// hit io.EOF from the SDK's reader. Pre-fix log.Fatalf killed
+		// the process before the final responses could flush to stdout,
+		// dropping the last request's response and making the workflow
+		// look broken on the consumer side.
+		//
+		// The MCP SDK returns the EOF as either a wrapped error or a
+		// formatted "server is closing: EOF" string; cover both.
+		if isGracefulStdioShutdown(err) {
+			return
+		}
 		log.Fatalf("pincherMCP: server error: %v", err)
 	}
+}
+
+// isGracefulStdioShutdown reports whether err signals a clean stdio
+// transport close (the peer closed stdin) rather than a fatal error.
+// Treated as a normal exit path — see #1568.
+func isGracefulStdioShutdown(err error) bool {
+	if err == nil {
+		return true
+	}
+	// errors.Is handles wrapped io.EOF; the SDK currently formats
+	// "server is closing: EOF" as a fmt.Errorf without %w, so check
+	// the message too.
+	msg := err.Error()
+	return strings.Contains(msg, "EOF") || strings.Contains(msg, "io: read/write on closed pipe")
 }
 
 // runIndexCLI implements "pincher index [--force] [--hook] [--data-dir DIR] [PATH]".

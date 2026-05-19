@@ -1,0 +1,1 @@
+MCP stdio loop treats stdin-EOF as graceful shutdown instead of a fatal error (#1568 v0.83). Pre-fix `log.Fatalf` killed the process before the final responses could flush, dropping the last request's output and breaking host-conformance replay (#1532 FILE-M). Mirrors the #371 passive-fake blind spot — different surface, same shape.
