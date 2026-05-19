@@ -832,13 +832,8 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 			appendDeferred(deferredCalls)
 			appendDeferred(deferredReads)
 			appendDeferred(deferredUsesVar)
-			if err := idx.store.ReplacePendingEdgesForFile(projectID, relPath, fileDeferred); err != nil {
-				slog.Warn("pincher.pending_edges.replace.err", "file", relPath, "err", err)
-			}
-
 			// #423 piece 2: persist Go struct field maps so the resolver
-			// can follow recv.field.method calls. Mirrors the
-			// pending_edges per-file replace pattern. No-op for files
+			// can follow recv.field.method calls. No-op for files
 			// that contain no Class symbols with a non-empty Fields map.
 			fileFields := make([]db.StructField, 0)
 			for _, sym := range result.Symbols {
@@ -855,14 +850,11 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 					})
 				}
 			}
-			if err := idx.store.ReplaceStructFieldsForFile(projectID, relPath, fileFields); err != nil {
-				slog.Warn("pincher.struct_fields.replace.err", "file", relPath, "err", err)
-			}
 
 			// #493: persist Go interface method-name sets so dead_code
 			// can mark project-internal methods that satisfy an
-			// interface as not-dead. Same per-file replace pattern as
-			// struct_fields. No-op for files with no Interface symbols.
+			// interface as not-dead. No-op for files with no Interface
+			// symbols.
 			fileMethods := make([]db.InterfaceMethod, 0)
 			for _, sym := range result.Symbols {
 				if sym.Kind != "Interface" || len(sym.InterfaceMethods) == 0 {
@@ -877,21 +869,39 @@ func (idx *Indexer) Index(ctx context.Context, repoPath string, force bool) (*In
 					})
 				}
 			}
-			if err := idx.store.ReplaceInterfaceMethodsForFile(projectID, relPath, fileMethods); err != nil {
-				slog.Warn("pincher.interface_methods.replace.err", "file", relPath, "err", err)
-			}
 
-			// #1313: stamp the file hash NOW, before the symbols join
-			// the batched flush. Pre-fix the hash write was inside
-			// flushBuffers' post-flushBatch loop, so a flushBatch
-			// failure on the batch containing this file (e.g., one bad
-			// symbol triggering a constraint violation) silently
-			// dropped every file in that batch's hash row — those
-			// files then re-extracted every watcher tick forever.
-			// Stamping here decouples the hash row from batch-flush
-			// success: as long as extraction completed, the next
-			// pass's hash-check skips this file.
-			_ = idx.store.SetFileHash(projectID, relPath, hash)
+			// #1627 v0.86: single-transaction commit for all four
+			// per-file post-extract writes. v0.85 observability showed
+			// extraction-phase wall-clock was 73% writer-pool
+			// serialization (#1628 measurement: 2064ms of 2840ms
+			// extraction-phase on pincher-repo force-reindex was lock
+			// contention, not extractor CPU). Collapsing four
+			// independent Begin/Commit cycles per file (pending_edges,
+			// struct_fields, interface_methods, files.hash) into one
+			// removes the dominant source of contention.
+			//
+			// #1313: file_hash is part of this commit, so the v0.84
+			// invariant — "hash is stamped on every successful
+			// extraction independent of batch-flush success" — still
+			// holds: the per-file tx commits atomically before
+			// flushBuffers ever runs, and a flushBatch failure later
+			// on the shared symBuf can't roll this back.
+			if err := idx.store.CommitFileExtraction(db.FileExtractionCommit{
+				ProjectID:        projectID,
+				FilePath:         relPath,
+				FileHash:         hash,
+				PendingEdges:     fileDeferred,
+				StructFields:     fileFields,
+				InterfaceMethods: fileMethods,
+			}); err != nil {
+				slog.Warn("pincher.file_extraction.commit.err", "file", relPath, "err", err)
+				// Fallback: write the file hash directly so the next
+				// pass still skips this file. The four sub-commits
+				// failed atomically, but the unchanged-skip path
+				// (line 623 / 680 SetFileHash) must remain reachable
+				// even when CommitFileExtraction errors.
+				_ = idx.store.SetFileHash(projectID, relPath, hash)
+			}
 
 			refreshCounts := false
 			bufMu.Lock()

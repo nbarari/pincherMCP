@@ -122,12 +122,15 @@ func TestHandleStats_IncludesByToolSection_1630(t *testing.T) {
 	if !strings.Contains(text, "BY TOOL") {
 		t.Errorf("stats output missing BY TOOL section:\n%s", text)
 	}
-	if !strings.Contains(text, "search:") || !strings.Contains(text, "trace:") {
+	// #1645 v0.86: row format changed from "trace:" labels to
+	// column-aligned cells. Match on the bare tool name as it appears
+	// in the column.
+	if !strings.Contains(text, "search") || !strings.Contains(text, "trace") {
 		t.Errorf("stats output missing per-tool rows:\n%s", text)
 	}
 	// trace has higher total (250 > 150) so it should appear before search.
-	traceIdx := strings.Index(text, "trace:")
-	searchIdx := strings.Index(text, "search:")
+	traceIdx := strings.Index(text, "trace ")
+	searchIdx := strings.Index(text, "search ")
 	if traceIdx < 0 || searchIdx < 0 || traceIdx > searchIdx {
 		t.Errorf("trace should appear before search (higher total); traceIdx=%d searchIdx=%d", traceIdx, searchIdx)
 	}

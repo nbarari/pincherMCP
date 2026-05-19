@@ -580,6 +580,7 @@ var writerRoutedStoreMethods = map[string]bool{
 	"DeletePendingEdgesForFile":       true,
 	"ReplaceStructFieldsForFile":      true,
 	"ReplaceInterfaceMethodsForFile":  true,
+	"CommitFileExtraction":            true,
 	"RecordSymbolMove":         true,
 	"DetectAndRecordMoves":     true,
 	"SetFileHash":              true,

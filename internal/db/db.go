@@ -3770,6 +3770,132 @@ func (s *Store) ReplaceInterfaceMethodsForFile(projectID, filePath string, metho
 	})
 }
 
+// FileExtractionCommit groups every per-file post-extract write into a
+// single payload so the writer pool sees one transaction per file
+// instead of four (#1627 v0.86). v0.85 observability showed
+// extraction-phase wall-clock is 73% writer-pool serialization, not
+// extractor CPU — collapsing four separate Begin/Commit cycles per
+// file into one removes the dominant source of contention.
+//
+// Empty slices skip their DELETE+INSERT pass cleanly (no-op for files
+// that produce zero pending edges / struct fields / interface methods).
+// FileHash is always written — that's how the next-pass hash-check
+// skips unchanged files.
+type FileExtractionCommit struct {
+	ProjectID        string
+	FilePath         string  // path relative to project root, forward-slash
+	FileHash         string  // xxh3 of file bytes; written unconditionally
+	PendingEdges     []PendingEdge
+	StructFields     []StructField
+	InterfaceMethods []InterfaceMethod
+}
+
+// CommitFileExtraction does in one transaction what
+// ReplacePendingEdgesForFile + ReplaceStructFieldsForFile +
+// ReplaceInterfaceMethodsForFile + SetFileHash previously did in four.
+// Atomicity is strengthened (all-or-nothing per file vs four
+// independent commits); the writer pool sees one Begin/Commit cycle
+// per file vs four (#1627 v0.86).
+//
+// The individual methods stay for direct callers and tests; the
+// indexer's per-file goroutine routes through this to amortize the
+// writer-mutex acquisition cost. Writer-routed (mutates).
+func (s *Store) CommitFileExtraction(c FileExtractionCommit) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		// 1. pending_edges — delete then INSERT OR IGNORE the fresh
+		//    set. Mirrors ReplacePendingEdgesForFile.
+		if _, err := tx.Exec(
+			`DELETE FROM pending_edges WHERE project_id=? AND from_file=?`,
+			c.ProjectID, c.FilePath,
+		); err != nil {
+			return err
+		}
+		if len(c.PendingEdges) > 0 {
+			stmt, err := tx.Prepare(`
+				INSERT OR IGNORE INTO pending_edges(project_id, from_file, kind, from_qn, to_name, confidence, receiver_type, base_type)
+				VALUES (?,?,?,?,?,?,?,?)`)
+			if err != nil {
+				return err
+			}
+			for i := range c.PendingEdges {
+				e := &c.PendingEdges[i]
+				if _, err := stmt.Exec(c.ProjectID, c.FilePath, e.Kind, e.FromQN, e.ToName, e.Confidence, e.ReceiverType, e.BaseType); err != nil {
+					stmt.Close()
+					return err
+				}
+			}
+			stmt.Close()
+		}
+
+		// 2. struct_fields — same shape as ReplaceStructFieldsForFile.
+		//    DELETE keyed by file path via a join on `symbols`.
+		if _, err := tx.Exec(
+			`DELETE FROM struct_fields
+			   WHERE project_id=? AND struct_id IN (
+			     SELECT id FROM symbols WHERE project_id=? AND file_path=?
+			   )`,
+			c.ProjectID, c.ProjectID, c.FilePath,
+		); err != nil {
+			return err
+		}
+		if len(c.StructFields) > 0 {
+			stmt, err := tx.Prepare(
+				`INSERT OR REPLACE INTO struct_fields(project_id, struct_id, field_name, field_type)
+				 VALUES (?,?,?,?)`)
+			if err != nil {
+				return err
+			}
+			for i := range c.StructFields {
+				f := &c.StructFields[i]
+				if _, err := stmt.Exec(c.ProjectID, f.StructID, f.FieldName, f.FieldType); err != nil {
+					stmt.Close()
+					return err
+				}
+			}
+			stmt.Close()
+		}
+
+		// 3. interface_methods — same shape as
+		//    ReplaceInterfaceMethodsForFile.
+		if _, err := tx.Exec(
+			`DELETE FROM interface_methods
+			   WHERE project_id=? AND interface_id IN (
+			     SELECT id FROM symbols WHERE project_id=? AND file_path=?
+			   )`,
+			c.ProjectID, c.ProjectID, c.FilePath,
+		); err != nil {
+			return err
+		}
+		if len(c.InterfaceMethods) > 0 {
+			stmt, err := tx.Prepare(
+				`INSERT OR REPLACE INTO interface_methods(project_id, interface_id, method_name)
+				 VALUES (?,?,?)`)
+			if err != nil {
+				return err
+			}
+			for i := range c.InterfaceMethods {
+				m := &c.InterfaceMethods[i]
+				if _, err := stmt.Exec(c.ProjectID, m.InterfaceID, m.MethodName); err != nil {
+					stmt.Close()
+					return err
+				}
+			}
+			stmt.Close()
+		}
+
+		// 4. files.hash — mirrors SetFileHash. Written unconditionally
+		//    so an empty-extraction file still records the hash to
+		//    skip re-extraction next pass.
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO files(project_id, path, hash, indexed_at) VALUES (?,?,?,?)`,
+			c.ProjectID, c.FilePath, c.FileHash, time.Now().Unix(),
+		); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // LoadInterfaceMethods returns every interface_methods row for the
 // project. The dead_code query uses it directly via SQL JOIN; this
 // reader is here for tests + future heuristics. Reader-routed.
