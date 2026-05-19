@@ -128,6 +128,66 @@ func TestCursor_IdempotentRewrite(t *testing.T) {
 	}
 }
 
+// #1336 v0.86: fresh-write must include the Cursor PreToolUse hook
+// equivalent (static guidance prepended outside the marker block). On
+// subsequent writes the marker block updates in place; the preamble
+// stays.
+func TestCursor_FreshWriteIncludesHookCheckEquivalent_1336(t *testing.T) {
+	out, _ := cursorMDCWriter("", samplePolicy)
+	// Section header must be present.
+	if !strings.Contains(out, "When to use pincher tools (Cursor PreToolUse hook equivalent)") {
+		t.Errorf("fresh write must include the hook-check section header; got:\n%s", out)
+	}
+	// Key behavioural cues — at least one fragment per rule (Read +
+	// Grep). Light-touch assertions so future copy edits don't trip
+	// the test on every word.
+	for _, want := range []string{
+		"mcp__pincher__context",
+		"lite=true",
+		"mcp__pincher__search",
+		"test/spec",
+		"under 4 KB",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("hook-check section missing %q; got:\n%s", want, out)
+		}
+	}
+	// Preamble must come BEFORE the marker block (so users who delete
+	// it can do so without disturbing the managed policy).
+	hookIdx := strings.Index(out, "When to use pincher tools")
+	markerIdx := strings.Index(out, MarkerStart)
+	if hookIdx < 0 || markerIdx < 0 || hookIdx > markerIdx {
+		t.Errorf("hook section must appear before MarkerStart; hookIdx=%d markerIdx=%d", hookIdx, markerIdx)
+	}
+}
+
+// #1336 v0.86: subsequent rewrites do NOT touch the preamble — the
+// marker-block update path stays scoped to the marker block.
+func TestCursor_SubsequentWritePreservesUserDeletedHookSection_1336(t *testing.T) {
+	// First write: preamble + marker block.
+	first, _ := cursorMDCWriter("", samplePolicy)
+	// User edits: keeps the marker block, deletes the hook preamble
+	// (and any user-managed content above).
+	frontmatterEnd := strings.Index(first, "---\n\n") + len("---\n\n")
+	markerStart := strings.Index(first, MarkerStart)
+	if frontmatterEnd <= 0 || markerStart <= 0 {
+		t.Fatalf("could not locate frontmatter/marker positions in first write")
+	}
+	userEdited := first[:frontmatterEnd] + first[markerStart:]
+	if strings.Contains(userEdited, "When to use pincher tools") {
+		t.Fatal("test scaffold: userEdited should not contain the preamble")
+	}
+	// Second write should leave the preamble deleted (only updates the
+	// marker block contents).
+	out, _ := cursorMDCWriter(userEdited, samplePolicy)
+	if strings.Contains(out, "When to use pincher tools") {
+		t.Errorf("subsequent write must NOT re-add the user-deleted preamble; got:\n%s", out)
+	}
+	if !strings.Contains(out, MarkerStart) {
+		t.Errorf("marker block must still be present; got:\n%s", out)
+	}
+}
+
 func TestSplitMDXFrontmatter(t *testing.T) {
 	cases := []struct {
 		name           string

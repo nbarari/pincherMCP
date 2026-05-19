@@ -169,9 +169,37 @@ alwaysApply: true
 
 `
 
+// cursorHookCheckEquivalent ships the Cursor counterpart of Claude
+// Code's PreToolUse hook (#627). Cursor doesn't have a runtime hook
+// surface, so the redirect is convention-based: this static rule
+// preamble tells the agent to prefer pincher tools over Read / Grep on
+// indexed files, mirroring the hook's decision logic (#1336 v0.86).
+//
+// Lives OUTSIDE the marker block in pincher.mdc — `pincher init` only
+// touches the marker block on subsequent writes, so this preamble
+// survives policy refreshes and only gets re-rendered on a brand-new
+// rule file. Users who don't want it can delete the preamble in their
+// existing pincher.mdc and it won't grow back.
+const cursorHookCheckEquivalent = `# When to use pincher tools (Cursor PreToolUse hook equivalent)
+
+Cursor doesn't have Claude Code's runtime PreToolUse hook ([#627](https://github.com/kwad77/pincher/issues/627)), so the redirect is convention-based here. The contract below mirrors the hook's decision logic from [cmd/pinch/hook_check.go](https://github.com/kwad77/pincher/blob/master/cmd/pinch/hook_check.go).
+
+**Before any Read on a file in this repo:**
+- If the path is indexed and the file is >4 KB and has >5 symbols, call ` + "`mcp__pincher__context id=<symbol_id> lite=true`" + ` instead — same retrieval, ~80% smaller payload.
+- Get the symbol_id from ` + "`mcp__pincher__search query=<name>`" + ` first.
+- Skip the redirect when: the file is a test/spec source (` + "`*_test.go`, `*.spec.ts`, `*.test.jsx`, `tests/**`" + `, etc), under 4 KB, has <5 symbols, or you've already passed an offset/limit.
+
+**Before any Grep on an identifier-shaped pattern:**
+- If the pattern is a single camelCase / snake_case / dotted identifier, call ` + "`mcp__pincher__search query=<pattern>`" + ` — BM25 ranking + snippets beat unranked grep matches.
+- Skip the redirect when: the pattern has regex metacharacters, is a phrase (contains a space), or no project is indexed yet.
+
+Pincher's own hook redirects mid-flight on Claude Code installs ([#1635](https://github.com/kwad77/pincher/issues/1635) advisory when not installed); under Cursor the agent applies the same rules deliberately.
+
+`
+
 var CursorTarget = Target{
 	Name:     "cursor",
-	Describe: "Cursor (modern): ./.cursor/rules/pincher.mdc with YAML frontmatter",
+	Describe: "Cursor (modern): ./.cursor/rules/pincher.mdc with YAML frontmatter + Read/Grep hook-check equivalent",
 	PathFn: func(cwd string, global bool) (string, error) {
 		if global {
 			return "", fmt.Errorf("cursor target has no global variant; rules live per-project")
@@ -192,7 +220,11 @@ var CursorTarget = Target{
 func cursorMDCWriter(existing, policy string) (string, string) {
 	if existing == "" {
 		body, _ := MergePolicyBlockBare("", policy)
-		return cursorRuleFrontmatter + body, "wrote"
+		// #1336 v0.86: prepend the Cursor hook-check equivalent on
+		// brand-new writes only. Subsequent `pincher init` runs only
+		// touch the marker block, so the preamble survives policy
+		// refreshes (and a user who deletes it doesn't get it back).
+		return cursorRuleFrontmatter + cursorHookCheckEquivalent + body, "wrote"
 	}
 	frontmatter, body := SplitMDXFrontmatter(existing)
 	mergedBody, action := MergePolicyBlockBare(body, policy)
