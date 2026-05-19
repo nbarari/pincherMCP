@@ -71,6 +71,63 @@ Two invariants that recur:
 - **Minor (`0.X.0`):** features, schema migrations, new CLI surface.
 - **Patch (`0.X.Y`):** bug fixes only. No features, no schema changes.
 
+## Semver in pincher 1.x ([ADR-0002](docs/adr/0002-v1-frozen-surface.md))
+
+Starting at v1.0, pincher promises a specific surface. The rules below say exactly what triggers each release type during 1.x. Pre-1.0 these are aspirational; v0.84.0 is the freeze checkpoint after which they bind.
+
+### What is a breaking change?
+
+A change that breaks something in [ADR-0002's frozen surface](docs/adr/0002-v1-frozen-surface.md):
+
+- Renaming or removing an MCP tool listed in `internal/server/mcp_surface_split_test.go expectedMCPTools`.
+- Changing a tool's input/output JSON Schema in a way that's not strictly additive (removing a field, renaming a field, changing a field's type, making an optional field required, changing an enum value).
+- Removing or renaming a `_meta` envelope field (additive `_v2` / `_v3` extension points are NOT breaking — they ship alongside the original).
+- Renaming or removing an HTTP gateway route, or changing an existing route's response shape.
+- Renaming or removing a CLI subcommand listed in `internal/server/reference_md_cli_subcommand_parity_test.go expectedCLISubcommands`, or removing a flag from one.
+- Changing the symbol ID format produced by `internal/db/db.go MakeSymbolID`.
+
+A breaking change requires a **2.0 release**. There is no in-1.x deprecation cycle for breakage of frozen surface elements — the deprecation cycle is the one-minor warning window required before *removal* of a flag or subcommand, but the removal itself is what bumps to 2.0.
+
+### What is a minor (1.X.0)?
+
+Any non-breaking, non-trivial change:
+
+- Adding a new MCP tool, CLI subcommand, or HTTP route (additive — non-breaking by ADR-0002 rules).
+- Adding an optional input field, or a new output field, to an existing tool.
+- Adding a `_v2` / `_v3` extension to the `_meta` envelope.
+- A schema migration (forward-only — pincher never migrates back).
+- A new language extractor or a tier promotion (0.85 → 1.0).
+- A perf or memory characterization that crosses a published claim threshold.
+
+### What is a patch (1.X.Y)?
+
+Bug fixes that don't change the published surface:
+
+- Wrong behavior in an existing tool that doesn't change the contract (e.g. ranking-order bug, off-by-one in a heuristic).
+- Internal performance fix.
+- A wrong / misleading advisory message.
+- A bug in the dashboard rendering or CSS.
+- A fix to a CHANGELOG / README typo or stale claim.
+
+Patch releases NEVER introduce schema migrations, new MCP tools, new CLI subcommands, or new HTTP routes. If a fix requires any of those, ship it in the next minor.
+
+### Deprecation cycle for removal
+
+Removing a CLI flag, an HTTP route's response field, or an MCP tool output field — anything not already a breaking change but still user-visible — requires:
+
+1. One full minor of `Deprecated:` doc warnings + runtime `slog.Warn` on the deprecated path.
+2. Removal in the next minor (or later).
+
+The deprecation window gives users a chance to migrate before the field disappears. Skipping the window is a breaking change requiring a 2.0 release.
+
+### PR-template rule
+
+Every PR touching the frozen surface (per ADR-0002) checks the PR-template box:
+
+> [ ] This PR changes a frozen surface element per [ADR-0002](docs/adr/0002-v1-frozen-surface.md). If yes, the change is either (a) additive, or (b) targeted for the 2.x branch.
+
+Reviewers verify the checkbox claim before merging. CI gates (`TestToolContract_GoldenFile`, the contract tests on every frozen surface element) catch accidental breakage.
+
 Release-prep PR (the one before tagging) MUST touch all five:
 
 1. **`CHANGELOG.md`** — assemble stubs via `bash scripts/changelog-assemble.sh --apply`, then promote `[Unreleased]` to a versioned heading with the release's theme one-liner.
