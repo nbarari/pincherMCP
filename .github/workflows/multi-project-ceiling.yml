@@ -1,0 +1,56 @@
+name: Multi-project ceiling
+
+# FILE-J #1529 v0.86 — weekly bench measuring per-watcher-tick wall-clock
+# at multiple indexed-project counts. Anchors the "recommended max
+# concurrent indexed projects" budget in REFERENCE.md.
+#
+# Pairs with FILE-I (#1528, single-project resource limits) — together
+# they cover both axes of "what's the scaling ceiling" published claims.
+
+on:
+  schedule:
+    # Friday 14:00 UTC — last weekly slot in the staggered cycle
+    # (Mon govulncheck/ttfs, Tue resource-pressure, Wed migration,
+    # Thu per-tool-latency).
+    - cron: '0 14 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  multi-project-ceiling:
+    name: poll cycle by project count (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Build pincher
+        run: go build -trimpath -ldflags="-s -w" -o ./pincher ./cmd/pinch/
+
+      - name: Run multi-project-ceiling bench
+        env:
+          PINCHER_BIN: ${{ github.workspace }}/pincher
+          # CI tiers: 10 + 50 projects. 200-tier available via
+          # workflow_dispatch with TIERS=10,50,200 — the 200-project
+          # generation takes ~5-7 min on a fresh runner so it's not
+          # on cron.
+        run: bash scripts/multi-project-ceiling-bench.sh 10,50 out/multi-project-ceiling.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multi-project-ceiling-${{ github.run_id }}
+          path: out/
+          retention-days: 90
