@@ -208,6 +208,56 @@ func TestNestedProjectAdvisory_CLI_AllFlatReturnsEmpty(t *testing.T) {
 	}
 }
 
+// #1644: pincher-repo's pinned corpus fixtures (testdata/corpus/*) are
+// indexed as standalone projects on purpose. The advisory's remediation
+// — `pincher project rm <inner>` — would break `make corpus-test`.
+func TestNestedProjectAdvisory_CLI_TestdataCorpus_Suppressed(t *testing.T) {
+	t.Parallel()
+	projects := []DoctorProjectSummary{
+		{Name: "pincher-repo", Path: `D:\ClaudeCode\pincher-repo`, Symbols: 8000},
+		{Name: "k8s-ops", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\k8s-ops`, Symbols: 42},
+		{Name: "terraform-stack", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\terraform-stack`, Symbols: 40},
+	}
+	if got := nestedProjectAdvisory(projects); got != "" {
+		t.Errorf("testdata/corpus/* fixtures must be suppressed; got advisory %q", got)
+	}
+}
+
+// #1644 cross-check: suppression is specific. A real nested-project
+// mistake (warp-fork inside warp_rc) still fires even when a sibling
+// corpus fixture is present.
+func TestNestedProjectAdvisory_CLI_MixedRealAndCorpus_FiresOnReal(t *testing.T) {
+	t.Parallel()
+	projects := []DoctorProjectSummary{
+		{Name: "pincher-repo", Path: `D:\ClaudeCode\pincher-repo`, Symbols: 8000},
+		{Name: "k8s-ops", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\k8s-ops`, Symbols: 42},
+		{Name: "warp_rc", Path: `D:\ClaudeCode\warp_rc`, Symbols: 1_500_000},
+		{Name: "warp-fork", Path: `D:\ClaudeCode\warp_rc\warp-fork`, Symbols: 1_500_000},
+	}
+	got := nestedProjectAdvisory(projects)
+	if got == "" {
+		t.Fatal("expected advisory for real warp-fork nesting; got empty")
+	}
+	if !strings.Contains(got, "warp-fork") {
+		t.Errorf("advisory must still flag warp-fork; got %q", got)
+	}
+	if strings.Contains(got, "k8s-ops") {
+		t.Errorf("advisory must NOT flag testdata corpus k8s-ops; got %q", got)
+	}
+}
+
+// #1644: .atrium/work/ worktree paths are also suppressed.
+func TestNestedProjectAdvisory_CLI_AtriumWorktree_Suppressed(t *testing.T) {
+	t.Parallel()
+	projects := []DoctorProjectSummary{
+		{Name: "slopbuster", Path: `D:\ClaudeCode\slopbuster`, Symbols: 4500},
+		{Name: "i-7", Path: `D:\ClaudeCode\slopbuster\.atrium\work\r-2026-04-14-002\i-7`, Symbols: 874},
+	}
+	if got := nestedProjectAdvisory(projects); got != "" {
+		t.Errorf(".atrium/work/* worktree nesting must be suppressed; got %q", got)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────
 // Parity gate (forward direction): every advisory function the CLI
 // declares matches a sibling in the MCP doctor. The compile-time

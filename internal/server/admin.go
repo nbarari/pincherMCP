@@ -495,6 +495,14 @@ func nestedProjectAdvisory(projects []doctorProjectSummary) string {
 			}
 		}
 		if bestOuter != nil {
+			// #1644: suppress when the nesting is intentional (testdata
+			// corpus fixtures, worktree convention dirs). The advisory's
+			// remediation suggestion (`pincher project rm <inner>`) is
+			// the wrong action there — removing the corpus snapshot
+			// fixtures would break `make corpus-test`.
+			if isIntentionallyNested(normalized[i], normalizePathForNesting(bestOuter.Path)) {
+				continue
+			}
 			pairs = append(pairs, nestedPair{inner: inner, outer: *bestOuter})
 		}
 	}
@@ -520,6 +528,44 @@ func nestedProjectAdvisory(projects []doctorProjectSummary) string {
 		"after deleting the redundant project from disk, or use `pincher project rm` " +
 		"on the inner project if it remains on disk. See #1209."
 	return msg
+}
+
+// isIntentionallyNested returns true when the inner project's path,
+// relative to the outer project's path, contains a segment that marks
+// the nesting as deliberate (pinned testdata corpora, worktree convention
+// dirs). The nested-project advisory's remediation — `pincher project rm
+// <inner>` — would be actively harmful in those cases (would break
+// `make corpus-test` snapshot gates, would interfere with the worktree
+// tooling that depends on the nested registration).
+//
+// Suppression patterns:
+//   - testdata/corpus/      pincher's pinned corpus convention; matches
+//                            k8s-ops, terraform-stack, probe, etc.
+//                            (#1644).
+//   - testdata/__fixtures__/  broader trace include_fixtures convention.
+//   - .atrium/work/         slopbuster worktree convention.
+//
+// Both arguments must already be normalized by normalizePathForNesting.
+func isIntentionallyNested(innerNorm, outerNorm string) bool {
+	if !strings.HasPrefix(innerNorm, outerNorm+"/") {
+		return false
+	}
+	rel := innerNorm[len(outerNorm)+1:]
+	if rel == "" {
+		return false
+	}
+	rel = "/" + rel + "/"
+	suppressSegments := []string{
+		"/testdata/corpus/",
+		"/testdata/__fixtures__/",
+		"/.atrium/work/",
+	}
+	for _, seg := range suppressSegments {
+		if strings.Contains(rel, seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizePathForNesting lowercases and forward-slash-normalizes a

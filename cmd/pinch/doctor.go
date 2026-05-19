@@ -661,6 +661,13 @@ func nestedProjectAdvisory(projects []DoctorProjectSummary) string {
 			}
 		}
 		if bestOuter != nil {
+			// #1644: mirrors internal/server/admin.go's intentional-
+			// nesting suppression. Same patterns, same rationale —
+			// testdata/corpus pinned fixtures + .atrium/work worktrees
+			// are deliberately nested.
+			if isIntentionallyNested(normalized[i], normalizePathForNesting(bestOuter.Path)) {
+				continue
+			}
 			pairs = append(pairs, nestedPair{inner: inner, outer: *bestOuter})
 		}
 	}
@@ -686,6 +693,37 @@ func nestedProjectAdvisory(projects []DoctorProjectSummary) string {
 		"after deleting the redundant project from disk, or use `pincher project rm` " +
 		"on the inner project if it remains on disk. See #1209."
 	return msg
+}
+
+// isIntentionallyNested mirrors internal/server/admin.go's copy (#1644).
+// Returns true when the inner project's relative path under the outer
+// contains a known-intentional segment (testdata/corpus pinned fixtures,
+// .atrium/work worktree convention). The advisory's remediation —
+// `pincher project rm <inner>` — would be wrong in those cases.
+//
+// Both arguments must already be normalised by normalizePathForNesting.
+//
+// Deliberately duplicated per CLAUDE.md bounded-duplication convention.
+func isIntentionallyNested(innerNorm, outerNorm string) bool {
+	if !strings.HasPrefix(innerNorm, outerNorm+"/") {
+		return false
+	}
+	rel := innerNorm[len(outerNorm)+1:]
+	if rel == "" {
+		return false
+	}
+	rel = "/" + rel + "/"
+	suppressSegments := []string{
+		"/testdata/corpus/",
+		"/testdata/__fixtures__/",
+		"/.atrium/work/",
+	}
+	for _, seg := range suppressSegments {
+		if strings.Contains(rel, seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizePathForNesting mirrors internal/server/admin.go's copy.

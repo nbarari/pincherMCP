@@ -122,6 +122,81 @@ func TestNestedProjectAdvisory_AllFlat_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// #1644: pincher's pinned corpus fixtures (testdata/corpus/*) are
+// indexed as standalone projects on purpose — the snapshot-test gates
+// (make corpus-test, TestCorpusSnapshot_*) require it. The advisory
+// must NOT flag them as nested; recommending `pincher project rm` on
+// these would break the corpus snapshot test suite.
+func TestNestedProjectAdvisory_TestdataCorpus_Suppressed(t *testing.T) {
+	t.Parallel()
+	projects := []doctorProjectSummary{
+		{Name: "pincher-repo", Path: `D:\ClaudeCode\pincher-repo`, Symbols: 8000},
+		{Name: "k8s-ops", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\k8s-ops`, Symbols: 42},
+		{Name: "terraform-stack", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\terraform-stack`, Symbols: 40},
+	}
+	if got := nestedProjectAdvisory(projects); got != "" {
+		t.Errorf("testdata/corpus/* fixtures must be suppressed; got advisory %q", got)
+	}
+}
+
+// #1644 cross-check: the suppression must be specific. A genuine
+// nested-project mistake (warp-fork inside warp_rc) still fires, even
+// when a sibling corpus fixture is also present.
+func TestNestedProjectAdvisory_MixedRealAndCorpus_FiresOnReal(t *testing.T) {
+	t.Parallel()
+	projects := []doctorProjectSummary{
+		{Name: "pincher-repo", Path: `D:\ClaudeCode\pincher-repo`, Symbols: 8000},
+		{Name: "k8s-ops", Path: `D:\ClaudeCode\pincher-repo\testdata\corpus\k8s-ops`, Symbols: 42},
+		{Name: "warp_rc", Path: `D:\ClaudeCode\warp_rc`, Symbols: 1500000},
+		{Name: "warp-fork", Path: `D:\ClaudeCode\warp_rc\warp-fork`, Symbols: 1500000},
+	}
+	got := nestedProjectAdvisory(projects)
+	if got == "" {
+		t.Fatal("expected advisory for real warp-fork nesting; got empty")
+	}
+	if !strings.Contains(got, "warp-fork") {
+		t.Errorf("advisory must still flag warp-fork; got %q", got)
+	}
+	if strings.Contains(got, "k8s-ops") {
+		t.Errorf("advisory must NOT flag testdata corpus k8s-ops; got %q", got)
+	}
+}
+
+// #1644 cross-check: .atrium/work/ worktree paths are also suppressed.
+func TestNestedProjectAdvisory_AtriumWorktree_Suppressed(t *testing.T) {
+	t.Parallel()
+	projects := []doctorProjectSummary{
+		{Name: "slopbuster", Path: `D:\ClaudeCode\slopbuster`, Symbols: 4500},
+		{Name: "i-7", Path: `D:\ClaudeCode\slopbuster\.atrium\work\r-2026-04-14-002\i-7`, Symbols: 874},
+	}
+	if got := nestedProjectAdvisory(projects); got != "" {
+		t.Errorf(".atrium/work/* worktree nesting must be suppressed; got %q", got)
+	}
+}
+
+// #1644 direct unit: isIntentionallyNested matrix.
+func TestIsIntentionallyNested(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		inner, outer     string
+		wantIntentional  bool
+	}{
+		{"testdata/corpus suppressed", "d:/repo/testdata/corpus/k8s-ops", "d:/repo", true},
+		{"testdata/__fixtures__ suppressed", "/home/u/repo/testdata/__fixtures__/probe", "/home/u/repo", true},
+		{".atrium/work suppressed", "d:/repo/.atrium/work/r-1/i-7", "d:/repo", true},
+		{"genuine warp-fork case fires", "d:/code/warp_rc/warp-fork", "d:/code/warp_rc", false},
+		{"non-nested returns false", "/home/u/a", "/home/u/b", false},
+		{"identical paths return false (no rel)", "/home/u/x", "/home/u/x", false},
+	}
+	for _, c := range cases {
+		if got := isIntentionallyNested(c.inner, c.outer); got != c.wantIntentional {
+			t.Errorf("%s: isIntentionallyNested(%q, %q) = %v, want %v",
+				c.name, c.inner, c.outer, got, c.wantIntentional)
+		}
+	}
+}
+
 // Direct unit: normalizePathForNesting behavior.
 func TestNormalizePathForNesting(t *testing.T) {
 	t.Parallel()
