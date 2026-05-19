@@ -14,11 +14,12 @@ import (
 
 func TestFTS5FragmentationAdvisory_AllHealthy_NoAdvisory_1612(t *testing.T) {
 	t.Parallel()
-	// Healthy ratios sit at 1–3x post-rebuild. Three corpora all in
-	// that band must produce no advisory.
+	// Healthy ratios sit at 1–3x for code/docs and up to 10–11x for
+	// config corpus on a multi-project install post-rebuild (#1663).
+	// All in the healthy band must produce no advisory.
 	rows := []db.FTS5CorpusFragmentation{
 		{Corpus: "code", IdxRows: 4460, DataRows: 9039, Ratio: 2.03, NeedsRebuild: false},
-		{Corpus: "config", IdxRows: 200, DataRows: 480, Ratio: 2.4, NeedsRebuild: false},
+		{Corpus: "config", IdxRows: 1466, DataRows: 15293, Ratio: 10.43, NeedsRebuild: false}, // observed post-rebuild floor
 		{Corpus: "docs", IdxRows: 1192, DataRows: 1356, Ratio: 1.14, NeedsRebuild: false},
 	}
 	if got := fts5FragmentationAdvisory(rows); got != "" {

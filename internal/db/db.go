@@ -570,13 +570,21 @@ type FTS5CorpusFragmentation struct {
 }
 
 // FTS5FragmentationThreshold is the ratio above which `pincher doctor`
-// surfaces the fragmentation advisory. 10x is empirical: post-rebuild
-// pincher-repo measurements show healthy corpora at 1–3x; observed
-// fragmented corpora (config corpus on a long-running install with 27
-// projects' worth of YAML/JSON inserts) sit at 60x+. The 10x floor
-// keeps the advisory silent on normal heavy-write workloads while
-// catching real fragmentation.
-const FTS5FragmentationThreshold = 10.0
+// surfaces the fragmentation advisory. Revised in #1663 from 10x to
+// 25x after live dogfood data showed post-rebuild ratios are corpus-
+// dependent: code corpus settles at 2x post-rebuild, but config
+// corpus on a 27-project install with heavy YAML/JSON/TOML naturally
+// settles at 10–11x immediately after `rebuild_fts`. A 10x threshold
+// false-positived every time the config corpus was inspected, training
+// the user to ignore the advisory. 25x sits well above the observed
+// post-rebuild floor for the largest known healthy case (10.4x) while
+// still catching the real degradation case (62.7x observed on the
+// pre-rebuild config corpus that drove #1612 in the first place).
+//
+// If a corpus turns up that legitimately sits above 25x post-rebuild,
+// the threshold deserves another revisit — but we'd need a third
+// data point first.
+const FTS5FragmentationThreshold = 25.0
 
 // FTS5Fragmentation returns per-corpus fragmentation stats for the
 // three per-corpus FTS5 virtual tables (`symbols_code_fts`,
