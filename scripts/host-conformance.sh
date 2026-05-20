@@ -93,7 +93,21 @@ for host in "${hosts[@]}"; do
   # tools/list — both work against an empty server.
   pin_data="${work}/data"
   mkdir -p "${pin_data}"
-  "${PINCHER_BIN}" --data-dir "${pin_data}" < "${in_stream}" > "${out_stream}" 2>"${work}/stderr.log" || true
+
+  # Hold stdin open for HOSTCONF_STDIN_HOLD seconds after the last
+  # request, instead of letting `< in_stream` EOF the instant the
+  # bytes are delivered (#1706). A real MCP host keeps the stdio
+  # session open for its lifetime and never pipes-then-immediately-
+  # closes; the SDK's stdio loop, on an instant EOF, can tear the
+  # session down before the in-flight request handlers flush their
+  # responses, so the replay captured zero output. Feeding the
+  # requests then holding the pipe open mirrors a live host and
+  # gives pincher its (sub-millisecond) window to answer before the
+  # graceful EOF shutdown. The hold is generous (3s default vs. a
+  # handful of ms of real work) so it is not load-flaky in CI.
+  { cat "${in_stream}"; sleep "${HOSTCONF_STDIN_HOLD:-3}"; } \
+    | "${PINCHER_BIN}" --data-dir "${pin_data}" \
+        > "${out_stream}" 2>"${work}/stderr.log" || true
 
   if [ ! -s "${out_stream}" ]; then
     echo "::error::host '${host}': pincher produced no responses (stderr below)" >&2
