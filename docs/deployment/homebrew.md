@@ -12,7 +12,7 @@ tap once each release tag fires the auto-bump workflow.
 brew tap kwad77/pincher https://github.com/kwad77/homebrew-pincher
 brew install pincher
 pincher --version
-# pincherMCP v0.87.0
+# pincherMCP v0.88.0
 ```
 
 That's it for the binary. If you also want pincher running as a
@@ -90,7 +90,7 @@ rm -rf "$(brew --prefix)/etc/pincher"
 ## Formula details (for tap maintainers)
 
 The formula auto-bumps from a release-tag webhook — when a tag like
-`v0.87.0` is pushed to `kwad77/pincher`, a workflow opens a PR
+`v0.88.0` is pushed to `kwad77/pincher`, a workflow opens a PR
 against the tap repo updating `version`, `sha256`, and download
 URLs. Review + merge. The release notes link the auto-bump PR.
 
@@ -99,7 +99,7 @@ Manual bump (if the workflow misfires):
 ```bash
 cd packaging/homebrew
 # Edit pincher.rb — bump version, urls, and sha256 for each platform binary
-shasum -a 256 pincher-v0.87.0-darwin-arm64.tar.gz
+shasum -a 256 pincher-v0.88.0-darwin-arm64.tar.gz
 # Copy the result into the appropriate sha256 line
 ```
 
