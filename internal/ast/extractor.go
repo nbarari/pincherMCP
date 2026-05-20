@@ -2647,7 +2647,15 @@ var javaRE = &regexExtractor{
 	// generics (`Map<String,List<Int>>`) are still a residual: the
 	// `<[^>]*>` stops at the first `>`.
 	funcRE:      regexp.MustCompile(`(?m)^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:[\w.]+(?:<[^>]*>)?(?:\[\])?\s+)+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*\(`),
-	classRE:     regexp.MustCompile(`(?m)^(?:public\s+)?(?:abstract\s+)?(?:final\s+)?class\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
+	// `record` (Java 14+) is a type declaration, not a method. Without
+	// it in classRE, `record Point(int x, int y)` falls through to
+	// funcRE — funcRE reads `record` as a return-type token and emits
+	// a phantom Method named Point. classRE claiming the line
+	// suppresses that funcRE match (same mechanism C# records rely
+	// on). Records carry a component list, optional `implements`, and
+	// an optional generic clause after the name; classRE only needs
+	// the name, so it stops there.
+	classRE:     regexp.MustCompile(`(?m)^(?:public\s+)?(?:abstract\s+)?(?:final\s+)?(?:class|record)\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
 	interfaceRE: regexp.MustCompile(`(?m)^(?:public\s+)?interface\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
 	enumRE:      regexp.MustCompile(`(?m)^(?:public\s+)?enum\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
 	importRE:    regexp.MustCompile(`(?m)^import\s+(?P<path>[a-zA-Z0-9_.]+)`),
