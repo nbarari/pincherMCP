@@ -119,9 +119,35 @@ func TestShouldSkip_SourceMaps(t *testing.T) {
 	}
 }
 
+func TestShouldSkip_GeneratedArtifacts(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		// Yarn Plug'n'Play generated artifacts — skipped.
+		{".pnp.cjs", true},
+		{".pnp.js", true},
+		{".pnp.loader.mjs", true},
+		{".pnp.data.json", true},
+		{"crates/foo/js/.pnp.cjs", true}, // matches by basename in any subdir
+
+		// NOT generated PnP artifacts — real source must still index.
+		{"pnp.go", false},          // a file that merely contains "pnp"
+		{"app.cjs", false},         // ordinary CommonJS module
+		{"config.data.json", false}, // ordinary JSON, not .pnp.data.json
+		{"loader.mjs", false},       // ordinary ESM module
+	}
+	for _, c := range cases {
+		got, reason := ShouldSkip(c.path)
+		if got != c.want {
+			t.Errorf("ShouldSkip(%q) = (%v, %q), want %v", c.path, got, reason, c.want)
+		}
+	}
+}
+
 func TestShouldSkip_ReasonsAreNonEmpty(t *testing.T) {
 	// Sample one of each category, confirm reason text exists.
-	for _, path := range []string{"package-lock.json", "Cargo.lock", "app.min.js", "bundle.js.map"} {
+	for _, path := range []string{"package-lock.json", "Cargo.lock", "app.min.js", "bundle.js.map", ".pnp.cjs"} {
 		skip, reason := ShouldSkip(path)
 		if !skip || reason == "" {
 			t.Errorf("ShouldSkip(%q): expected (true, non-empty), got (%v, %q)", path, skip, reason)
