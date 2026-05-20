@@ -191,6 +191,33 @@ jobs:
           go test ./internal/index/ -run=^$ -bench=. -benchtime=100ms -benchmem
           go test ./internal/server/ -run=^$ -bench=. -benchtime=100ms -benchmem
 
+  # race surfaces data races in the concurrent paths — the indexer's
+  # per-file goroutines, the reader pool, the session flusher, the
+  # watcher, the schema-drift watcher. The shipped binary builds
+  # CGO_ENABLED=0 (pure-Go, modernc sqlite); the race detector requires
+  # cgo, so this job alone flips CGO_ENABLED=1 — it changes only the
+  # test build here, never a shipped artifact. ubuntu runners ship gcc.
+  # Advisory until a green streak justifies promotion to required (per
+  # the bench-gate-promotion discipline: capture the variance dataset
+  # before gating). Scoped to ./internal/... — that is where the
+  # concurrency lives; cmd/ is CLI glue + slow corpus-snapshot tests.
+  race:
+    name: Race detector (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race ./internal/...
+        env:
+          CGO_ENABLED: 1
+        run: go test -race ./internal/... -timeout 900s
+
   # bench-regression removed in v0.55 (#681 Bucket B). The job ran with
   # continue-on-error: true and failed on most PRs (variance on shared
   # runners). Always-red advisory check polluted the per-PR check view
