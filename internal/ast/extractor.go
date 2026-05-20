@@ -3547,8 +3547,16 @@ var scalaRE = &regexExtractor{
 	// inside class/object/trait scope land via the existing pipeline's
 	// classRE-tracked currentClass when funcRE matches.
 	funcRE:      regexp.MustCompile(`(?m)^\s*(?:private(?:\[\w+\])?\s+|protected\s+|override\s+|final\s+|abstract\s+|implicit\s+|sealed\s+)*def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)`),
-	classRE:     regexp.MustCompile(`(?m)^\s*(?:sealed\s+)?(?:abstract\s+)?(?:final\s+)?(?:case\s+)?(?:class|object|trait)\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
-	interfaceRE: regexp.MustCompile(`(?m)^\s*trait\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
+	// `trait` belongs to interfaceRE ONLY — listing it in classRE too
+	// made `trait Store` match both, emitting one Store#Class AND one
+	// Store#Interface (conflicting-kind duplicate). classRE owns
+	// class/object; interfaceRE owns trait — and must accept the same
+	// modifier prefix classRE does, or `sealed trait Result` would
+	// match neither and the symbol would vanish. interfaceRE sets the
+	// scope tracker (#819), so trait-scoped methods still parent
+	// correctly without trait in classRE.
+	classRE:     regexp.MustCompile(`(?m)^\s*(?:sealed\s+)?(?:abstract\s+)?(?:final\s+)?(?:case\s+)?(?:class|object)\s+(?P<name>[A-Z][A-Za-z0-9_]*)(?:\s+extends\s+(?P<parent>[A-Z][A-Za-z0-9_]*))?`),
+	interfaceRE: regexp.MustCompile(`(?m)^\s*(?:sealed\s+)?(?:abstract\s+)?(?:final\s+)?trait\s+(?P<name>[A-Z][A-Za-z0-9_]*)`),
 }
 
 func extractScala(source []byte, relPath string) *FileResult {
