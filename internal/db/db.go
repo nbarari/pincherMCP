@@ -3463,7 +3463,16 @@ func (s *Store) GetDeadCode(projectID string, kinds []string, language string, m
 		          WHERE im.project_id = s.project_id
 		            AND im.method_name = s.name
 		      )
-		  )`
+		  )
+		  -- Go init functions are invoked by the runtime at package
+		  -- initialization, never by an explicit call -- they carry zero
+		  -- inbound CALLS edges by language design. Without this carve-out
+		  -- dead_code (and audit_unused, which builds on it) reports every
+		  -- init function as a high-confidence safe-to-delete candidate;
+		  -- acting on that breaks package initialization (these register
+		  -- extractors, drivers, flag sets). Mirrors the
+		  -- qualified_name_collision init carve-out (#1696, #1389 sweep).
+		  AND NOT (s.language = 'Go' AND s.name = 'init')`
 	args := []any{projectID, minConfidence}
 	for _, k := range kinds {
 		args = append(args, k)
