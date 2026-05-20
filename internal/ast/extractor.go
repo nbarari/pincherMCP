@@ -2833,6 +2833,16 @@ func extractC(source []byte, relPath string) *FileResult {
 	result := cRE.extract(source, relPath, "C", cOpts)
 	rewriteCMacroSymbols(result, source, relPath)
 	result.Symbols = dropCForwardDecls(result.Symbols, source)
+	// #1693 v0.89: drop Class symbols that are actually struct
+	// forward-declarations or struct-typed uses, not definitions.
+	// `classRE` (`^\s*(?:class|struct|union)\s+NAME`) matches the
+	// column-0 continuation line of a multi-line C prototype —
+	// `int connect(int s,\nstruct sockaddr *addr,\n...)` — where the
+	// `struct sockaddr *addr,` line begins with `struct sockaddr`.
+	// Every such line emits a phantom `sockaddr` Class; system
+	// headers hit it 5-6× per file and `pincher doctor` reports
+	// qualified_name_collision (the #1389 sweep's C struct class).
+	result.Symbols = dropCTypeUseClasses(result.Symbols, source)
 	// #1148: drop symbols whose name is a C reserved keyword. The
 	// `(?:\w+\s+)+name\s*\(` regex shape occasionally captures inside
 	// expressions like `size_t n = sizeof(struct foo)` — `sizeof` lifts
@@ -3016,6 +3026,73 @@ func cIsForwardDecl(source []byte, off int) bool {
 		}
 	}
 	return false // EOF inside parens — treat as definition (don't drop)
+}
+
+// dropCTypeUseClasses removes C/C++ Class symbols whose source line
+// is a struct forward-declaration (`struct sockaddr;`) or a struct-
+// typed USE (`struct sockaddr *addr,` — a continuation line of a
+// multi-line prototype, or a field/variable declaration) rather than
+// a real struct/class/union DEFINITION (#1693).
+//
+// Discriminator: scan past the keyword + the type name (a run of
+// identifier chars, whitespace, and comments — this also skips an
+// export macro like `class PYRITE_API Foo`), then inspect the first
+// decisive punctuation char:
+//   - `;` `*` `&` `,` `)` `[` `=`  → forward-decl or type-use → DROP
+//   - `{` `:` `(` or anything else → definition (or ambiguous, e.g.
+//     `struct alignas(16) Foo {`) → KEEP
+// Errs toward KEEP — a real definition wrongly dropped is symbol
+// loss; a type-use wrongly kept is just a recoverable collision.
+func dropCTypeUseClasses(syms []ExtractedSymbol, source []byte) []ExtractedSymbol {
+	out := syms[:0]
+	for _, s := range syms {
+		if s.Kind == "Class" && cClassIsTypeUse(source, s.StartByte) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// cClassIsTypeUse reports whether the C/C++ class/struct/union
+// declaration starting at `off` is a forward-decl or a type-use
+// rather than a definition. See dropCTypeUseClasses for the rule.
+func cClassIsTypeUse(source []byte, off int) bool {
+	if off < 0 || off >= len(source) {
+		return false
+	}
+	i := off
+	// Skip the keyword + type name: a run of identifier chars,
+	// whitespace, and comments. The first char outside that run is
+	// decisive.
+	for i < len(source) {
+		c := source[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_':
+			i++
+		case c == '/' && i+1 < len(source) && source[i+1] == '/':
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(source) && source[i+1] == '*':
+			i += 2
+			for i+1 < len(source) && !(source[i] == '*' && source[i+1] == '/') {
+				i++
+			}
+			i += 2
+		default:
+			// Decisive char.
+			switch c {
+			case ';', '*', '&', ',', ')', '[', '=':
+				return true // forward-decl or type-use
+			default:
+				return false // `{` / `:` / `(` / other → keep
+			}
+		}
+	}
+	return false // EOF inside the run — err toward keep
 }
 
 // cNextSignificantByteIs returns true if the next non-whitespace,
