@@ -2306,6 +2306,63 @@ func qnLastSegmentIsInit(qn string) bool {
 	return qn == "init"
 }
 
+// overloadCapableLanguages permit multiple methods with the same name
+// but different signatures in one scope. pincher's qualified name is
+// `Class.Method` with no arity/signature component, so every overload
+// set collides on QN — a legitimate language shape, not the
+// regex-scope-blindness the qualified_name_collision diagnostic was
+// built to surface (#1693, #1389 sweep).
+var overloadCapableLanguages = map[string]struct{}{
+	"C#": {}, "Java": {}, "C++": {}, "Swift": {}, "Kotlin": {},
+}
+
+// collisionIsLegitimateOverload reports whether every symbol sharing
+// the colliding base QN is a Function/Method occupying a distinct,
+// non-overlapping byte range — the signature of a real overload set.
+// If a non-method shares the QN, or two symbols overlap (or start at
+// the same byte), the collision is a genuine extractor bug and is
+// still flagged. disambiguateDuplicates suffixes duplicates `~<line>`,
+// so the on-symbol QN may carry that suffix; it is stripped to match
+// the pre-disambiguation base QN that QNCollisions is keyed on.
+func collisionIsLegitimateOverload(qn string, result *ast.FileResult) bool {
+	ranges := make([][2]int, 0, 4)
+	for _, s := range result.Symbols {
+		base := s.QualifiedName
+		if i := strings.LastIndexByte(base, '~'); i >= 0 && allASCIIDigits(base[i+1:]) {
+			base = base[:i]
+		}
+		if base != qn {
+			continue
+		}
+		if s.Kind != "Function" && s.Kind != "Method" {
+			return false
+		}
+		ranges = append(ranges, [2]int{s.StartByte, s.EndByte})
+	}
+	if len(ranges) < 2 {
+		return false
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i][0] <= ranges[i-1][0] || ranges[i][0] < ranges[i-1][1] {
+			return false
+		}
+	}
+	return true
+}
+
+func allASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // #42 part 1 — diagnostic surface.
 func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, result *ast.FileResult) {
 	// #1319 v0.71: track which reasons this pass actually re-records, so
@@ -2385,6 +2442,17 @@ func recordExtractionHeuristics(idx *Indexer, projectID, lang, relPath string, r
 			// cross-language sweep: every Go file with 2+ init()s
 			// was firing a false qualified_name_collision.
 			if lang == "Go" && qnLastSegmentIsInit(qn) {
+				continue
+			}
+			// #1693 v0.89 (#1389 sweep): skip a collision that is a
+			// legitimate method-overload set in an overload-capable
+			// language. pincher's QN has no arity component, so every
+			// C#/Java/C++/Swift/Kotlin overload collides — a language
+			// shape, not the regex-scope-blindness this diagnostic
+			// surfaces. Narrow: only when every colliding symbol is a
+			// Method/Function at a distinct, non-overlapping range
+			// (true extractor duplication still flags).
+			if _, ok := overloadCapableLanguages[lang]; ok && collisionIsLegitimateOverload(qn, result) {
 				continue
 			}
 			if n > worstCount {
