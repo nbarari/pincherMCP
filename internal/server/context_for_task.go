@@ -302,6 +302,26 @@ func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequ
 		}
 	}
 
+	// Bound the caller/callee unions for transport. A hotspot seed —
+	// a top most-called symbol — at trace_depth 2-3 produces hundreds
+	// of unique hops; the uncapped envelope blew past the MCP token
+	// limit (#1729, same class as #1727/#1723). neighbors is already
+	// capped at maxNeighbors below; callers/callees get the same
+	// fixed cap. Iteration is seed-rank order, so head truncation
+	// keeps the highest-ranked seeds' hops.
+	const maxHops = 50
+	callersTotal := len(callers)
+	calleesTotal := len(callees)
+	ctxTruncated := false
+	if len(callers) > maxHops {
+		callers = callers[:maxHops]
+		ctxTruncated = true
+	}
+	if len(callees) > maxHops {
+		callees = callees[:maxHops]
+		ctxTruncated = true
+	}
+
 	// ── Step 3: neighbors — same-file siblings of each seed ────────────
 	// One per-seed neighborhood lookup. De-duped across seeds by symbol
 	// id. Caps at the first 50 to keep the composite payload bounded;
@@ -397,6 +417,12 @@ func (s *Server) handleContextForTask(ctx context.Context, req *mcp.CallToolRequ
 		"neighbors":      neighbors,
 		"callers":        callers,
 		"callees":        callees,
+		// *_total are the full pre-truncation union sizes; truncated
+		// flags that callers/callees were capped at maxHops for
+		// transport (the totals survive, the lists do not).
+		"callers_total":  callersTotal,
+		"callees_total":  calleesTotal,
+		"truncated":      ctxTruncated,
 		"recent_changes": recentChanges,
 	}
 	// Note: jsonResultWithMeta stamps the standard envelope. The composite

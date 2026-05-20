@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,6 +323,51 @@ func TestContextForTask_IncludesSameFileNeighbors(t *testing.T) {
 		if !neighborNames[want] {
 			t.Errorf("expected neighbor %q in composite; got %v", want, neighborNames)
 		}
+	}
+}
+
+// TestContextForTask_CapsHopUnions — a hotspot seed at trace_depth
+// 2-3 produces hundreds of unique caller/callee hops; the uncapped
+// envelope blew past the MCP token limit (#1729, same class as
+// #1727/#1723). callers/callees are now capped; callers_total /
+// callees_total keep the true union sizes and truncated flags it.
+func TestContextForTask_CapsHopUnions(t *testing.T) {
+	t.Parallel()
+	srv, store, root := newTestServer(t)
+	srv.sessionRoot = root
+
+	const callerCount = 60
+	var b strings.Builder
+	b.WriteString("package hot\n\nfunc Hot() int { return 1 }\n\n")
+	for i := 0; i < callerCount; i++ {
+		fmt.Fprintf(&b, "func Caller%d() int { return Hot() }\n", i)
+	}
+	writeGoFile(t, root, "hot.go", b.String())
+	idx := index.New(store)
+	res, err := idx.Index(context.Background(), root, false)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	srv.sessionID = res.ProjectID
+
+	out, err := srv.handleContextForTask(context.Background(), makeReq(map[string]any{
+		"seed_id": "hot.go::hot.Hot#Function",
+		"project": res.ProjectID,
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	body := decode(t, out)
+	callers, _ := body["callers"].([]any)
+	if len(callers) > 50 {
+		t.Errorf("callers list rendered %d rows; must be capped at 50", len(callers))
+	}
+	if total, _ := body["callers_total"].(float64); int(total) < callerCount {
+		t.Errorf("callers_total = %v; expected the true union size ≥ %d "+
+			"(the total must survive truncation)", total, callerCount)
+	}
+	if tr, _ := body["truncated"].(bool); !tr {
+		t.Error("truncated = false; expected true when the callers union exceeds the cap")
 	}
 }
 
