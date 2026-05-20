@@ -32,10 +32,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install jq
+      - name: Install jq + universal-ctags
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq universal-ctags
 
       - name: Build pincher
         run: go build -trimpath -ldflags="-s -w" -o ./pincher ./cmd/pinch/
